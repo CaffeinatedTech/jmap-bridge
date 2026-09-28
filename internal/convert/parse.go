@@ -137,3 +137,39 @@ func flatPreview(text string) string {
 func isSoft(err error) bool {
 	return message.IsUnknownCharset(err) || message.IsUnknownEncoding(err)
 }
+
+// PreviewFromPartial extracts preview text from a partial message
+// fetch (BODY.PEEK[]<0.n>): the header block is dropped, multipart
+// preambles yield nothing (their first bytes are boundary markers, not
+// prose), and the rest is flattened like any other preview (PLAN §5).
+func PreviewFromPartial(raw []byte) string {
+	i := indexHeaderEnd(raw)
+	if i < 0 {
+		return "" // headers only (or no terminator): nothing to show
+	}
+	trimmed := trimLeadingSpace(raw[i:])
+	if len(trimmed) >= 2 && trimmed[0] == '-' && trimmed[1] == '-' {
+		return "" // multipart preamble/boundary — partial fetch cannot see prose
+	}
+	if bytes.IndexByte(trimmed, 0) >= 0 {
+		return "" // binary payload: leave it to hydration
+	}
+	return flatPreview(string(trimmed))
+}
+
+func indexHeaderEnd(raw []byte) int {
+	if i := bytes.Index(raw, []byte("\r\n\r\n")); i >= 0 {
+		return i + 4
+	}
+	if i := bytes.Index(raw, []byte("\n\n")); i >= 0 {
+		return i + 2
+	}
+	return -1
+}
+
+func trimLeadingSpace(b []byte) []byte {
+	for len(b) > 0 && (b[0] == ' ' || b[0] == '\t' || b[0] == '\r' || b[0] == '\n') {
+		b = b[1:]
+	}
+	return b
+}
