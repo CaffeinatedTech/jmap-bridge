@@ -460,6 +460,7 @@ begins. FR references point at `REQUIREMENTS.md`.
 | Lazy bodies vs. freetext search expectations | "search misses mail" | backfill is on by default, progress is visible via SSE, `search.backfill=false` documented as a trade |
 | SQLite hot rows (large mailbox counts) | slow list queries | narrow `emails` table + `email_mailbox` covering index (schema §4); count fields maintained incrementally |
 | Scope creep toward calendars/sharing | v0.1 slips | REQUIREMENTS out-of-scope list; roadmap (§15) is where those requests land |
+| FR-D.1 image never actually built: the dev machine has no docker-daemon access (sudo needs a password) | container problems surface late, at M7 | native binary is the documented dev/test path (AGENTS.md); `docker build` + the README `docker run` are verified on a docker-capable host before M7 sign-off |
 
 ---
 

@@ -76,6 +76,12 @@ There is **no CI** (D-10): these gates are local and manual, and they are the
 release bar. Live integration tests run against real providers via
 `JMAP_BRIDGE_TEST_*` env creds, agent-run only; they skip when the env is unset.
 
+**Docker is not a gate.** The dev machine has no docker-daemon access (sudo
+needs a password), so development and testing always run the native binary
+(`go run ./cmd/jmap-bridge --config ./dev/config.toml`). The FR-D.1 image is
+verified on demand on a docker-capable host — mandatory before M7 sign-off,
+never assumed done.
+
 ## Testing rules
 
 - Protocol/sync behaviour ships with tests against an in-process fixture server
@@ -87,6 +93,30 @@ release bar. Live integration tests run against real providers via
   vCard → JSContact fixtures, including malformed/degenerate inputs.
 - Live tests read creds from `JMAP_BRIDGE_TEST_*` (IMAP/SMTP/CardDAV/OAuth).
   **Unset env ⇒ tests skip. Never hardcode, never commit, never echo.**
+
+## Cross-client gate (jmap-tui)
+
+Run the bridge natively and point jmap-tui's suite at it — this is how every
+PLAN §12 gate is demonstrated, no Docker involved:
+
+```sh
+# jmap-bridge repo: fixture account on loopback
+go build -o /tmp/jmap-bridge ./cmd/jmap-bridge
+/tmp/jmap-bridge --config ./dev/config.toml &
+
+# jmap-tui repo: the M0 gate test (later milestones: TestLiveN… suites)
+JMAP_TUI_TEST_URL=http://127.0.0.1:8080/personal \
+JMAP_TUI_TEST_USER=any \
+JMAP_TUI_TEST_PASSWORD=<token from dev/config.toml> \
+  go test ./internal/jmapclient/ -run TestLiveSessionAndMailboxes -v
+
+go run ./cmd/jmap-tui smoke --config /tmp/no-such-config.toml \
+  --url http://127.0.0.1:8080/personal --user any \
+  --password-file <chmod-600 file containing the token>
+```
+
+The dev token lives in `dev/config.toml` (loopback throwaway only): read it
+from there, never echo it into logs or commits. Unset env ⇒ tests skip.
 
 ## Live provider rules of engagement
 
@@ -116,6 +146,8 @@ When testing against a real mailbox the user provides:
   Never import its code; its `test/mockjmap` wire quirks are *requirements*
   (PLAN §2.1) and may be copied as fixtures with attribution.
 - Its live suite pointed at this bridge is our best integration signal.
+- **Never commit to jmap-tui** from this repo's work: patches found while
+  gating (e.g. client-side bugs) stay uncommitted until the user decides.
 
 ## When you're unsure
 
