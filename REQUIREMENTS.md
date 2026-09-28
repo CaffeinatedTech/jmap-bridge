@@ -430,7 +430,8 @@ requirements are `NFR-<n>`.
 | FR-J.9–.10, FR-D.2–.12, NFR-3–.7, NFR-9–.10 | M7 | documented install works; conformance suite green |
 
 *(If PLAN.md's traceability column ever disagrees with this table, this table
-wins.)*
+wins. This table maps requirements to milestones only — completion state is
+recorded nowhere but PLAN §12's Status column.)*
 
 ## 11. Open requirements
 

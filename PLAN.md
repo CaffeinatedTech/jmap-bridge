@@ -431,16 +431,25 @@ codes; commit `.env*` or secrets; echo test credentials.
 Each milestone ends with a hard gate that must be demonstrated before the next
 begins. FR references point at `REQUIREMENTS.md`.
 
-| # | Deliverable | Gate | FRs |
-|---|---|---|---|
-| **M0** | Repo skeleton, TOML config + validation, HTTP session + `POST /jmap` dispatch (derived from jmap-tui's `test/mockjmap`), fixture store, Dockerfile, gates green | jmap-tui connects to `http://127.0.0.1:PORT/{account}` and browses fixture mail | FR-J.1–.6, FR-A.1–.4 (A.4 config-level; live login lands M1/M3), FR-A.11–.12, FR-D.1 |
-| **M1** | SQLite store (schema §4), read-only IMAP sync (discovery, tier detection, backfill, IDLE), hydration, `/changes` + SSE, preview | real Dovecot account browsable read-only; a flag flipped in another IMAP client appears in jmap-tui ≤ 2 s | FR-S.1–.9, FR-M.1–.8, FR-J.7–.8 |
-| **M2** | Write path §7.1, `Mailbox/set`, drafts, IMAP-first commits | jmap-tui triage (star/archive/move/delete/undo) round-trips; changes visible from a second IMAP client | FR-M.9–.13 |
-| **M3** | Send §7.2, `Identity/get`, blob upload/download, `EmailSubmission/set` with `onSuccessUpdateEmail` | compose → send → message in Sent **and** delivered to a test sink; attachment round-trip byte-exact | FR-M.14–.17 |
-| **M4** | Gmail profile: OAuth2 bootstrap, XOAUTH2 IMAP/SMTP, `X-GM-LABELS`↔mailboxes, All Mail/archive, `X-GM-THRID`, CONDSTORE tier validation, rate limits | live Gmail: folders+labels both ways, compose/send, archive from jmap-tui, no rate-limit warnings | FR-A.5–.10, FR-S.10, FR-S.12, FR-M.18 |
-| **M5** | FTS5 + search-driven backfill, filter/sort/anchor/collapseThreads correctness, `PREVIEW`/partial-fetch, COMPRESS, 100k soak | jmap-tui live search cases green; cold browse of a 100k mailbox stays responsive; soak within NFR bounds | FR-X.1–.8, FR-S.11, NFR-1, NFR-2, NFR-8 |
-| **M6** | CardDAV §8: discovery, sync-collection, PUT/DELETE, vCard↔JSContact, photo blobs, capability gating | jmap-tui `contacts_live_test` suite green against a real CardDAV server; create/edit/delete contact round-trips | FR-P.1–.13 |
-| **M7** | Packaging: multi-account paths, credential encryption, metrics/health, UIDVALIDITY recovery drill, Docker image + k8s manifests, README deployment verified, `JMAP-TestSuite` run | fresh `docker run` + `kubectl` install works end-to-end from the docs; conformance suite passing; all gates green | FR-J.9–.10, FR-D.2–.12, NFR-3–.7, NFR-9–.10 |
+**Status is written here and nowhere else** (REQUIREMENTS §10 maps FRs →
+milestones but deliberately carries no completion state). Rules:
+
+- `pending` → `landed` when the deliverable's code and docs merge.
+- `landed` → `✅ done` **only** when the gate column has actually been
+  demonstrated, recorded as `✅ done YYYY-MM-DD (<how>)`. Never mark done on
+  the strength of code that looks right.
+- Status changes land in the same commit as the gate demonstration (AGENTS.md).
+
+| # | Deliverable | Gate | FRs | Status |
+|---|---|---|---|---|
+| **M0** | Repo skeleton, TOML config + validation, HTTP session + `POST /jmap` dispatch (derived from jmap-tui's `test/mockjmap`), fixture store, Dockerfile, gates green | jmap-tui connects to `http://127.0.0.1:PORT/{account}` and browses fixture mail | FR-J.1–.6, FR-A.1–.4 (A.4 config-level; live login lands M1/M3), FR-A.11–.12, FR-D.1 | ✅ done 2026-09-29 (jmap-tui live suite over loopback) |
+| **M1** | SQLite store (schema §4), read-only IMAP sync (discovery, tier detection, backfill, IDLE), hydration, `/changes` + SSE, preview | real Dovecot account browsable read-only; a flag flipped in another IMAP client appears in jmap-tui ≤ 2 s | FR-S.1–.9, FR-M.1–.8, FR-J.7–.8 | pending |
+| **M2** | Write path §7.1, `Mailbox/set`, drafts, IMAP-first commits | jmap-tui triage (star/archive/move/delete/undo) round-trips; changes visible from a second IMAP client | FR-M.9–.13 | pending |
+| **M3** | Send §7.2, `Identity/get`, blob upload/download, `EmailSubmission/set` with `onSuccessUpdateEmail` | compose → send → message in Sent **and** delivered to a test sink; attachment round-trip byte-exact | FR-M.14–.17 | pending |
+| **M4** | Gmail profile: OAuth2 bootstrap, XOAUTH2 IMAP/SMTP, `X-GM-LABELS`↔mailboxes, All Mail/archive, `X-GM-THRID`, CONDSTORE tier validation, rate limits | live Gmail: folders+labels both ways, compose/send, archive from jmap-tui, no rate-limit warnings | FR-A.5–.10, FR-S.10, FR-S.12, FR-M.18 | pending |
+| **M5** | FTS5 + search-driven backfill, filter/sort/anchor/collapseThreads correctness, `PREVIEW`/partial-fetch, COMPRESS, 100k soak | jmap-tui live search cases green; cold browse of a 100k mailbox stays responsive; soak within NFR bounds | FR-X.1–.8, FR-S.11, NFR-1, NFR-2, NFR-8 | pending |
+| **M6** | CardDAV §8: discovery, sync-collection, PUT/DELETE, vCard↔JSContact, photo blobs, capability gating | jmap-tui `contacts_live_test` suite green against a real CardDAV server; create/edit/delete contact round-trips | FR-P.1–.13 | pending |
+| **M7** | Packaging: multi-account paths, credential encryption, metrics/health, UIDVALIDITY recovery drill, Docker image + k8s manifests, README deployment verified, `JMAP-TestSuite` run | fresh `docker run` + `kubectl` install works end-to-end from the docs; conformance suite passing; all gates green | FR-J.9–.10, FR-D.2–.12, NFR-3–.7, NFR-9–.10 | pending |
 
 **Verification assets**: jmap-tui's live integration suite pointed at the bridge
 (`JMAP_BRIDGE_TEST_*`); its `mockjmap`-derived fixtures seeded M0; Fastmail's

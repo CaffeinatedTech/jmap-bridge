@@ -42,6 +42,13 @@ disagree, flag it and fix the docs or the code — don't let them drift.
 7. **No scope drift.** Features not in REQUIREMENTS.md need a REQUIREMENTS edit
    in the same commit. Milestone order per PLAN §12; don't start M(n+1) work
    inside an M(n) change.
+8. **Milestone status is earned, and lives in exactly one place.** PLAN §12's
+   Status column is the only record of progress — not git history, not code
+   comments, not REQUIREMENTS. `pending → landed` on merge; `landed → ✅ done`
+   only when the gate in that row has actually been demonstrated, recorded as
+   `✅ done YYYY-MM-DD (<how>)` **in the same commit** as the demonstration.
+   Code that looks right is not a passed gate; a gate you cannot describe how
+   you demonstrated is not passed.
 
 ## Stack & conventions
 
@@ -133,8 +140,11 @@ When testing against a real mailbox the user provides:
 
 ## Repo chores expected of every agent
 
-- Update PLAN.md milestone table and risk register when you land or verify a tier,
-  capability, or provider.
+- Update the PLAN.md milestone **Status column** whenever work lands or a gate
+  is demonstrated — same commit, never batched, never left for "later" (golden
+  rule 8). Update the risk register when you land or verify a tier,
+  capability, or provider. Before M(n+1) starts, confirm M(n) reads `✅ done`
+  with a date; if it reads `landed`, the gate is still owed.
 - REQUIREMENTS.md changes accompany scope changes (same commit).
 - Conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`), ≤ 50-char subject.
 - Don't commit: `.env*`, `data/`, `*.db*`, blobs, binaries, or credentials.
