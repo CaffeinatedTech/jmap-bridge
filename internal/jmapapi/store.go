@@ -37,10 +37,12 @@ type Mailbox struct {
 	MayDelete      bool
 }
 
-// Address is an RFC 5322 mailbox as JMAP models it.
+// Address is an RFC 5322 mailbox as JMAP models it. The tags are the
+// JMAP wire spelling, so the store's canonical headers JSON and the API
+// response agree (convert writes them, emailObject echoes them).
 type Address struct {
-	Name  string
-	Email string
+	Name  string `json:"name"`
+	Email string `json:"email"`
 }
 
 // Email is the store-level view of a JMAP Email (FR-M.4). Summary

@@ -1,0 +1,13 @@
+From: broken@example.test
+Subject: Broken MIME
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="never-closed"
+
+--never-closed
+Content-Type: text/plain
+
+First part exists.
+--never-closed
+Content-Type: text/plain
+
+Second part, boundary never terminated.

@@ -1,0 +1,8 @@
+{
+  "values": {
+    "1": "First part exists.",
+    "2": "Second part, boundary never terminated."
+  },
+  "preview": "First part exists.",
+  "softError": "unexpected EOF"
+}

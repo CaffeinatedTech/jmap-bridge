@@ -1,0 +1,17 @@
+From: bob@example.test
+To: me@example.test
+Subject: =?utf-8?B?SGVsbG8g4piF?=
+Date: Tue, 01 Sep 2026 11:30:00 +0000
+Message-ID: <alt-1@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt-boundary"
+
+--alt-boundary
+Content-Type: text/plain; charset=utf-8
+
+Plain version: Héllo wörld.
+--alt-boundary
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>HTML version</p></body></html>
+--alt-boundary--

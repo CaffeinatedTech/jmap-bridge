@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
@@ -200,8 +201,10 @@ type bodyPart struct {
 }
 
 // analyzeStructure derives the textBody/htmlBody selections and the
-// attachment list from a stored EmailBodyPart tree. Parts under an
-// attachment disposition are files, not body (RFC 8621 §4.1.3).
+// attachment list from a stored EmailBodyPart tree, using the same
+// classification convert does (attachments are parts that are not body
+// representations; RFC 8621 §4.1.3) so Email/get and the backfill
+// summary can never disagree about hasAttachment.
 func analyzeStructure(raw json.RawMessage) (textParts, htmlParts []string, attachments []jmapapi.Attachment) {
 	var root bodyPart
 	if err := json.Unmarshal(raw, &root); err != nil {
@@ -209,7 +212,15 @@ func analyzeStructure(raw json.RawMessage) (textParts, htmlParts []string, attac
 	}
 	var walk func(p bodyPart)
 	walk = func(p bodyPart) {
-		if p.Disposition == "attachment" {
+		media := strings.ToLower(p.Type)
+		if strings.HasPrefix(media, "multipart/") || len(p.SubParts) > 0 && media == "" {
+			for _, s := range p.subParts() {
+				walk(s)
+			}
+			return
+		}
+		if strings.EqualFold(p.Disposition, "attachment") ||
+			(media != "text/plain" && media != "text/html" && !strings.HasPrefix(media, "multipart/")) {
 			attachments = append(attachments, jmapapi.Attachment{
 				PartID:      p.PartID,
 				BlobID:      p.BlobID,
@@ -220,25 +231,28 @@ func analyzeStructure(raw json.RawMessage) (textParts, htmlParts []string, attac
 			})
 			return
 		}
-		switch p.Type {
-		case "text/plain":
-			if p.PartID != "" {
-				textParts = append(textParts, p.PartID)
-			}
-		case "text/html":
-			if p.PartID != "" {
-				htmlParts = append(htmlParts, p.PartID)
-			}
+		if p.PartID == "" {
+			return
 		}
-		if len(p.SubParts) > 0 {
-			var subs []bodyPart
-			if err := json.Unmarshal(p.SubParts, &subs); err == nil {
-				for _, s := range subs {
-					walk(s)
-				}
-			}
+		switch media {
+		case "text/plain":
+			textParts = append(textParts, p.PartID)
+		case "text/html":
+			htmlParts = append(htmlParts, p.PartID)
 		}
 	}
 	walk(root)
 	return textParts, htmlParts, attachments
+}
+
+// subParts decodes the child list of a container part.
+func (p bodyPart) subParts() []bodyPart {
+	if len(p.SubParts) == 0 {
+		return nil
+	}
+	var subs []bodyPart
+	if err := json.Unmarshal(p.SubParts, &subs); err != nil {
+		return nil
+	}
+	return subs
 }

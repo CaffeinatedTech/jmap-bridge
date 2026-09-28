@@ -1,0 +1,25 @@
+From: Forwarder <fwd@example.test>
+To: me@example.test
+Subject: Fwd: Original
+Date: Tue, 01 Sep 2026 14:00:00 +0000
+Message-ID: <emb-1@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="emb-b"
+
+--emb-b
+Content-Type: text/plain; charset=utf-8
+
+See forwarded message.
+--emb-b
+Content-Type: message/rfc822
+Content-Disposition: attachment
+
+From: Original <orig@example.test>
+To: f wd@example.test
+Subject: Original
+Date: Tue, 01 Sep 2026 09:00:00 +0000
+Message-ID: <orig-1@example.test>
+Content-Type: text/plain; charset=utf-8
+
+The original body.
+--emb-b--

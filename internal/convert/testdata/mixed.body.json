@@ -1,0 +1,15 @@
+{
+  "values": {
+    "1.1": "Total: 42 EUR",
+    "1.2": "\u003cp\u003eTotal: \u003cb\u003e42\u003c/b\u003e EUR\u003c/p\u003e"
+  },
+  "attachments": [
+    {
+      "partId": "2",
+      "mediaType": "application/pdf",
+      "name": "inv.pdf",
+      "data": "JVBERi0xLjQK"
+    }
+  ],
+  "preview": "Total: 42 EUR"
+}

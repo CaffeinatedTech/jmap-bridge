@@ -1,0 +1,11 @@
+From: Alice Example <alice@example.test>
+To: Me <me@example.test>
+Subject: Hello plain
+Date: Tue, 01 Sep 2026 10:00:00 +0000
+Message-ID: <simple-1@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Just a plain message with a body.
+Second line of it.

@@ -1,0 +1,28 @@
+From: Billing <billing@example.test>
+To: me@example.test
+Subject: Invoice
+Date: Tue, 01 Sep 2026 12:00:00 +0000
+Message-ID: <mix-1@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix-b"
+
+--mix-b
+Content-Type: multipart/alternative; boundary="alt-b"
+
+--alt-b
+Content-Type: text/plain; charset=utf-8
+
+Total: 42 EUR
+--alt-b
+Content-Type: text/html; charset=utf-8
+
+<p>Total: <b>42</b> EUR</p>
+--alt-b--
+
+--mix-b
+Content-Type: application/pdf; name="inv.pdf"
+Content-Disposition: attachment; filename="inv.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQK
+--mix-b--

@@ -1,0 +1,7 @@
+From: no@example.test
+To: me@example.test
+Subject: No message id
+Date: not-a-date
+Content-Type: text/plain
+
+Body without threading headers.

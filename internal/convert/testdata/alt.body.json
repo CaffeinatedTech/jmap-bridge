@@ -1,0 +1,7 @@
+{
+  "values": {
+    "1": "Plain version: Héllo wörld.",
+    "2": "\u003chtml\u003e\u003cbody\u003e\u003cp\u003eHTML version\u003c/p\u003e\u003c/body\u003e\u003c/html\u003e"
+  },
+  "preview": "Plain version: Héllo wörld."
+}

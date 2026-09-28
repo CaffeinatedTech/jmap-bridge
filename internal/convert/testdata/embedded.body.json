@@ -1,0 +1,13 @@
+{
+  "values": {
+    "1": "See forwarded message."
+  },
+  "attachments": [
+    {
+      "partId": "2",
+      "mediaType": "message/rfc822",
+      "data": "RnJvbTogT3JpZ2luYWwgPG9yaWdAZXhhbXBsZS50ZXN0PgpUbzogZiB3ZEBleGFtcGxlLnRlc3QKU3ViamVjdDogT3JpZ2luYWwKRGF0ZTogVHVlLCAwMSBTZXAgMjAyNiAwOTowMDowMCArMDAwMApNZXNzYWdlLUlEOiA8b3JpZy0xQGV4YW1wbGUudGVzdD4KQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PXV0Zi04CgpUaGUgb3JpZ2luYWwgYm9keS4="
+    }
+  ],
+  "preview": "See forwarded message."
+}
