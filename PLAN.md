@@ -21,7 +21,7 @@ Config: TOML · Packaging: Docker/Kubernetes · CI: none (local gates, `AGENTS.m
 | D-4 | Target is *any* IMAP server: Gmail (headline), cPanel, Dovecot, Namecheap Private Email → runtime capability detection, no server hard-coded | 2026-09-28 |
 | D-5 | **Gmail auth is OAuth2-only** (XOAUTH2); app passwords deliberately unsupported | 2026-09-28 |
 | D-6 | Freetext search over non-hydrated mail uses **search-driven backfill** (instant header matches + background hydration + SSE), not IMAP SEARCH merging, not full mirror | 2026-09-28 |
-| D-7 | IMAP client: **`emersion/go-imap/v2` + shims**, isolated behind our own driver interface (the library lacks QRESYNC and `X-GM-LABELS`) | 2026-09-28 |
+| D-7 | IMAP client: **`github.com/kiliant/go-imap`**, isolated behind our own driver interface in `internal/imapdrv` (**amended 2026-09-29**: was `emersion/go-imap/v2`, which has no QRESYNC/COMPRESS and no raw-command escape hatch — verified against v2.0.0-beta.8; kiliant/go-imap v1.1.0 ships tested client QRESYNC/CONDSTORE/COMPRESS, zero deps, frozen v1 API, interop-verified incl. Dovecot) | 2026-09-28, amended 2026-09-29 |
 | D-8 | MIT, Go, TOML config | 2026-09-28 |
 | D-9 | Module path `github.com/CaffeinatedTech/jmap-bridge` | 2026-09-28 |
 | D-10 | **No CI.** All gates run locally before every commit | 2026-09-28 |
@@ -93,7 +93,7 @@ cmd/jmap-bridge
      └─ internal/jmapapi  method dispatch, result references, /changes, state strings
          ├─ internal/store      SQLite (metadata, content, FTS5, threads, contacts) + blobs
          ├─ internal/sync       per-account sync engine (tiers, IDLE, hydration, backfill)
-         │   └─ internal/imapdrv  go-imap/v2 + shims (QRESYNC, X-GM-*, PREVIEW, COMPRESS)
+         │   └─ internal/imapdrv  kiliant/go-imap behind the driver seam (QRESYNC, X-GM-*, PREVIEW, COMPRESS)
          ├─ internal/submit     SMTP submission (password / XOAUTH2) + Sent APPEND
          ├─ internal/dav        CardDAV client (discovery, sync-collection, PUT/DELETE)
          ├─ internal/convert    RFC 5322 ↔ JMAP Email · vCard ↔ JSContact
@@ -215,12 +215,34 @@ CREATE TABLE sync_state (           -- per account/folder sync bookkeeping
   PRIMARY KEY (account, scope)
 );
 
+CREATE TABLE counters (             -- monotonic per-account allocators
+  account TEXT, name TEXT,          -- 'modseq' (global change counter) | 'id' (id mint)
+  value INTEGER NOT NULL,
+  PRIMARY KEY (account, name)
+);
+
+CREATE TABLE email_msgid (          -- a message's own Message-ID → its email id
+  account TEXT, msgid TEXT, email_id TEXT,   -- dedupe across folders; uidvalidity remap
+  PRIMARY KEY (account, msgid)
+);
+
 CREATE TABLE tokens (               -- client-facing auth tokens
   account TEXT PRIMARY KEY, token_hash TEXT NOT NULL
 );
 
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 ```
+
+**Bookkeeping conventions** (M1, §4.1 companions):
+
+- `sync_state` row `scope='account'` carries the account's global `modseq`
+  allocator (every mutation takes the next value); `sync_state`
+  `scope='folder:<name>'` stores `sync_token` as JSON:
+  `{"uidvalidity":…,"uidnext":…,"highestmodseq":…,"backfill_uid":…,"purged_through":…}`.
+- Type state strings derive as `MAX(updated_modseq)` over the type's rows
+  (tombstones included), so they are monotonic without a per-type counter;
+  `Thread` state is the `Email` state (any email change can change threads) and
+  `queryState`'s counter is the `Email` state (PLAN §4.1).
 
 **Blobs** live in `{data_dir}/blobs/{aa}/{blobId}` (raw messages, attachments,
 contact photos). SQLite holds metadata only; bodies are never inside rows.
@@ -461,7 +483,7 @@ milestones but deliberately carries no completion state). Rules:
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| `go-imap/v2` is alpha; no QRESYNC, no `X-GM-LABELS` | sync correctness on Gmail/Pro | driver interface isolates the library; hand-rolled command/response paths for the two gaps; tier-3 fallback always exists |
+| `kiliant/go-imap` is new (first release 2026-08, single maintainer, low adoption) | a client bug stalls sync | driver interface isolates it (types never leave `internal/imapdrv`); zero-dependency + frozen v1 API means vendoring is painless if upstream goes quiet; its parser fuzzing and Dovecot interop matrix de-risk the gate; tier-3 fallback always exists. `X-GM-LABELS` (M4) is requestable today via its open-ended FETCH item types |
 | Gmail eventual consistency after writes | false expunge / duplicate work | grace window before tombstoning own writes (§10) |
 | No Go library for vCard↔JSContact | conversion bugs, data loss | golden-pair fixtures; RFC 9554 as the normative map; Stalwart `calcard` as cross-check reference |
 | Provider extension roulette (Namecheap/cPanel) | sync failures | tier detection + capability probing at connect; strict-but-tolerant parsing; live tests per provider as they're added |

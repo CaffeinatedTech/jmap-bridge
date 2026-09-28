@@ -53,9 +53,11 @@ disagree, flag it and fix the docs or the code — don't let them drift.
 ## Stack & conventions
 
 - Go (version pinned in `go.mod`). Module: `github.com/CaffeinatedTech/jmap-bridge`.
-- IMAP: `github.com/emersion/go-imap/v2` **only inside `internal/imapdrv`** —
-  it is alpha and lacks QRESYNC/`X-GM-LABELS`, which is exactly why the driver
-  interface exists (D-7). Never let its types escape that package.
+- IMAP: `github.com/kiliant/go-imap` **only inside `internal/imapdrv`** (D-7,
+  amended 2026-09-29 — chosen for tested client QRESYNC/CONDSTORE/COMPRESS,
+  zero deps, frozen v1 API). Never let its types escape that package. Its
+  `imapserver` module is allowed **only inside `test/fixtureimap`** for the
+  tier-impersonating fixture server.
 - SMTP: `github.com/emersion/go-smtp` (or stdlib `net/smtp` if sufficient).
 - CardDAV: `github.com/emersion/go-webdav/carddav` where it fits; hand-roll
   `sync-collection`/multiget inside `internal/dav` if the library falls short.
