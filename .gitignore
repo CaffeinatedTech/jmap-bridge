@@ -1,0 +1,11 @@
+# Build artifacts and runtime data (AGENTS.md: never commit these).
+/jmap-bridge
+/jmap-bridge-*
+/data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+.env
+.env.*
+blobs/
