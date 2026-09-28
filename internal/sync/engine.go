@@ -277,6 +277,11 @@ func (e *Engine) doPass(ctx context.Context, hint string) error {
 	return nil
 }
 
+// IdleWatching reports whether the idle connection is currently inside
+// IDLE on the watched folder — the state the FR-S.7 latency budget
+// assumes, and what the live gate waits for before measuring.
+func (e *Engine) IdleWatching() bool { return e.idleWatching.Load() }
+
 // setCurrentIdleFolder records which folder the idle connection should
 // watch; discovery calls this (FR-S.4).
 func (e *Engine) setCurrentIdleFolder(name string) {
