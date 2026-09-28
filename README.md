@@ -269,7 +269,7 @@ address = "me@example.com"     # default identity / envelope sender
 token   = "…"                  # client password (Basic auth)
 
   [accounts.imap]              # host, port, tls, auth = "password"|"oauth2",
-                               # username, password, timeout
+                               # username, password
   [accounts.smtp]              # host, port, tls = "implicit"|"starttls"|"none",
                                # username, password (defaults to IMAP's)
   [accounts.carddav]           # optional: url (or leave empty for discovery)
