@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Request limits mirrored into the core capability object (RFC 8620 §2).
@@ -263,29 +264,57 @@ type resultRef struct {
 	Path     string `json:"path"`
 }
 
-// resolveValue walks a decoded args tree, replacing any result-reference
-// object with the value it points at (FR-J.3).
+// resolveValue walks a decoded args tree, replacing any "#argument"
+// result reference with the value it points at, re-keyed without the
+// "#" so the method sees the real argument name (RFC 8620 §3.7,
+// FR-J.3).
 func (d *dispatcher) resolveValue(v any) (any, *methodErr) {
 	switch t := v.(type) {
 	case map[string]any:
-		if isResultRef(t) {
-			return d.resolveRef(t)
-		}
-		for k, val := range t {
-			resolved, merr := d.resolveValue(val)
+		resolved := map[string]bool{}
+		for key, val := range t {
+			if !strings.HasPrefix(key, "#") {
+				continue
+			}
+			name := key[1:]
+			if name == "" {
+				return nil, methodErrorf("invalidArguments", "argument name must not be just #")
+			}
+			if _, dup := t[name]; dup {
+				return nil, methodErrorf("invalidArguments",
+					"argument %q given in both normal and referenced form", name)
+			}
+			refMap, ok := val.(map[string]any)
+			if !ok || !isResultRef(refMap) {
+				return nil, methodErrorf("invalidArguments",
+					"argument %q must be a ResultReference object", key)
+			}
+			out, merr := d.resolveRef(refMap)
 			if merr != nil {
 				return nil, merr
 			}
-			t[k] = resolved
+			delete(t, key)
+			t[name] = out
+			resolved[name] = true
+		}
+		for k, val := range t {
+			if resolved[k] {
+				continue // resolved results are used verbatim
+			}
+			out, merr := d.resolveValue(val)
+			if merr != nil {
+				return nil, merr
+			}
+			t[k] = out
 		}
 		return t, nil
 	case []any:
 		for i, val := range t {
-			resolved, merr := d.resolveValue(val)
+			out, merr := d.resolveValue(val)
 			if merr != nil {
 				return nil, merr
 			}
-			t[i] = resolved
+			t[i] = out
 		}
 		return t, nil
 	default:

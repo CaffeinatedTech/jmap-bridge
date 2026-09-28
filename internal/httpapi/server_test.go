@@ -310,6 +310,28 @@ func TestResultReferenceUnknownTarget(t *testing.T) {
 	}
 }
 
+func TestResultReferenceDuplicatedArgument(t *testing.T) {
+	s := newTestServer(t)
+	resp := mustAPI(t, s, `{
+		"using": ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"],
+		"methodCalls": [
+			["Mailbox/query", {"accountId":"personal"}, "q1"],
+			["Mailbox/get", {
+				"accountId":"personal",
+				"ids": [],
+				"#ids": {"resultOf":"q1","name":"Mailbox/query","path":"/ids"}
+			}, "g1"]
+		]
+	}`)
+	entries := responsesAsList(t, resp)
+	if entries[1][0] != "error" {
+		t.Fatalf("responses = %v", entries)
+	}
+	if args := entries[1][1].(map[string]any); args["type"] != "invalidArguments" {
+		t.Errorf("type = %v, want invalidArguments (RFC 8620 §3.7)", args["type"])
+	}
+}
+
 // --- request-level problems (FR-J.2, NFR-5) ---
 
 func TestRequestLevelProblems(t *testing.T) {
@@ -383,12 +405,12 @@ func TestEmailQueryGetPropertyAndBodies(t *testing.T) {
 			["Email/get", {
 				"accountId":"personal",
 				"#ids": {"resultOf":"q1","name":"Email/query","path":"/ids"},
-				"properties": ["threadId","mailboxIds","keywords","from","to","subject","receivedAt","size","hasAttachment","preview"]
+				"properties": ["id","threadId","mailboxIds","keywords","from","to","subject","receivedAt","size","hasAttachment","preview"]
 			}, "g1"],
 			["Email/get", {
 				"accountId":"personal",
 				"#ids": {"resultOf":"q1","name":"Email/query","path":"/ids"},
-				"properties": ["subject","textBody","htmlBody","bodyValues","preview"],
+				"properties": ["id","subject","textBody","htmlBody","bodyValues","preview"],
 				"bodyProperties": ["partId","type","charset","size"],
 				"fetchAllBodyValues": true
 			}, "g2"]
@@ -401,6 +423,22 @@ func TestEmailQueryGetPropertyAndBodies(t *testing.T) {
 	query := entries[0][1].(map[string]any)
 	if query["total"] != 5.0 {
 		t.Errorf("inbox total = %v, want 5", query["total"])
+	}
+	qIDs := query["ids"].([]any)
+
+	// Regression: "#ids" must resolve into the real "ids" argument
+	// (RFC 8620 §3.7) — an unresolved reference degrades to "all
+	// emails", which would silently return the whole mailbox.
+	for _, idx := range []int{1, 2} {
+		got := entries[idx][1].(map[string]any)["list"].([]any)
+		if len(got) != len(qIDs) {
+			t.Fatalf("get #%d returned %d emails for %d query ids", idx, len(got), len(qIDs))
+		}
+		for i, entry := range got {
+			if entry.(map[string]any)["id"] != qIDs[i] {
+				t.Fatalf("get #%d list[%d] = %v, want %v", idx, i, entry.(map[string]any)["id"], qIDs[i])
+			}
+		}
 	}
 
 	summary := entries[1][1].(map[string]any)["list"].([]any)
