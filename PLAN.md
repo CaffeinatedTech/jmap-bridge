@@ -488,7 +488,7 @@ milestones but deliberately carries no completion state). Rules:
 | # | Deliverable | Gate | FRs | Status |
 |---|---|---|---|---|
 | **M0** | Repo skeleton, TOML config + validation, HTTP session + `POST /jmap` dispatch (derived from jmap-tui's `test/mockjmap`), fixture store, Dockerfile, gates green | jmap-tui connects to `http://127.0.0.1:PORT/{account}` and browses fixture mail | FR-J.1–.6, FR-A.1–.4 (A.4 config-level; live login lands M1/M3), FR-A.11–.12, FR-D.1 | ✅ done 2026-09-29 (jmap-tui live suite over loopback) |
-| **M1** | SQLite store (schema §4), read-only IMAP sync (discovery, tier detection, backfill, IDLE), hydration, `/changes` + SSE, preview | real Dovecot account browsable read-only; a flag flipped in another IMAP client appears in jmap-tui ≤ 2 s | FR-S.1–.9, FR-M.1–.8, FR-J.7–.8 | pending |
+| **M1** | SQLite store (schema §4), read-only IMAP sync (discovery, tier detection, backfill, IDLE), hydration, `/changes` + SSE, preview | real Dovecot account browsable read-only; a flag flipped in another IMAP client appears in jmap-tui ≤ 2 s | FR-S.1–.9, FR-M.1–.8, FR-J.7–.8 | landed |
 | **M2** | Write path §7.1, `Mailbox/set`, drafts, IMAP-first commits | jmap-tui triage (star/archive/move/delete/undo) round-trips; changes visible from a second IMAP client | FR-M.9–.13 | pending |
 | **M3** | Send §7.2, `Identity/get`, blob upload/download, `EmailSubmission/set` with `onSuccessUpdateEmail` | compose → send → message in Sent **and** delivered to a test sink; attachment round-trip byte-exact | FR-M.14–.17 | pending |
 | **M4** | Gmail profile: OAuth2 bootstrap, XOAUTH2 IMAP/SMTP, `X-GM-LABELS`↔mailboxes, All Mail/archive, `X-GM-THRID`, CONDSTORE tier validation, rate limits | live Gmail: folders+labels both ways, compose/send, archive from jmap-tui, no rate-limit warnings | FR-A.5–.10, FR-S.10, FR-S.12, FR-M.18 | pending |
@@ -506,7 +506,7 @@ milestones but deliberately carries no completion state). Rules:
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| `kiliant/go-imap` is new (first release 2026-08, single maintainer, low adoption) | a client bug stalls sync | driver interface isolates it (types never leave `internal/imapdrv`); zero-dependency + frozen v1 API means vendoring is painless if upstream goes quiet; its parser fuzzing and Dovecot interop matrix de-risk the gate; tier-3 fallback always exists. `X-GM-LABELS` (M4) is requestable today via its open-ended FETCH item types |
+| `kiliant/go-imap` is new (first release 2026-08, single maintainer, low adoption) | a client bug stalls sync | driver interface isolates it (types never leave `internal/imapdrv`); zero-dependency + frozen v1 API means vendoring is painless if upstream goes quiet; its parser fuzzing and Dovecot interop matrix de-risk the gate; tier-3 fallback always exists. `X-GM-LABELS` (M4) is requestable today via its open-ended FETCH item types. **All three tiers landed and fixture-verified 2026-09-29** (QRESYNC anchor replay incl. VANISHED, CONDSTORE CHANGEDSINCE, baseline flag refetch) |
 | Gmail eventual consistency after writes | false expunge / duplicate work | grace window before tombstoning own writes (§10) |
 | No Go library for vCard↔JSContact | conversion bugs, data loss | golden-pair fixtures; RFC 9554 as the normative map; Stalwart `calcard` as cross-check reference |
 | Provider extension roulette (Namecheap/cPanel) | sync failures | tier detection + capability probing at connect; strict-but-tolerant parsing; live tests per provider as they're added |
