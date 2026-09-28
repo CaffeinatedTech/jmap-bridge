@@ -1,0 +1,623 @@
+package jmapapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"sort"
+	"time"
+)
+
+// method looks up a dispatchable method; nil means unknownMethod
+// (FR-J.2).
+func (h *Handler) method(name string) methodFunc {
+	switch name {
+	case "Mailbox/get":
+		return h.mailboxGet
+	case "Mailbox/query":
+		return h.mailboxQuery
+	case "Mailbox/changes":
+		return changesMethod("Mailbox")
+	case "Email/get":
+		return h.emailGet
+	case "Email/query":
+		return h.emailQuery
+	case "Email/changes":
+		return changesMethod("Email")
+	case "Thread/get":
+		return h.threadGet
+	default:
+		return nil
+	}
+}
+
+// checkAccount validates the accountId argument: required, and equal to
+// the account the request was routed for. Any other value is notFound —
+// identical whether the account exists or not, so a caller cannot probe
+// other accounts through method errors (FR-A.11).
+func checkAccount(acct *Account, id string) *methodErr {
+	if id == "" {
+		return methodErrorf("invalidArguments", "accountId is required")
+	}
+	if id != acct.ID {
+		return methodErrorf("notFound", "unknown accountId")
+	}
+	return nil
+}
+
+// --- Mailbox/get (FR-M.1) ---
+
+type getArgs struct {
+	AccountID string `json:"accountId"`
+
+	IDs *[]string `json:"ids"`
+
+	Properties     *[]string `json:"properties"`
+	BodyProperties *[]string `json:"bodyProperties"`
+
+	FetchTextBodyValues bool `json:"fetchTextBodyValues"`
+	FetchHTMLBodyValues bool `json:"fetchHTMLBodyValues"`
+	FetchAllBodyValues  bool `json:"fetchAllBodyValues"`
+}
+
+func (h *Handler) mailboxGet(ctx context.Context, acct *Account, raw json.RawMessage) (any, *methodErr) {
+	var args getArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, methodErrorf("invalidArguments", "%s", err)
+	}
+	if merr := checkAccount(acct, args.AccountID); merr != nil {
+		return nil, merr
+	}
+	var ids []string
+	if args.IDs != nil {
+		ids = *args.IDs
+		if len(ids) > maxObjectsInGet {
+			return nil, methodErrorf("invalidArguments", "ids exceeds maxObjectsInGet (%d)", maxObjectsInGet)
+		}
+	}
+	mbs, state, notFound, err := acct.Store.MailboxesByID(ctx, acct.ID, ids)
+	if err != nil {
+		return nil, serverFail(err)
+	}
+	list := make([]map[string]any, 0, len(mbs))
+	for _, mb := range mbs {
+		list = append(list, filterProps(mailboxObject(mb), args.Properties))
+	}
+	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list}
+	if len(notFound) > 0 {
+		resp["notFound"] = notFound
+	}
+	return resp, nil
+}
+
+func mailboxObject(mb *Mailbox) map[string]any {
+	obj := map[string]any{
+		"id":            mb.ID,
+		"name":          mb.Name,
+		"sortOrder":     mb.SortOrder,
+		"totalEmails":   mb.TotalEmails,
+		"unreadEmails":  mb.UnreadEmails,
+		"totalThreads":  mb.TotalThreads,
+		"unreadThreads": mb.UnreadThreads,
+		"isSubscribed":  true,
+		"myRights": map[string]bool{
+			"mayReadItems":   mb.MayRead,
+			"mayAddItems":    mb.MayAddItems,
+			"mayRemoveItems": mb.MayRemoveItems,
+			"mayCreateChild": mb.MayCreateChild,
+			"mayRename":      mb.MayRename,
+			"mayDelete":      mb.MayDelete,
+		},
+	}
+	if mb.ParentID != "" {
+		obj["parentId"] = mb.ParentID
+	} else {
+		obj["parentId"] = nil
+	}
+	if mb.Role != "" {
+		obj["role"] = mb.Role
+	}
+	return obj
+}
+
+// --- Mailbox/query (FR-M.2) ---
+
+// nullableString distinguishes JSON null from an absent key, which
+// matters for Mailbox/query's parentId/role filters (null filters for
+// "no value", absent applies no filter).
+type nullableString struct {
+	set bool
+	val string
+}
+
+func (n *nullableString) UnmarshalJSON(b []byte) error {
+	n.set = true
+	if string(b) == "null" {
+		return nil
+	}
+	return json.Unmarshal(b, &n.val)
+}
+
+type mailboxFilter struct {
+	ParentID nullableString `json:"parentId"`
+	Role     nullableString `json:"role"`
+}
+
+type sortArg struct {
+	Property     string `json:"property"`
+	IsAscending  bool   `json:"isAscending"`
+	IsDescending bool   `json:"isDescending"`
+}
+
+type mailboxQueryArgs struct {
+	AccountID string        `json:"accountId"`
+	Filter    mailboxFilter `json:"filter"`
+	Sort      []sortArg     `json:"sort"`
+	pageArgs
+}
+
+// pageArgs is the paging shape shared by Mailbox/query and Email/query.
+type pageArgs struct {
+	Position       int    `json:"position"`
+	Anchor         string `json:"anchor"`
+	AnchorOffset   int    `json:"anchorOffset"`
+	Limit          int    `json:"limit"`
+	CalculateTotal bool   `json:"calculateTotal"`
+	// CollapseThreads is Email/query-only; accepted in the shared shape
+	// so one decoder serves both.
+	CollapseThreads bool `json:"collapseThreads"`
+}
+
+func (h *Handler) mailboxQuery(ctx context.Context, acct *Account, raw json.RawMessage) (any, *methodErr) {
+	var args mailboxQueryArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, methodErrorf("invalidArguments", "%s", err)
+	}
+	if merr := checkAccount(acct, args.AccountID); merr != nil {
+		return nil, merr
+	}
+	mbs, state, err := acct.Store.Mailboxes(ctx, acct.ID)
+	if err != nil {
+		return nil, serverFail(err)
+	}
+
+	filtered := make([]*Mailbox, 0, len(mbs))
+	for _, mb := range mbs {
+		if args.Filter.ParentID.set {
+			if args.Filter.ParentID.val == "" {
+				if mb.ParentID != "" {
+					continue
+				}
+			} else if mb.ParentID != args.Filter.ParentID.val {
+				continue
+			}
+		}
+		if args.Filter.Role.set && mb.Role != args.Filter.Role.val {
+			continue
+		}
+		filtered = append(filtered, mb)
+	}
+
+	less, merr := mailboxSortLess(args.Sort)
+	if merr != nil {
+		return nil, merr
+	}
+	sort.SliceStable(filtered, func(i, j int) bool { return less(filtered[i], filtered[j]) })
+
+	ids := make([]string, 0, len(filtered))
+	for _, mb := range filtered {
+		ids = append(ids, mb.ID)
+	}
+	position, window := paginate(ids, args.Anchor, args.AnchorOffset, args.Position, args.Limit)
+
+	resp := map[string]any{
+		"accountId":           acct.ID,
+		"queryState":          queryState(state, raw),
+		"canCalculateChanges": false,
+		"position":            position,
+		"ids":                 window,
+	}
+	if args.CalculateTotal {
+		resp["total"] = len(ids)
+	}
+	return resp, nil
+}
+
+// mailboxSortLess builds the comparator for Mailbox/query. Supported
+// properties: sortOrder (default), name, id (FR-M.2).
+func mailboxSortLess(sortArgs []sortArg) (func(a, b *Mailbox) bool, *methodErr) {
+	prop := "sortOrder"
+	ascending := true
+	if len(sortArgs) > 0 {
+		prop = sortArgs[0].Property
+		ascending = sortArgs[0].IsAscending && !sortArgs[0].IsDescending
+	}
+	switch prop {
+	case "sortOrder":
+		// fall through to the shared body with name as tiebreak
+	case "name":
+		return func(a, b *Mailbox) bool {
+			if a.Name != b.Name {
+				return a.Name < b.Name
+			}
+			return a.ID < b.ID
+		}, nil
+	case "id":
+		return func(a, b *Mailbox) bool { return a.ID < b.ID }, nil
+	default:
+		return nil, methodErrorf("invalidArguments", "unsupported sort property %q for Mailbox", prop)
+	}
+	return func(a, b *Mailbox) bool {
+		if a.SortOrder != b.SortOrder {
+			if ascending {
+				return a.SortOrder < b.SortOrder
+			}
+			return a.SortOrder > b.SortOrder
+		}
+		if a.Name != b.Name {
+			if ascending {
+				return a.Name < b.Name
+			}
+			return a.Name > b.Name
+		}
+		return a.ID < b.ID
+	}, nil
+}
+
+// paginate applies anchor/anchorOffset (which replace position) and
+// limit, returning the starting position and the window. An anchor id
+// that is no longer in the result set clamps to the end of the list —
+// the tolerant behaviour jmap-tui's mock server implements and its
+// window repair relies on.
+func paginate(ids []string, anchor string, anchorOffset, position, limit int) (int, []string) {
+	if anchor != "" {
+		position = len(ids)
+		for i, id := range ids {
+			if id == anchor {
+				position = i + anchorOffset
+				break
+			}
+		}
+	}
+	if position < 0 {
+		position = 0
+	}
+	if position > len(ids) {
+		position = len(ids)
+	}
+	end := len(ids)
+	if limit > 0 && position+limit < end {
+		end = position + limit
+	}
+	window := make([]string, end-position)
+	copy(window, ids[position:end])
+	return position, window
+}
+
+// --- Email/query (FR-M.5) ---
+
+type emailFilterArg struct {
+	InMailbox     string     `json:"inMailbox"`
+	Text          string     `json:"text"`
+	From          string     `json:"from"`
+	To            string     `json:"to"`
+	Subject       string     `json:"subject"`
+	After         *time.Time `json:"after"`
+	Before        *time.Time `json:"before"`
+	HasKeyword    string     `json:"hasKeyword"`
+	HasAttachment *bool      `json:"hasAttachment"`
+}
+
+type emailQueryArgs struct {
+	AccountID string         `json:"accountId"`
+	Filter    emailFilterArg `json:"filter"`
+	Sort      []sortArg      `json:"sort"`
+	pageArgs
+}
+
+func (h *Handler) emailQuery(ctx context.Context, acct *Account, raw json.RawMessage) (any, *methodErr) {
+	var args emailQueryArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, methodErrorf("invalidArguments", "%s", err)
+	}
+	if merr := checkAccount(acct, args.AccountID); merr != nil {
+		return nil, merr
+	}
+
+	q := EmailQuery{
+		Filter: EmailFilter{
+			InMailbox:     args.Filter.InMailbox,
+			Text:          args.Filter.Text,
+			From:          args.Filter.From,
+			To:            args.Filter.To,
+			Subject:       args.Filter.Subject,
+			After:         args.Filter.After,
+			Before:        args.Filter.Before,
+			HasKeyword:    args.Filter.HasKeyword,
+			HasAttachment: args.Filter.HasAttachment,
+		},
+		Position:        args.Position,
+		Limit:           args.Limit,
+		Anchor:          args.Anchor,
+		AnchorOffset:    args.AnchorOffset,
+		CollapseThreads: args.CollapseThreads,
+	}
+	if len(args.Sort) > 0 {
+		prop := args.Sort[0].Property
+		if !supportedEmailSort(prop) {
+			return nil, methodErrorf("invalidArguments", "unsupported sort property %q for Email", prop)
+		}
+		q.Sort = []EmailSort{{Property: prop, Ascending: args.Sort[0].IsAscending && !args.Sort[0].IsDescending}}
+	}
+
+	ids, position, total, counter, err := acct.Store.QueryEmails(ctx, acct.ID, q)
+	if err != nil {
+		return nil, serverFail(err)
+	}
+	resp := map[string]any{
+		"accountId":           acct.ID,
+		"queryState":          queryState(counter, raw),
+		"canCalculateChanges": false,
+		"position":            position,
+		"ids":                 ids,
+	}
+	if args.CalculateTotal {
+		resp["total"] = total
+	}
+	return resp, nil
+}
+
+func supportedEmailSort(prop string) bool {
+	switch prop {
+	case "receivedAt", "subject", "from", "size", "hasAttachment":
+		return true
+	default:
+		return false
+	}
+}
+
+// --- Email/get (FR-M.4) ---
+
+func (h *Handler) emailGet(ctx context.Context, acct *Account, raw json.RawMessage) (any, *methodErr) {
+	var args getArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, methodErrorf("invalidArguments", "%s", err)
+	}
+	if merr := checkAccount(acct, args.AccountID); merr != nil {
+		return nil, merr
+	}
+	var ids []string
+	if args.IDs != nil {
+		ids = *args.IDs
+		if len(ids) > maxObjectsInGet {
+			return nil, methodErrorf("invalidArguments", "ids exceeds maxObjectsInGet (%d)", maxObjectsInGet)
+		}
+	}
+	emails, state, notFound, err := acct.Store.EmailsByID(ctx, acct.ID, ids)
+	if err != nil {
+		return nil, serverFail(err)
+	}
+	list := make([]map[string]any, 0, len(emails))
+	for _, e := range emails {
+		list = append(list, filterProps(emailObject(e, &args), args.Properties))
+	}
+	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list}
+	if len(notFound) > 0 {
+		resp["notFound"] = notFound
+	}
+	return resp, nil
+}
+
+// emailObject builds the full wire object; callers filter with
+// filterProps afterwards.
+func emailObject(e *Email, args *getArgs) map[string]any {
+	obj := map[string]any{
+		"id":            e.ID,
+		"threadId":      e.ThreadID,
+		"mailboxIds":    idSet(e.MailboxIDs),
+		"subject":       e.Subject,
+		"receivedAt":    e.ReceivedAt.UTC().Format(time.RFC3339),
+		"size":          e.Size,
+		"hasAttachment": e.HasAttachment,
+		"preview":       e.Preview,
+	}
+	if len(e.Keywords) > 0 {
+		obj["keywords"] = map[string]bool(e.Keywords)
+	}
+	if len(e.From) > 0 {
+		obj["from"] = addressList(e.From)
+	}
+	if len(e.To) > 0 {
+		obj["to"] = addressList(e.To)
+	}
+	if len(e.Cc) > 0 {
+		obj["cc"] = addressList(e.Cc)
+	}
+	if len(e.Bcc) > 0 {
+		obj["bcc"] = addressList(e.Bcc)
+	}
+	if len(e.ReplyTo) > 0 {
+		obj["replyTo"] = addressList(e.ReplyTo)
+	}
+	if len(e.MessageID) > 0 {
+		obj["messageId"] = e.MessageID
+	}
+	if len(e.References) > 0 {
+		obj["references"] = e.References
+	}
+	if len(e.InReplyTo) > 0 {
+		obj["inReplyTo"] = e.InReplyTo
+	}
+
+	var textPart, htmlPart map[string]any
+	if e.TextBody != "" {
+		textPart = map[string]any{"partId": "1", "type": "text/plain", "charset": "utf-8", "size": len(e.TextBody)}
+		obj["textBody"] = []map[string]any{filterPart(textPart, args.BodyProperties)}
+	}
+	if e.HTMLBody != "" {
+		htmlPart = map[string]any{"partId": "2", "type": "text/html", "charset": "utf-8", "size": len(e.HTMLBody)}
+		obj["htmlBody"] = []map[string]any{filterPart(htmlPart, args.BodyProperties)}
+	}
+
+	// bodyValues rides only when the client both lists the property and
+	// asks for a fetch mode (RFC 8621 §4.1).
+	wantValues := args.Properties == nil || containsString(*args.Properties, "bodyValues")
+	fetch := args.FetchAllBodyValues || args.FetchTextBodyValues || args.FetchHTMLBodyValues
+	if wantValues && fetch {
+		values := map[string]map[string]any{}
+		if textPart != nil && (args.FetchAllBodyValues || args.FetchTextBodyValues) {
+			values["1"] = map[string]any{"value": e.TextBody}
+		}
+		if htmlPart != nil && (args.FetchAllBodyValues || args.FetchHTMLBodyValues) {
+			values["2"] = map[string]any{"value": e.HTMLBody}
+		}
+		if len(values) > 0 {
+			obj["bodyValues"] = values
+		}
+	}
+	return obj
+}
+
+// --- Thread/get (FR-M.7) ---
+
+func (h *Handler) threadGet(ctx context.Context, acct *Account, raw json.RawMessage) (any, *methodErr) {
+	var args struct {
+		AccountID string   `json:"accountId"`
+		IDs       []string `json:"ids"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, methodErrorf("invalidArguments", "%s", err)
+	}
+	if merr := checkAccount(acct, args.AccountID); merr != nil {
+		return nil, merr
+	}
+	if len(args.IDs) > maxObjectsInGet {
+		return nil, methodErrorf("invalidArguments", "ids exceeds maxObjectsInGet (%d)", maxObjectsInGet)
+	}
+	threads, state, notFound, err := acct.Store.ThreadsByID(ctx, acct.ID, args.IDs)
+	if err != nil {
+		return nil, serverFail(err)
+	}
+	list := make([]map[string]any, 0, len(threads))
+	for _, t := range threads {
+		list = append(list, map[string]any{"id": t.ID, "emailIds": t.EmailIDs})
+	}
+	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list}
+	if len(notFound) > 0 {
+		resp["notFound"] = notFound
+	}
+	return resp, nil
+}
+
+// --- Mailbox/changes and Email/changes (FR-M.3, FR-M.6) ---
+
+func changesMethod(kind string) methodFunc {
+	return func(ctx context.Context, acct *Account, raw json.RawMessage) (any, *methodErr) {
+		var args struct {
+			AccountID  string `json:"accountId"`
+			SinceState string `json:"sinceState"`
+		}
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, methodErrorf("invalidArguments", "%s", err)
+		}
+		if merr := checkAccount(acct, args.AccountID); merr != nil {
+			return nil, merr
+		}
+		cs, err := acct.Store.Changes(ctx, acct.ID, kind, args.SinceState)
+		if errors.Is(err, ErrCannotCalculateChanges) {
+			return nil, &methodErr{
+				Type:        "cannotCalculateChanges",
+				Description: "state " + args.SinceState + " is not known; refetch with /get",
+			}
+		}
+		if err != nil {
+			return nil, serverFail(err)
+		}
+		created := cs.Created
+		if created == nil {
+			created = []string{}
+		}
+		updated := cs.Updated
+		if updated == nil {
+			updated = []string{}
+		}
+		destroyed := cs.Destroyed
+		if destroyed == nil {
+			destroyed = []string{}
+		}
+		return map[string]any{
+			"accountId":      acct.ID,
+			"oldState":       args.SinceState,
+			"newState":       cs.NewState,
+			"hasMoreChanges": cs.HasMore,
+			"created":        created,
+			"updated":        updated,
+			"destroyed":      destroyed,
+		}, nil
+	}
+}
+
+func serverFail(err error) *methodErr {
+	return &methodErr{Type: "serverFail", Description: err.Error()}
+}
+
+// --- shared helpers ---
+
+// filterProps keeps only the requested top-level properties; nil means
+// "all properties the object carries". Unknown names are ignored
+// (RFC 8620 §5.1).
+func filterProps(obj map[string]any, props *[]string) map[string]any {
+	if props == nil {
+		return obj
+	}
+	out := make(map[string]any, len(*props))
+	for _, p := range *props {
+		if v, ok := obj[p]; ok {
+			out[p] = v
+		}
+	}
+	return out
+}
+
+// filterPart narrows a body part to bodyProperties when given.
+func filterPart(part map[string]any, props *[]string) map[string]any {
+	if props == nil {
+		return part
+	}
+	out := make(map[string]any, len(*props))
+	for _, p := range *props {
+		if v, ok := part[p]; ok {
+			out[p] = v
+		}
+	}
+	// partId always travels so clients can address bodyValues.
+	if _, ok := out["partId"]; !ok {
+		out["partId"] = part["partId"]
+	}
+	return out
+}
+
+func idSet(ids []string) map[string]bool {
+	out := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out
+}
+
+func addressList(addrs []Address) []map[string]string {
+	out := make([]map[string]string, 0, len(addrs))
+	for _, a := range addrs {
+		out = append(out, map[string]string{"name": a.Name, "email": a.Email})
+	}
+	return out
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
