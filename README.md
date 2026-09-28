@@ -110,11 +110,15 @@ token = "change-me"
 EOF
 
 docker run -d --name jmap-bridge \
+  --user "$(id -u):$(id -g)" \
   -p 127.0.0.1:8080:8080 \
   -v "$PWD/config.toml:/config/config.toml:ro" \
   -v "$PWD/data:/data" \
   ghcr.io/caffeinatedtech/jmap-bridge:latest
 ```
+
+The image runs as a non-root user (FR-D.1); `--user` maps it to your
+uid so `./data` stays writable and owned by you.
 
 Published images arrive at milestone M7 (PLAN §12); until then build from source
 (`go build -o jmap-bridge ./cmd/jmap-bridge`) and run the binary with

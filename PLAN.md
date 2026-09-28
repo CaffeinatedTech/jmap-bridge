@@ -433,7 +433,7 @@ begins. FR references point at `REQUIREMENTS.md`.
 
 | # | Deliverable | Gate | FRs |
 |---|---|---|---|
-| **M0** | Repo skeleton, TOML config + validation, HTTP session + `POST /jmap` dispatch (derived from jmap-tui's `test/mockjmap`), fixture store, Dockerfile, gates green | jmap-tui connects to `http://127.0.0.1:PORT/{account}` and browses fixture mail | FR-J.1–.6, FR-A.1–.4, FR-A.11–.12, FR-D.1 |
+| **M0** | Repo skeleton, TOML config + validation, HTTP session + `POST /jmap` dispatch (derived from jmap-tui's `test/mockjmap`), fixture store, Dockerfile, gates green | jmap-tui connects to `http://127.0.0.1:PORT/{account}` and browses fixture mail | FR-J.1–.6, FR-A.1–.4 (A.4 config-level; live login lands M1/M3), FR-A.11–.12, FR-D.1 |
 | **M1** | SQLite store (schema §4), read-only IMAP sync (discovery, tier detection, backfill, IDLE), hydration, `/changes` + SSE, preview | real Dovecot account browsable read-only; a flag flipped in another IMAP client appears in jmap-tui ≤ 2 s | FR-S.1–.9, FR-M.1–.8, FR-J.7–.8 |
 | **M2** | Write path §7.1, `Mailbox/set`, drafts, IMAP-first commits | jmap-tui triage (star/archive/move/delete/undo) round-trips; changes visible from a second IMAP client | FR-M.9–.13 |
 | **M3** | Send §7.2, `Identity/get`, blob upload/download, `EmailSubmission/set` with `onSuccessUpdateEmail` | compose → send → message in Sent **and** delivered to a test sink; attachment round-trip byte-exact | FR-M.14–.17 |

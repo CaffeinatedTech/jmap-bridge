@@ -304,9 +304,11 @@ requirements are `NFR-<n>`.
 ## 7. FR-J — JMAP protocol contract
 
 - **FR-J.1** `GET {base}/.well-known/jmap` returns the session resource with
-  `apiUrl`, `uploadUrl`, `downloadUrl`, `eventSourceUrl` (RFC 8620 §2 templates),
-  `accounts`, `primaryAccounts` (mail → this account), `capabilities`,
-  `userId`, `apiUrl` state, and `sessionState` — all on the configured origin.
+  `apiUrl`, `accounts`, `primaryAccounts` (mail → this account),
+  `capabilities`, `username`, and `state` — plus `uploadUrl`, `downloadUrl`
+  and `eventSourceUrl` (RFC 8620 §2 URI templates) once those endpoints
+  exist (FR-J.5). API responses echo the session's `state` as
+  `sessionState` (RFC 8620 §3.4) — all on the configured origin.
 - **FR-J.2** `POST {apiUrl}` accepts a batch of method calls and returns
   responses in order with matching `methodCallId`; unknown methods produce an
   `error` invocation of type `unknownMethod`, never a HTTP 500.
@@ -418,7 +420,7 @@ requirements are `NFR-<n>`.
 
 | Requirements | Milestone | Gate summary |
 |---|---|---|
-| FR-J.1–.6, FR-A.1–.4, FR-A.11–.12, FR-D.1 | M0 | jmap-tui browses fixture mail over loopback |
+| FR-J.1–.6, FR-A.1–.4, FR-A.11–.12, FR-D.1 | M0 | jmap-tui browses fixture mail over loopback (FR-A.4 is config-level here: the first live IMAP/SMTP login lands with M1/M3) |
 | FR-S.1–.9, FR-M.1–.8, FR-J.7–.8 | M1 | read-only live account; foreign flag change ≤ 2 s |
 | FR-M.9–.13 | M2 | triage round-trips; second client sees it |
 | FR-M.14–.17 | M3 | compose → send → Sent + delivered; attachments exact |
