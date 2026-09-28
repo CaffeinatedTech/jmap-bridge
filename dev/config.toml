@@ -1,0 +1,17 @@
+# Local development config: loopback listener, fixture mail (M0), token
+# auth. The token below is a throwaway for loopback development only —
+# never reuse it anywhere real.
+
+listen = "127.0.0.1:8080"
+base_url = "http://127.0.0.1:8080"
+data_dir = "./data"
+log_level = "debug"
+
+[auth]
+mode = "token"
+
+[[accounts]]
+id = "personal"
+name = "Personal"
+address = "me@example.test"
+token = "dev-token-local-only"
