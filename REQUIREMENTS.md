@@ -381,7 +381,7 @@ requirements are `NFR-<n>`.
 
 ## 9. Non-functional requirements
 
-- **NFR-1 Performance (initial targets, to be pinned at M5):** warm `Email/query`
+- **NFR-1 Performance (binding; revalidated at M5 per §11):** warm `Email/query`
   over a 100k-message folder answers in < 150 ms p95 on a developer laptop;
   session → first mailbox list in < 2 s warm; interactive body hydration
   ≥ 15 messages/s per account under normal RTT. Metadata footprint ≤ ~5 KB per
@@ -397,7 +397,7 @@ requirements are `NFR-<n>`.
   retained ≥ 30 days so `/changes` after a client's absence still works.
 - **NFR-5 Security:** TLS terminated at the proxy (documented); tokens hashed and
   compared constant-time; credentials encrypted at rest when keyed; request body
-  size caps (JSON ≤ 32 MiB, upload ≤ 64 MiB — see open questions); no path
+  size caps (JSON ≤ 32 MiB, upload ≤ 64 MiB, confirmed); no path
   traversal via blob ids or download names; no server-side fetch of
   client-supplied URLs; auth failures indistinguishable across accounts.
 - **NFR-6 Observability:** health, metrics and structured logs sufficient to
@@ -430,11 +430,12 @@ requirements are `NFR-<n>`.
 *(If PLAN.md's traceability column ever disagrees with this table, this table
 wins.)*
 
-## 11. Open requirements (TBD)
+## 11. Open requirements
 
-- Exact NFR-1 numbers and NFR-8 after measuring at M5.
-- Final size caps (JSON 32 MiB / upload 64 MiB proposed) — confirm before M3.
-- Whether `AddressBook/set` (create/rename/delete books) is pulled from roadmap
-  into v0.1 — decision needed before M6 sign-off.
-- Retention/eviction policy for the body cache (currently: grow-only, documented)
-  — revisit if users hit disk pressure.
+Resolved items are recorded as locked decisions in PLAN §1 (D-16 size caps,
+D-17 `AddressBook/set` stays roadmap, D-18 body cache grow-only, D-19 perf
+targets binding). Remaining open:
+
+- NFR-1 and NFR-8 numbers are **binding as written** and revalidated by
+  measurement at M5; any revision is a REQUIREMENTS edit in the same commit as
+  the milestone sign-off.

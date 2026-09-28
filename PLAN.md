@@ -30,6 +30,10 @@ Config: TOML · Packaging: Docker/Kubernetes · CI: none (local gates, `AGENTS.m
 | D-13 | **Path-prefixed multi-account** on a single origin (`/{account}/…`), one container serves N accounts | 2026-09-28 |
 | D-14 | **IMAP-first writes**: apply to the real server, commit locally only on success — the cache never diverges optimistically | 2026-09-28 |
 | D-15 | Client-facing auth is a per-account bearer token over HTTP Basic (or `none` on loopback) | 2026-09-28 |
+| D-16 | Request size caps are final: JSON ≤ 32 MiB, upload ≤ 64 MiB (REQUIREMENTS NFR-5) | 2026-09-28 |
+| D-17 | `AddressBook/set` stays roadmap (v0.2+); v0.1 ships `AddressBook/get\|changes` only | 2026-09-28 |
+| D-18 | Body cache is grow-only in v0.1; growth documented in README; eviction revisited only on demonstrated disk pressure | 2026-09-28 |
+| D-19 | NFR-1 / NFR-8 numbers are binding as written (no M5 "pin"); M5 revalidates by measurement, revisions are REQUIREMENTS edits | 2026-09-28 |
 
 ---
 
@@ -504,9 +508,9 @@ Normative for v0.1 (verify status before relying on a draft):
 
 ## 16. Open questions
 
-- Exact perf targets for NFR-1/NFR-2 (messages/hydrations per second, cold-browse
-  latency budget) — to be pinned during M5 with real numbers.
-- Whether `AddressBook/set` (create/delete books) is worth pulling into M6 or
-  staying roadmap — depends on whether any target client uses it.
-- Image/attachment size caps (defaults proposed: 32 MiB JSON, 64 MiB upload) —
-  confirm against expected usage before M3.
+Resolved 2026-09-28 and locked as D-16…D-19: size caps (32 MiB JSON / 64 MiB
+upload) final; `AddressBook/set` stays roadmap; body cache grow-only; NFR-1 /
+NFR-8 numbers binding rather than "pin at M5".
+
+No open questions remain for v0.1. M5 measures NFR-1/NFR-8 against the binding
+numbers; any revision is a REQUIREMENTS edit at sign-off.

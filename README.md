@@ -232,6 +232,12 @@ Storage is a single SQLite database (WAL) plus a blob directory under `data_dir`
 Nothing is ever written by clients — the bridge is the only writer, and every
 mutation is applied to the real IMAP server *first*, then committed locally.
 
+The body cache is grow-only in v0.1: a hydrated body stays until you delete it
+from the data directory. It grows with mail you actually read (plus anything
+inside `prefetch_window`), never with the whole mailbox — plan disk for
+`data_dir` accordingly. Eviction is not implemented yet; bodies are always
+re-fetchable from IMAP, so a safe policy can be added later without data loss.
+
 ## Configuration reference
 
 ```toml
