@@ -33,28 +33,33 @@ type Folder struct {
 // SyncFolders reconciles the account's mailboxes with a fresh discovery
 // result: creates new folders, updates roles and hierarchy, recomputes
 // sort order, and tombstones folders the server no longer lists (one
-// transaction, one modseq, FR-M.1/FR-M.3).
-func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folder) error {
-	return s.tx(ctx, account, true, func(tx *sql.Tx) error {
+// transaction, one modseq, FR-M.1/FR-M.3). A folder whose UIDVALIDITY
+// changed is reset on the way (FR-S.6) and named in the result, so the
+// engine can restart its cursor there.
+func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folder) (reset []string, err error) {
+	err = s.tx(ctx, account, true, func(tx *sql.Tx) error {
 		seq, err := nextSeq(ctx, tx)
 		if err != nil {
 			return err
 		}
 		existing := map[string]*mailboxRow{}
 		rows, err := tx.QueryContext(ctx,
-			`SELECT id, name, parent_id, role, sort_order, deleted FROM mailboxes WHERE account = ?`, account)
+			`SELECT rowid, id, name, parent_id, role, sort_order, uidvalidity, deleted
+			 FROM mailboxes WHERE account = ?`, account)
 		if err != nil {
 			return fmt.Errorf("store: list mailboxes: %w", err)
 		}
 		for rows.Next() {
 			var r mailboxRow
 			var parent, role sql.NullString
+			var uv sql.NullInt64
 			var deleted sql.NullInt64
-			if err := rows.Scan(&r.ID, &r.Name, &parent, &role, &r.SortOrder, &deleted); err != nil {
+			if err := rows.Scan(&r.RowID, &r.ID, &r.Name, &parent, &role, &r.SortOrder, &uv, &deleted); err != nil {
 				_ = rows.Close()
 				return err
 			}
 			r.ParentID, r.Role = parent.String, role.String
+			r.UIDValidity = uint32(uv.Int64)
 			r.Deleted = deleted.Valid
 			existing[r.Name] = &r
 		}
@@ -109,6 +114,19 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 					Role: role, SortOrder: sortOrder[f.Name],
 				}
 				continue
+			}
+			// UIDVALIDITY change: everything this folder mapped is
+			// suspect (FR-S.6) — reset before the row is updated.
+			if row.UIDValidity != 0 && f.UIDValidity != 0 && row.UIDValidity != f.UIDValidity {
+				seq2, err := nextSeq(ctx, tx)
+				if err != nil {
+					return err
+				}
+				if err := resetFolderLocked(ctx, tx, account, row.RowID, f.UIDValidity, seq2); err != nil {
+					return fmt.Errorf("store: reset %q: %w", f.Name, err)
+				}
+				reset = append(reset, f.Name)
+				row.UIDValidity = f.UIDValidity
 			}
 			// Update whatever drifted. Counts are untouched here: they
 			// move with membership, not with discovery.
@@ -191,6 +209,7 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 		}
 		return bumpMailboxState(ctx, tx, account, seq)
 	})
+	return reset, err
 }
 
 // orphan is an (email id, mailbox rowid) pair that just lost a membership.
@@ -238,12 +257,14 @@ func orphanEmails(ctx context.Context, tx *sql.Tx, account string, seq int64, ca
 
 // mailboxRow is the scan shape shared by discovery and reads.
 type mailboxRow struct {
-	ID        string
-	Name      string
-	ParentID  string
-	Role      string
-	SortOrder int
-	Deleted   bool
+	RowID       int64
+	ID          string
+	Name        string
+	ParentID    string
+	Role        string
+	SortOrder   int
+	UIDValidity uint32
+	Deleted     bool
 }
 
 // folderSortOrder assigns each folder a deterministic sort position:

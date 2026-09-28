@@ -128,6 +128,17 @@ func (c *Conn) examineOnce(ctx context.Context, folder string, anchor *Anchor, t
 	}
 }
 
+// Unselect releases the connection's selection without expunging
+// (UNSELECT, RFC 3691; CLOSE would expunge other clients' \Deleted
+// mail, so it is never used on a read path). Servers without UNSELECT
+// keep the selection — harmless, and logged once.
+func (c *Conn) Unselect(ctx context.Context) error {
+	if !c.caps()["UNSELECT"] && !c.caps()["IMAP4REV2"] {
+		return nil
+	}
+	return c.client.Unselect(nil).Wait(ctx)
+}
+
 // FetchHeaders fetches header-level records for the given uids of the
 // selected folder (FR-S.3 backfill, FR-S.5 new-message details).
 func (c *Conn) FetchHeaders(ctx context.Context, uids []uint32) ([]HeaderMsg, error) {

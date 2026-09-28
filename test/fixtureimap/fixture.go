@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kiliant/go-imap"
 	"github.com/kiliant/go-imap/imapclient"
@@ -220,9 +221,22 @@ func (s *Server) CreateFolder(name string, use ...imap.MailboxAttr) {
 
 // DeleteFolder removes a folder (also the fixture's UIDVALIDITY-reset
 // trick: memory assigns a fresh validity to the recreated name).
+// Servers refuse DELETE while any session holds the mailbox selected —
+// the engine releases its selections a moment later — so a short
+// retry keeps the fixture honest instead of racy.
 func (s *Server) DeleteFolder(name string) {
 	s.t.Helper()
-	s.withAdmin(func(ctx context.Context, c *imapclient.Client) error {
-		return c.Delete(name, nil).Wait(ctx)
-	})
+	var lastErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		lastErr = nil
+		s.withAdmin(func(ctx context.Context, c *imapclient.Client) error {
+			lastErr = c.Delete(name, nil).Wait(ctx)
+			return nil
+		})
+		if lastErr == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	s.t.Fatalf("fixtureimap: delete %q: %v", name, lastErr)
 }

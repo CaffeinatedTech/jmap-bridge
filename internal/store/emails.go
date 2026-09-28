@@ -492,68 +492,7 @@ func (s *Store) ResetFolder(ctx context.Context, account, folder string, newUIDV
 		if err != nil {
 			return err
 		}
-		// Every email this folder currently maps.
-		var emailIDs []string
-		rows, err := tx.QueryContext(ctx,
-			`SELECT email_id FROM imap_uids WHERE account = ? AND folder = ?`, account, folder)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			emailIDs = append(emailIDs, id)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM imap_uids WHERE account = ? AND folder = ?`, account, folder); err != nil {
-			return err
-		}
-		// Wholesale unlink: counts get recomputed once afterwards.
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE email_mailbox SET removed_modseq = ?
-			 WHERE mailbox_uid = ? AND removed_modseq = 0`, seq, mailboxUID); err != nil {
-			return err
-		}
-		for _, id := range emailIDs {
-			var others int
-			if err := tx.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM email_mailbox
-				 WHERE email_id = ? AND removed_modseq = 0`, id).Scan(&others); err != nil {
-				return err
-			}
-			if others > 0 {
-				if _, err := tx.ExecContext(ctx,
-					`UPDATE emails SET updated_modseq = ? WHERE id = ? AND account = ?`,
-					seq, id, account); err != nil {
-					return err
-				}
-				continue
-			}
-			// Only this folder knew it: destroy and release its ids.
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE emails SET deleted = ?, updated_modseq = ? WHERE id = ? AND account = ?`,
-				seq, seq, id, account); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx,
-				`DELETE FROM email_msgid WHERE account = ? AND email_id = ?`, account, id); err != nil {
-				return err
-			}
-		}
-		if err := recountMailbox(ctx, tx, account, mailboxUID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE mailboxes SET uidvalidity = ?, uidnext = 0, highestmodseq = 0,
-			   updated_modseq = ? WHERE rowid = ? AND account = ?`,
-			int64(newUIDValidity), seq, mailboxUID, account); err != nil {
+		if err := resetFolderLocked(ctx, tx, account, mailboxUID, newUIDValidity, seq); err != nil {
 			return err
 		}
 		if err := bumpEmailState(ctx, tx, account, seq); err != nil {
@@ -561,6 +500,76 @@ func (s *Store) ResetFolder(ctx context.Context, account, folder string, newUIDV
 		}
 		return bumpMailboxState(ctx, tx, account, seq)
 	})
+}
+
+// resetFolderLocked is ResetFolder's body, callable from SyncFolders'
+// discovery transaction (FR-S.6).
+func resetFolderLocked(ctx context.Context, tx *sql.Tx, account string, mailboxUID int64, newUIDValidity uint32, seq int64) error {
+	var emailIDs []string
+	rows, err := tx.QueryContext(ctx,
+		`SELECT email_id FROM imap_uids WHERE account = ?
+		   AND folder = (SELECT name FROM mailboxes WHERE rowid = ? AND account = ?)`,
+		account, mailboxUID, account)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		emailIDs = append(emailIDs, id)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM imap_uids WHERE account = ?
+		   AND folder = (SELECT name FROM mailboxes WHERE rowid = ? AND account = ?)`,
+		account, mailboxUID, account); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE email_mailbox SET removed_modseq = ?
+		 WHERE mailbox_uid = ? AND removed_modseq = 0`, seq, mailboxUID); err != nil {
+		return err
+	}
+	for _, id := range emailIDs {
+		var others int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM email_mailbox
+			 WHERE email_id = ? AND removed_modseq = 0`, id).Scan(&others); err != nil {
+			return err
+		}
+		if others > 0 {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE emails SET updated_modseq = ? WHERE id = ? AND account = ?`,
+				seq, id, account); err != nil {
+				return err
+			}
+			continue
+		}
+		// Only this folder knew it: destroy and release its ids.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE emails SET deleted = ?, updated_modseq = ? WHERE id = ? AND account = ? AND deleted IS NULL`,
+			seq, seq, id, account); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM email_msgid WHERE account = ? AND email_id = ?`, account, id); err != nil {
+			return err
+		}
+	}
+	if err := recountMailbox(ctx, tx, account, mailboxUID); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx,
+		`UPDATE mailboxes SET uidvalidity = ?, uidnext = 0, highestmodseq = 0,
+		   updated_modseq = ? WHERE rowid = ? AND account = ?`,
+		int64(newUIDValidity), seq, mailboxUID, account)
+	return err
 }
 
 // PurgeTombstones removes email tombstones older than retention days and

@@ -66,7 +66,7 @@ func mkRec(uid uint32, msgid, subject, from string, flags []string, at time.Time
 func TestSyncFoldersHierarchyAndRoles(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
 		t.Fatalf("sync folders: %v", err)
 	}
 	mbs, state, err := s.Mailboxes(ctx, "acct")
@@ -96,7 +96,7 @@ func TestSyncFoldersHierarchyAndRoles(t *testing.T) {
 	}
 	// A folder vanishing is a destroy, not a silent delete.
 	kept := append([]Folder(nil), testFolders()[:3]...)
-	if err := s.SyncFolders(ctx, "acct", kept); err != nil {
+	if _, err := s.SyncFolders(ctx, "acct", kept); err != nil {
 		t.Fatalf("resync: %v", err)
 	}
 	cs, err := s.Changes(ctx, "acct", "Mailbox", state)
@@ -111,7 +111,7 @@ func TestSyncFoldersHierarchyAndRoles(t *testing.T) {
 func TestPutMessagesDedupeThreadCounts(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
@@ -183,7 +183,7 @@ func TestPutMessagesDedupeThreadCounts(t *testing.T) {
 func TestFlagUpdateMovesUnreadAndState(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
@@ -224,7 +224,7 @@ func TestFlagUpdateMovesUnreadAndState(t *testing.T) {
 func TestExpungeTombstonesAndMembershipSurvival(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
@@ -282,7 +282,7 @@ func TestExpungeTombstonesAndMembershipSurvival(t *testing.T) {
 func TestUIDValidityResetMintsFreshIDs(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
@@ -331,7 +331,7 @@ func TestUIDValidityResetMintsFreshIDs(t *testing.T) {
 func TestQueryFiltersSortsAndCollapses(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
@@ -427,7 +427,7 @@ func TestQueryFiltersSortsAndCollapses(t *testing.T) {
 func TestHydrationStoresBodiesAndBlobs(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
@@ -503,7 +503,7 @@ func TestHydrationStoresBodiesAndBlobs(t *testing.T) {
 func TestChangesReplayAndFloor(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
 		t.Fatal(err)
 	}
 	s1, _ := s.EmailStateString(ctx, "acct")
