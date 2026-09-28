@@ -147,6 +147,21 @@ func (s *Store) EmailStateString(ctx context.Context, account string) (string, e
 	return strconv.FormatInt(m.EmailState, 10), nil
 }
 
+// States implements [jmapapi.Store]: the pushable type states for one
+// account (FR-J.8).
+func (s *Store) States(ctx context.Context, account string) (map[string]string, error) {
+	email, err := s.EmailStateString(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	mailbox, err := s.MailboxStateString(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	// Thread state IS the Email state (PLAN §4.1 companions).
+	return map[string]string{"Mailbox": mailbox, "Email": email, "Thread": email}, nil
+}
+
 // MailboxStateString returns the Mailbox type state.
 func (s *Store) MailboxStateString(ctx context.Context, account string) (string, error) {
 	m, err := loadMeta(ctx, s.db, account)

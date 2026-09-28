@@ -151,6 +151,12 @@ func (s *Store) Changes(_ context.Context, _, kind, sinceState string) (jmapapi.
 	return jmapapi.ChangeSet{}, jmapapi.ErrCannotCalculateChanges
 }
 
+// States implements [jmapapi.Store]: the fixture never mutates, so its
+// states are the static initial values.
+func (s *Store) States(_ context.Context, _ string) (map[string]string, error) {
+	return map[string]string{"Mailbox": mailboxState, "Email": emailState, "Thread": emailState}, nil
+}
+
 // QueryEmails implements jmapapi.Store over the in-memory fixtures with
 // the same token semantics as the reference mock server (PLAN §2.1):
 // text/from/to/subject match whole tokens, AND across the needle.

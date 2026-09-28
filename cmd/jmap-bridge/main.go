@@ -1,7 +1,8 @@
 // Command jmap-bridge is a containerised JMAP server fronting IMAP/SMTP
-// accounts and their CardDAV contacts (REQUIREMENTS.md). M0 serves the
-// session, the batched /jmap endpoint, and deterministic fixture mail;
-// the sync engine lands in M1.
+// accounts and their CardDAV contacts (REQUIREMENTS.md). M1 serves the
+// session, the batched /jmap endpoint and the eventsource from a
+// SQLite cache that a per-account sync engine keeps faithful to the
+// IMAP server (PLAN §5).
 package main
 
 import (
@@ -19,12 +20,18 @@ import (
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/auth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/config"
-	"github.com/CaffeinatedTech/jmap-bridge/internal/fixture"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/httpapi"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/push"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/sync"
 )
 
 // version is overridden at build time via -ldflags.
 var version = "dev"
+
+// tombstoneRetention is NFR-4's /changes replay window.
+const tombstoneRetention = 30 * 24 * time.Hour
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -58,10 +65,44 @@ func run(args []string) error {
 
 	log := newLogger(cfg.LogLevel)
 	tokens := auth.NewTokens(tokenMap(cfg))
-	store := fixture.New() // M0: no sync engine yet; M1 swaps internal/store in here
+	hub := push.New()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	st, err := store.Open(ctx, store.Options{
+		DataDir: cfg.DataDir,
+		Logger:  log,
+		Publish: hub.Publish,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			log.Warn("store close failed", "err", err)
+		}
+	}()
+
+	// One engine per account that has an IMAP backend; an account
+	// without one serves whatever the cache holds (log, never lie).
+	engines := 0
+	for i := range cfg.Accounts {
+		a := &cfg.Accounts[i]
+		if a.IMAP == nil {
+			log.Warn("account has no [imap] block; serving cache only", "account", a.ID)
+			continue
+		}
+		eng := sync.New(syncConfig(cfg, a), st, log)
+		go eng.Run(ctx)
+		engines++
+	}
+
+	go purgeLoop(ctx, st, log)
+
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           httpapi.New(cfg, tokens, store, log),
+		Handler:           httpapi.New(cfg, tokens, st, hub, log),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -71,11 +112,9 @@ func run(args []string) error {
 		"base_url", cfg.BaseURL,
 		"auth_mode", cfg.Auth.Mode,
 		"accounts", accountIDs(cfg),
-		"backend", "fixture (M0)",
+		"engines", engines,
+		"backend", "sqlite+imap (M1)",
 	)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
@@ -90,7 +129,49 @@ func run(args []string) error {
 		log.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		// Engines stop via ctx; the store checkpoints on Close above.
 		return srv.Shutdown(shutdownCtx)
+	}
+}
+
+// syncConfig lifts one account's [sync]/[search]/[imap] settings into
+// the engine's view.
+func syncConfig(cfg *config.Config, a *config.Account) sync.Config {
+	tls := true
+	if a.IMAP.TLS != nil {
+		tls = *a.IMAP.TLS
+	}
+	return sync.Config{
+		Account: a.ID,
+		IMAP: imapdrv.Config{
+			Host:     a.IMAP.Host,
+			Port:     a.IMAP.Port,
+			TLS:      tls,
+			Username: a.IMAP.Username,
+			Password: a.IMAP.Password,
+		},
+		Interval:       cfg.Sync.Interval.Std(),
+		BatchSize:      cfg.Sync.BatchSize,
+		PrefetchWindow: cfg.Sync.PrefetchWindow.Std(),
+		Concurrency:    cfg.Search.Concurrency,
+	}
+}
+
+// purgeLoop applies NFR-4's tombstone retention daily: /changes stays
+// replayable for at least 30 days, older tombstones go away with the
+// replay floor raised so stale sinceStates degrade honestly.
+func purgeLoop(ctx context.Context, st *store.Store, log *slog.Logger) {
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := st.PurgeTombstones(ctx, tombstoneRetention); err != nil {
+				log.Warn("tombstone purge failed", "err", err)
+			}
+		}
 	}
 }
 

@@ -173,6 +173,11 @@ type Store interface {
 	// notFound.
 	ThreadsByID(ctx context.Context, account string, ids []string) ([]*Thread, string, []string, error)
 
+	// States returns the current state string for each pushable type
+	// (Mailbox, Email, Thread; contacts join in M6) — the payload of a
+	// StateChange push (FR-J.8).
+	States(ctx context.Context, account string) (map[string]string, error)
+
 	// Changes replays changes of kind ("Mailbox" or "Email") since
 	// sinceState, or returns ErrCannotCalculateChanges when it cannot.
 	Changes(ctx context.Context, account, kind, sinceState string) (ChangeSet, error)

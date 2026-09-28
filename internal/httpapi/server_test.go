@@ -12,6 +12,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/auth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/config"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/fixture"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/push"
 )
 
 const testConfig = `
@@ -45,7 +46,7 @@ func newTestServer(t *testing.T) *testServer {
 		"personal": "tok-personal",
 		"work":     "tok-work",
 	})
-	ts := httptest.NewServer(New(cfg, tokens, fixture.New(), nil))
+	ts := httptest.NewServer(New(cfg, tokens, fixture.New(), push.New(), nil))
 	t.Cleanup(ts.Close)
 	return &testServer{Server: ts, cfg: cfg}
 }
@@ -135,11 +136,16 @@ func TestSessionShape(t *testing.T) {
 	if got, want := sess["apiUrl"], "http://127.0.0.1:8080/personal/jmap"; got != want {
 		t.Errorf("apiUrl = %v, want %v", got, want)
 	}
-	// FR-J.5: endpoints that do not exist must not be advertised.
-	for _, key := range []string{"uploadUrl", "downloadUrl", "eventSourceUrl"} {
+	// FR-J.5: endpoints that do not exist must not be advertised; the
+	// eventsource exists as of M1 and must carry its §2 template.
+	for _, key := range []string{"uploadUrl", "downloadUrl"} {
 		if _, present := sess[key]; present {
 			t.Errorf("session advertises %s but the endpoint does not exist", key)
 		}
+	}
+	es, present := sess["eventSourceUrl"].(string)
+	if !present || !strings.Contains(es, "{types}") {
+		t.Errorf("eventSourceUrl = %v, want a level-1 URI template", sess["eventSourceUrl"])
 	}
 	if _, ok := sess["state"].(string); !ok || sess["state"] == "" {
 		t.Errorf("state = %v, want a non-empty string", sess["state"])
@@ -623,7 +629,7 @@ address = "me@example.test"
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
-	ts := httptest.NewServer(New(cfg, auth.NewTokens(nil), fixture.New(), nil))
+	ts := httptest.NewServer(New(cfg, auth.NewTokens(nil), fixture.New(), push.New(), nil))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/personal/.well-known/jmap")

@@ -17,6 +17,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/auth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/config"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/push"
 )
 
 // Request size caps (NFR-5, locked as D-16). maxSizeRequest mirrors the
@@ -31,24 +32,28 @@ type Server struct {
 	cfg    *config.Config
 	tokens *auth.Tokens
 	store  jmapapi.Store
+	hub    *push.Hub
 	jmap   *jmapapi.Handler
 	log    *slog.Logger
 	mux    *http.ServeMux
 }
 
-// New wires a Server: routing, auth and dispatch. store serves every
-// configured account.
-func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store, log *slog.Logger) *Server {
+// New wires a Server: routing, auth, dispatch and push. store serves
+// every configured account; hub is the change signal source for the
+// eventsource endpoint (FR-J.8).
+func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store, hub *push.Hub, log *slog.Logger) *Server {
 	s := &Server{
 		cfg:    cfg,
 		tokens: tokens,
 		store:  store,
+		hub:    hub,
 		jmap:   jmapapi.NewHandler(store),
 		log:    log,
 		mux:    http.NewServeMux(),
 	}
 	s.mux.HandleFunc("GET /{account}/.well-known/jmap", s.handleSession)
 	s.mux.HandleFunc("POST /{account}/jmap", s.handleAPI)
+	s.mux.HandleFunc("GET /{account}/eventsource/", s.handleEventSource)
 	return s
 }
 
@@ -166,8 +171,10 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		},
 		"username": user,
 		"apiUrl":   base + "/" + acct.ID + "/jmap",
-		// No uploadUrl/downloadUrl/eventSourceUrl yet: an advertised
-		// endpoint that does not exist is a lie (FR-J.5).
+		// The eventsource exists as of M1 (FR-J.8); upload/download
+		// still do not — advertising them would be a lie (FR-J.5).
+		"eventSourceUrl": base + "/" + acct.ID +
+			"/eventsource/?types={types}&closeafter={closeafter}&ping={ping}",
 		"state": s.sessionState(acct, user),
 	}
 	writeJSON(w, http.StatusOK, session, map[string]string{
