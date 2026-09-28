@@ -393,7 +393,8 @@ func (h *Handler) emailGet(ctx context.Context, acct *Account, raw json.RawMessa
 			return nil, methodErrorf("invalidArguments", "ids exceeds maxObjectsInGet (%d)", maxObjectsInGet)
 		}
 	}
-	emails, state, notFound, err := acct.Store.EmailsByID(ctx, acct.ID, ids)
+	wantBodies := args.FetchAllBodyValues || args.FetchTextBodyValues || args.FetchHTMLBodyValues
+	emails, state, notFound, err := acct.Store.EmailsByID(ctx, acct.ID, ids, wantBodies)
 	if err != nil {
 		return nil, serverFail(err)
 	}
@@ -409,7 +410,10 @@ func (h *Handler) emailGet(ctx context.Context, acct *Account, raw json.RawMessa
 }
 
 // emailObject builds the full wire object; callers filter with
-// filterProps afterwards.
+// filterProps afterwards. Two shapes exist: the store path (Structure
+// set — real parsed MIME) and the M0 fixture path (TextBody/HTMLBody
+// strings), which synthesises its parts exactly as jmap-tui's mockjmap
+// does (PLAN §2.1).
 func emailObject(e *Email, args *getArgs) map[string]any {
 	obj := map[string]any{
 		"id":            e.ID,
@@ -449,6 +453,70 @@ func emailObject(e *Email, args *getArgs) map[string]any {
 		obj["inReplyTo"] = e.InReplyTo
 	}
 
+	if e.Structure != nil {
+		structureInto(obj, e, args)
+	} else {
+		fixtureBodies(obj, e, args)
+	}
+	return obj
+}
+
+// structureInto emits bodyStructure, textBody/htmlBody, attachments and
+// bodyValues from the parsed MIME tree (FR-M.4).
+func structureInto(obj map[string]any, e *Email, args *getArgs) {
+	var tree map[string]any
+	if err := json.Unmarshal(e.Structure, &tree); err != nil {
+		return
+	}
+	byPart := map[string]map[string]any{}
+	collectParts(tree, byPart)
+
+	obj["bodyStructure"] = filterPartTree(tree, args.BodyProperties)
+
+	if len(e.TextParts) > 0 {
+		obj["textBody"] = partsFor(byPart, e.TextParts, args.BodyProperties)
+	}
+	if len(e.HTMLParts) > 0 {
+		obj["htmlBody"] = partsFor(byPart, e.HTMLParts, args.BodyProperties)
+	}
+	if len(e.Attachments) > 0 {
+		ids := make([]string, 0, len(e.Attachments))
+		for _, a := range e.Attachments {
+			ids = append(ids, a.PartID)
+		}
+		obj["attachments"] = partsFor(byPart, ids, args.BodyProperties)
+	}
+
+	wantValues := args.Properties == nil || containsString(*args.Properties, "bodyValues")
+	fetch := args.FetchAllBodyValues || args.FetchTextBodyValues || args.FetchHTMLBodyValues
+	if !wantValues || !fetch || len(e.BodyValues) == 0 {
+		return
+	}
+	values := map[string]map[string]any{}
+	add := func(ids []string) {
+		for _, id := range ids {
+			if v, ok := e.BodyValues[id]; ok {
+				values[id] = map[string]any{"value": v, "isTruncated": false}
+			}
+		}
+	}
+	switch {
+	case args.FetchAllBodyValues:
+		add(e.TextParts)
+		add(e.HTMLParts)
+	case args.FetchTextBodyValues:
+		add(e.TextParts)
+	case args.FetchHTMLBodyValues:
+		add(e.HTMLParts)
+	}
+	if len(values) > 0 {
+		obj["bodyValues"] = values
+	}
+}
+
+// fixtureBodies is the M0 path: synthesised "1"/"2" parts from plain
+// string bodies, byte-compatible with mockjmap's answers.
+func fixtureBodies(obj map[string]any, e *Email, args *getArgs) {
 	var textPart, htmlPart map[string]any
 	if e.TextBody != "" {
 		textPart = map[string]any{"partId": "1", "type": "text/plain", "charset": "utf-8", "size": len(e.TextBody)}
@@ -475,7 +543,62 @@ func emailObject(e *Email, args *getArgs) map[string]any {
 			obj["bodyValues"] = values
 		}
 	}
-	return obj
+}
+
+// collectParts indexes every part of the tree by partId.
+func collectParts(node map[string]any, byPart map[string]map[string]any) {
+	if pid, ok := node["partId"].(string); ok && pid != "" {
+		byPart[pid] = node
+	}
+	if subs, ok := node["subParts"].([]any); ok {
+		for _, s := range subs {
+			if child, ok := s.(map[string]any); ok {
+				collectParts(child, byPart)
+			}
+		}
+	}
+}
+
+// partsFor renders the requested part objects for a selection list,
+// applying bodyProperties (RFC 8621 §4.1).
+func partsFor(byPart map[string]map[string]any, ids []string, props *[]string) []map[string]any {
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		if p, ok := byPart[id]; ok {
+			out = append(out, filterPart(p, props))
+		}
+	}
+	return out
+}
+
+// filterPartTree applies bodyProperties recursively to the structure
+// tree; partId always travels so bodyValues stays addressable.
+func filterPartTree(node map[string]any, props *[]string) map[string]any {
+	if props == nil {
+		return node
+	}
+	out := make(map[string]any, len(*props)+1)
+	for _, p := range *props {
+		if v, ok := node[p]; ok {
+			if p == "subParts" {
+				if subs, ok := v.([]any); ok {
+					filtered := make([]any, 0, len(subs))
+					for _, s := range subs {
+						if child, ok := s.(map[string]any); ok {
+							filtered = append(filtered, filterPartTree(child, props))
+						}
+					}
+					out["subParts"] = filtered
+				}
+				continue
+			}
+			out[p] = v
+		}
+	}
+	if _, ok := node["partId"]; ok {
+		out["partId"] = node["partId"]
+	}
+	return out
 }
 
 // --- Thread/get (FR-M.7) ---

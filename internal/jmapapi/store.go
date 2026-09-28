@@ -6,6 +6,7 @@ package jmapapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -42,8 +43,9 @@ type Address struct {
 	Email string
 }
 
-// Email is the store-level view of a JMAP Email (FR-M.4). Bodies are
-// plain text strings until M1's blob store materialises MIME structure.
+// Email is the store-level view of a JMAP Email (FR-M.4). Summary
+// fields are always populated; body data arrives through Structure /
+// BodyValues once the store has parsed it.
 type Email struct {
 	ID       string
 	ThreadID string
@@ -63,8 +65,32 @@ type Email struct {
 	HasAttachment bool
 	Preview       string
 
-	TextBody string // "" when the message has no text/plain part
-	HTMLBody string // "" when the message has no text/html part
+	TextBody string // fixture path: plain text body, "" when absent
+	HTMLBody string // fixture path: html body, "" when absent
+
+	// Structure is the JMAP EmailBodyPart tree as raw JSON (FR-M.4
+	// bodyStructure); nil for the M0 fixture path, which synthesises
+	// its parts from TextBody/HTMLBody instead.
+	Structure json.RawMessage
+	// BodyValues maps partId → decoded body text, populated once the
+	// body has been hydrated (FR-S.8).
+	BodyValues map[string]string
+	// TextParts / HTMLParts are the textBody/htmlBody selections
+	// derived from Structure (FR-M.4).
+	TextParts, HTMLParts []string
+	// Attachments are the attachment entries of Structure, with
+	// BlobID set once the part has been written to the blob store.
+	Attachments []Attachment
+}
+
+// Attachment is one attachment body part (RFC 8621 §4.1.3).
+type Attachment struct {
+	PartID      string `json:"partId"`
+	BlobID      string `json:"blobId,omitempty"`
+	Type        string `json:"type"`
+	Size        int64  `json:"size"`
+	Name        string `json:"name,omitempty"`
+	Disposition string `json:"disposition,omitempty"`
 }
 
 // Thread is a JMAP Thread: ids of its emails, oldest first (RFC 8621
@@ -136,8 +162,10 @@ type Store interface {
 	QueryEmails(ctx context.Context, account string, q EmailQuery) (ids []string, position, total int, counter string, err error)
 
 	// EmailsByID returns the named emails; unknown ids land in notFound.
-	// A nil ids slice means "all".
-	EmailsByID(ctx context.Context, account string, ids []string) ([]*Email, string, []string, error)
+	// A nil ids slice means "all". wantBodies asks the store to make
+	// bodyValues available first (hydration on demand, FR-M.4/FR-S.8);
+	// with it false the store never touches bodies (golden rule 2).
+	EmailsByID(ctx context.Context, account string, ids []string, wantBodies bool) ([]*Email, string, []string, error)
 
 	// ThreadsByID returns the named threads; unknown ids land in
 	// notFound.

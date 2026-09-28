@@ -127,47 +127,58 @@ CREATE TABLE mailboxes (            -- JMAP Mailbox ⇄ IMAP folder
   name TEXT NOT NULL,               -- IMAP path (hierarchical, separator kept)
   sort_order INTEGER NOT NULL DEFAULT 0,
   uidvalidity INTEGER, uidnext INTEGER, highestmodseq INTEGER,
-  total_emails INTEGER, unread_emails INTEGER,
-  total_threads INTEGER, unread_threads INTEGER,
-  may_read_items, may_add_items, may_remove_items, may_create_child,
-  may_rename, may_delete INTEGER NOT NULL DEFAULT 1,
-  created_modseq, updated_modseq, updated_not_counts_modseq INTEGER NOT NULL DEFAULT 0,
-  deleted INTEGER NOT NULL DEFAULT 0
+  total_emails INTEGER NOT NULL DEFAULT 0, unread_emails INTEGER NOT NULL DEFAULT 0,
+  total_threads INTEGER NOT NULL DEFAULT 0, unread_threads INTEGER NOT NULL DEFAULT 0,
+  may_read_items INTEGER NOT NULL DEFAULT 1, may_add_items INTEGER NOT NULL DEFAULT 1,
+  may_remove_items INTEGER NOT NULL DEFAULT 1, may_create_child INTEGER NOT NULL DEFAULT 1,
+  may_rename INTEGER NOT NULL DEFAULT 1, may_delete INTEGER NOT NULL DEFAULT 1,
+  created_modseq INTEGER NOT NULL, updated_modseq INTEGER NOT NULL,
+  updated_not_counts_modseq INTEGER NOT NULL DEFAULT 0,
+  deleted INTEGER                   -- deletion modseq (tombstone for /changes)
 );
+CREATE INDEX mailboxes_changes ON mailboxes(account, updated_modseq);
+CREATE INDEX mailboxes_parent ON mailboxes(account, parent_id, deleted);
 
 CREATE TABLE emails (               -- JMAP Email metadata (narrow, hot)
   id TEXT PRIMARY KEY,
   account TEXT NOT NULL,
   thread_id TEXT NOT NULL,
-  mailbox_flags TEXT NOT NULL,      -- JSON: mailboxId → true
   keywords TEXT NOT NULL,           -- JSON: keyword → true
   received_at INTEGER NOT NULL,     -- unix micros
   size INTEGER NOT NULL,
   has_attachment INTEGER NOT NULL,
   preview TEXT NOT NULL DEFAULT '',
-  blob_id TEXT,                     -- raw message blob (null until hydrated)
-  uid INTEGER, uidvalidity INTEGER, -- backend addressing (per mailbox row below)
-  created_modseq, updated_modseq INTEGER NOT NULL,
-  deleted INTEGER                    -- tombstone for /changes
+  created_modseq INTEGER NOT NULL,
+  updated_modseq INTEGER NOT NULL,
+  deleted INTEGER                   -- deletion modseq (tombstone for /changes)
 );
+CREATE INDEX emails_changes ON emails(account, updated_modseq);
+CREATE INDEX emails_thread ON emails(account, thread_id, received_at);
+CREATE INDEX emails_recv ON emails(account, received_at);
+CREATE INDEX emails_live ON emails(account, deleted, received_at);
 
 CREATE TABLE email_mailbox (        -- MailboxEmailList: membership + history
-  mailbox_uid INTEGER NOT NULL,     -- compact per-mailbox key
+  account TEXT NOT NULL,
+  mailbox_uid INTEGER NOT NULL,     -- mailboxes.rowid: compact per-mailbox key
   email_id TEXT NOT NULL,
   removed_modseq INTEGER NOT NULL DEFAULT 0,
-  added_modseq INTEGER NOT NULL
+  added_modseq INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX email_mailbox_live ON email_mailbox(mailbox_uid, email_id)
   WHERE removed_modseq = 0;
+CREATE INDEX email_mailbox_email ON email_mailbox(email_id);
 
-CREATE TABLE email_content (        -- parsed, immutable
+CREATE TABLE email_content (        -- parsed at backfill; bodies at hydration
   id TEXT PRIMARY KEY,
   headers TEXT NOT NULL,            -- JSON subset (from/to/cc/bcc/replyTo/subject/…)
-  message_ids TEXT, in_reply_to TEXT, references TEXT,  -- JSON arrays
+  message_ids TEXT, in_reply_to TEXT, "references" TEXT,  -- JSON arrays
   sent_at INTEGER,
-  body_structure TEXT NOT NULL,     -- JSON EmailBodyPart tree
-  body_values TEXT NOT NULL,        -- JSON partId → {value, isTruncated}
-  hydrated_at INTEGER               -- null until the body was fetched
+  subject_l TEXT NOT NULL DEFAULT '',  -- lowercase mirrors for query filters/sorts
+  from_l TEXT NOT NULL DEFAULT '',     -- (M5's FTS5 supersedes them for text)
+  to_l TEXT NOT NULL DEFAULT '',
+  body_structure TEXT NOT NULL DEFAULT '{}',  -- JSON EmailBodyPart tree
+  body_values TEXT NOT NULL DEFAULT '{}',     -- partId → {value, isTruncated}
+  hydrated_at INTEGER                -- null until the body was fetched
 );
 
 CREATE VIRTUAL TABLE email_fts USING fts5(
@@ -175,23 +186,29 @@ CREATE VIRTUAL TABLE email_fts USING fts5(
   tokenize = 'unicode61 remove_diacritics 2'
 );
 
-CREATE TABLE threads (              -- Refs to Thread
-  rfc822_id_hash TEXT NOT NULL,
-  subject_hash TEXT NOT NULL,
-  thread_id TEXT NOT NULL, last_seen INTEGER NOT NULL
+CREATE TABLE threads (              -- thread key → thread id (FR-M.7)
+  account TEXT NOT NULL,
+  thread_key TEXT NOT NULL,         -- 'm:<sha1(Message-ID)>' | 's:<sha1(base subject)>'
+  thread_id TEXT NOT NULL,
+  last_seen INTEGER NOT NULL,
+  PRIMARY KEY (account, thread_key)
 );
+CREATE INDEX threads_by_id ON threads(account, thread_id);
+
 CREATE TABLE imap_uids (            -- (folder, uidvalidity, uid) → email id
-  account TEXT, folder TEXT, uidvalidity INTEGER, uid INTEGER,
-  email_id TEXT NOT NULL,
+  account TEXT NOT NULL, folder TEXT NOT NULL, uidvalidity INTEGER NOT NULL,
+  uid INTEGER NOT NULL, email_id TEXT NOT NULL,
   PRIMARY KEY (account, folder, uidvalidity, uid)
 );
+CREATE INDEX imap_uids_email ON imap_uids(email_id);
 
 CREATE TABLE addressbooks (         -- JMAP AddressBook ⇄ CardDAV collection
   id TEXT PRIMARY KEY, account TEXT, href TEXT NOT NULL,
   name TEXT, description TEXT, sort_order INTEGER,
-  may_read, may_write, may_share, may_delete INTEGER NOT NULL DEFAULT 1,
+  may_read INTEGER NOT NULL DEFAULT 1, may_write INTEGER NOT NULL DEFAULT 1,
+  may_share INTEGER NOT NULL DEFAULT 1, may_delete INTEGER NOT NULL DEFAULT 1,
   sync_token TEXT, ctag TEXT, etag TEXT,
-  created_modseq, updated_modseq INTEGER NOT NULL, deleted INTEGER
+  created_modseq INTEGER NOT NULL, updated_modseq INTEGER NOT NULL, deleted INTEGER
 );
 CREATE TABLE cards (                -- JSContact ⇄ vCard
   id TEXT PRIMARY KEY,              -- = vCard UID (RFC 9610 §3)
@@ -200,29 +217,29 @@ CREATE TABLE cards (                -- JSContact ⇄ vCard
   jscontact TEXT NOT NULL,          -- full JSContact JSON
   vcard TEXT NOT NULL,              -- last known wire form
   href TEXT NOT NULL, etag TEXT,    -- CardDAV addressing
-  created_modseq, updated_modseq INTEGER NOT NULL, deleted INTEGER,
+  created_modseq INTEGER NOT NULL, updated_modseq INTEGER NOT NULL, deleted INTEGER,
   UNIQUE (account, uid)
 );
 
-CREATE TABLE blobs (                -- blobId → file path, media type, size
+CREATE TABLE blobs (                -- blobId → relative file path, media type, size
   id TEXT PRIMARY KEY, account TEXT, path TEXT NOT NULL,
   media_type TEXT, size INTEGER, created_at INTEGER
 );
 
 CREATE TABLE sync_state (           -- per account/folder sync bookkeeping
-  account TEXT, scope TEXT,         -- 'folder:<name>' | 'contacts' | 'account'
-  highestmodseq INTEGER, sync_token TEXT, last_full_scan INTEGER,
+  account TEXT NOT NULL, scope TEXT NOT NULL,   -- 'folder:<name>' | 'contacts' | 'account'
+  highestmodseq INTEGER NOT NULL DEFAULT 0, sync_token TEXT,
+  last_full_scan INTEGER,
   PRIMARY KEY (account, scope)
 );
 
-CREATE TABLE counters (             -- monotonic per-account allocators
-  account TEXT, name TEXT,          -- 'modseq' (global change counter) | 'id' (id mint)
-  value INTEGER NOT NULL,
-  PRIMARY KEY (account, name)
+CREATE TABLE counters (             -- process-global monotonic allocators
+  name TEXT PRIMARY KEY,            -- 'seq': change counter, feeds id minting
+  value INTEGER NOT NULL
 );
 
 CREATE TABLE email_msgid (          -- a message's own Message-ID → its email id
-  account TEXT, msgid TEXT, email_id TEXT,   -- dedupe across folders; uidvalidity remap
+  account TEXT NOT NULL, msgid TEXT NOT NULL, email_id TEXT NOT NULL,
   PRIMARY KEY (account, msgid)
 );
 
@@ -230,19 +247,25 @@ CREATE TABLE tokens (               -- client-facing auth tokens
   account TEXT PRIMARY KEY, token_hash TEXT NOT NULL
 );
 
-CREATE TABLE schema_version (version INTEGER NOT NULL);
 ```
 
 **Bookkeeping conventions** (M1, §4.1 companions):
 
-- `sync_state` row `scope='account'` carries the account's global `modseq`
-  allocator (every mutation takes the next value); `sync_state`
-  `scope='folder:<name>'` stores `sync_token` as JSON:
-  `{"uidvalidity":…,"uidnext":…,"highestmodseq":…,"backfill_uid":…,"purged_through":…}`.
-- Type state strings derive as `MAX(updated_modseq)` over the type's rows
-  (tombstones included), so they are monotonic without a per-type counter;
-  `Thread` state is the `Email` state (any email change can change threads) and
-  `queryState`'s counter is the `Email` state (PLAN §4.1).
+- `counters` holds one process-global `seq` that every mutation takes (and
+  that id minting embeds — global so ids cannot collide across accounts).
+- `sync_state` row `scope='account'` holds the account's JSON state floors
+  (`emailState`, `mailboxState`, `purgedThrough`): every mutation raises the
+  relevant floor to its `seq`, which keeps type states monotonic even after
+  tombstone retention expires, and `purgedThrough` marks the oldest change
+  `/changes` can no longer replay. `sync_state` `scope='folder:<name>'` holds
+  per-folder sync bookkeeping as JSON
+  (`{"uidvalidity":…,"uidnext":…,"highestmodseq":…,"backfill_uid":…}`).
+- Type state strings are the floors above; `Thread` state is the `Email`
+  state (any email change can change threads) and `queryState`'s counter is
+  the `Email` state (PLAN §4.1).
+- `email_content.subject_l/from_l/to_l` are lowercase query mirrors of the
+  header subset — M1 filters and sorts on them with `LIKE`; M5's FTS5 index
+  supersedes them for `text` search (FR-X).
 
 **Blobs** live in `{data_dir}/blobs/{aa}/{blobId}` (raw messages, attachments,
 contact photos). SQLite holds metadata only; bodies are never inside rows.
@@ -250,8 +273,8 @@ contact photos). SQLite holds metadata only; bodies are never inside rows.
 ### 4.1 Identifiers and state strings
 
 - JMAP ids are opaque, immutable, unique per account and **independent of IMAP
-  UIDs** — they must survive `UIDVALIDITY` changes. Recommendation: 13-char
-  base62 of a per-account counter (time-prefixed, per jmap.io guidance, so id
+  UIDs** — they must survive `UIDVALIDITY` changes. Form: 13-char
+  base62 of the global `seq` counter (time-prefixed, per jmap.io guidance, so id
   order approximates date order for `Email/query` fast paths).
 - `UIDVALIDITY` change → re-point `imap_uids`, mint **new** ids for survivors,
   emit destroys/creates through `/changes` (clients see a normal change set).

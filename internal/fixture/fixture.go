@@ -84,7 +84,7 @@ func (s *Store) MailboxesByID(_ context.Context, account string, ids []string) (
 }
 
 // EmailsByID implements jmapapi.Store.
-func (s *Store) EmailsByID(_ context.Context, account string, ids []string) ([]*jmapapi.Email, string, []string, error) {
+func (s *Store) EmailsByID(_ context.Context, account string, ids []string, _ bool) ([]*jmapapi.Email, string, []string, error) {
 	d := s.data(account)
 	if ids == nil {
 		out := make([]*jmapapi.Email, len(d.emails))
