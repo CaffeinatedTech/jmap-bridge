@@ -12,7 +12,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
 )
 
-// BlobStore stores immutable blobs (attachments, later uploads and
+// BlobStore stores immutable blobs (attachments, client uploads and
 // contact photos) as files under {data_dir}/blobs/{aa}/{blobId}, with
 // SQLite holding only metadata (PLAN §4, §7.3). Bodies never live in
 // rows.

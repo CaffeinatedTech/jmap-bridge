@@ -24,7 +24,7 @@ import (
 // value advertised in the core capability object.
 const (
 	maxSizeRequest = 32 << 20 // 32 MiB
-	maxSizeUpload  = 64 << 20 // 64 MiB (advertised; upload endpoint lands in M3)
+	maxSizeUpload  = 64 << 20 // 64 MiB: the session cap and the upload endpoint's limit (NFR-5, D-16)
 )
 
 // Server is the bridge's HTTP handler.
