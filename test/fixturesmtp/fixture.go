@@ -43,6 +43,12 @@ type Options struct {
 	RejectMail string
 	// RejectRCPT, when set, refuses every RCPT TO with this reply.
 	RejectRCPT string
+	// OnMessage, when set, is called once a submission has been
+	// accepted — outside the store lock, on the connection's goroutine.
+	// A harness that has to behave like an MTA (deliver the message
+	// into a local mailbox so a client's live view can see it) hands
+	// the work here; the fixture itself only stores.
+	OnMessage func(Message)
 }
 
 // Message is one accepted submission: the envelope and the bytes as the
@@ -206,11 +212,15 @@ func (s *Server) handle(conn net.Conn) {
 			if !ok {
 				return
 			}
+			msg := Message{From: from, Recipients: append([]string(nil), rcpts...), Data: data}
 			s.mu.Lock()
-			s.msgs = append(s.msgs, Message{From: from, Recipients: append([]string(nil), rcpts...), Data: data})
+			s.msgs = append(s.msgs, msg)
 			s.mu.Unlock()
 			from, rcpts = "", nil
 			send("250 OK: queued")
+			if s.opts.OnMessage != nil {
+				s.opts.OnMessage(msg)
+			}
 		case "RSET":
 			from, rcpts = "", nil
 			send("250 OK")
