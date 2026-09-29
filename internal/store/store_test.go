@@ -187,6 +187,72 @@ func TestPutMessagesDedupeThreadCounts(t *testing.T) {
 	assertCountsMatchRecount(t, s, "acct")
 }
 
+// TestPutMessagesSameFolderDuplicateDeliveries pins the dedupe scope:
+// the Message-ID reuse is cross-folder only — a second delivery of the
+// same Message-ID into the same folder is its own message (two rows,
+// counts 2), while the same message surfacing in a second folder still
+// shares one id with two memberships (and the counts that implies).
+func TestPutMessagesSameFolderDuplicateDeliveries(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	rec := func(uid uint32) MessageRec {
+		return mkRec(uid, "<dup@example>", "Duplicated delivery", "alice@example.test", nil, at)
+	}
+	if err := s.PutMessages(ctx, "acct", "INBOX", []MessageRec{rec(1)}); err != nil {
+		t.Fatalf("first put: %v", err)
+	}
+	if _, total, unread := mailboxByName(t, s, "INBOX"); total != 1 || unread != 1 {
+		t.Fatalf("inbox after first delivery = %d/%d, want 1/1", total, unread)
+	}
+
+	// Same Message-ID, different uid, same folder: a second delivery.
+	if err := s.PutMessages(ctx, "acct", "INBOX", []MessageRec{rec(2)}); err != nil {
+		t.Fatalf("duplicate put: %v", err)
+	}
+	emails, _, notFound, err := s.EmailsByID(ctx, "acct", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notFound) != 0 {
+		t.Fatalf("unexpected notFound: %v", notFound)
+	}
+	if len(emails) != 2 {
+		t.Errorf("same-folder redelivery merged: %d emails, want 2", len(emails))
+	}
+	if _, total, unread := mailboxByName(t, s, "INBOX"); total != 2 || unread != 2 {
+		t.Errorf("inbox after duplicate = %d/%d, want 2/2", total, unread)
+	}
+
+	// The same message in a second folder still dedupes cross-folder.
+	if err := s.PutMessages(ctx, "acct", "Archive", []MessageRec{rec(3)}); err != nil {
+		t.Fatalf("cross-folder put: %v", err)
+	}
+	emails, _, _, err = s.EmailsByID(ctx, "acct", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emails) != 2 {
+		t.Errorf("cross-folder dedupe failed: %d emails, want 2", len(emails))
+	}
+	shared := 0
+	for _, e := range emails {
+		if len(e.MailboxIDs) == 2 {
+			shared++
+		}
+	}
+	if shared != 1 {
+		t.Errorf("shared emails = %d, want exactly one id with two memberships", shared)
+	}
+	if _, total, unread := mailboxByName(t, s, "Archive"); total != 1 || unread != 1 {
+		t.Errorf("archive counts = %d/%d, want 1/1", total, unread)
+	}
+	assertCountsMatchRecount(t, s, "acct")
+}
+
 func TestFlagUpdateMovesUnreadAndState(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

@@ -95,18 +95,29 @@ func (s *Store) PutMessages(ctx context.Context, account, folder string, recs []
 
 			// Dedupe: a message already known through another folder keeps
 			// its id — the same mail is one JMAP Email with two mailboxes.
+			// Only cross-folder, though: when the known email already has a
+			// live membership in this folder, this arrival is a second
+			// delivery of the same Message-ID and gets its own message
+			// (two rows in one mailbox = two deliveries, and reusing the
+			// id would inflate the membership the counts rely on).
 			if id := liveEmailByMsgID(ctx, tx, account, rec.MessageIDs); id != "" {
-				if err := applyFlags(ctx, tx, account, id, keywords, seq); err != nil {
+				liveHere, err := hasLiveMembership(ctx, tx, mailboxUID, id)
+				if err != nil {
 					return err
 				}
-				if err := addMembership(ctx, tx, account, mailboxUID, id, seq); err != nil {
-					return err
+				if !liveHere {
+					if err := applyFlags(ctx, tx, account, id, keywords, seq); err != nil {
+						return err
+					}
+					if err := addMembership(ctx, tx, account, mailboxUID, id, seq); err != nil {
+						return err
+					}
+					if err := mapUID(ctx, tx, account, folder, rec.UIDValidity, rec.UID, id); err != nil {
+						return err
+					}
+					mailboxDirty = true
+					continue
 				}
-				if err := mapUID(ctx, tx, account, folder, rec.UIDValidity, rec.UID, id); err != nil {
-					return err
-				}
-				mailboxDirty = true
-				continue
 			}
 
 			if _, err := createMessage(ctx, tx, account, mailboxUID, folder, rec, keywords, seq); err != nil {
@@ -199,7 +210,15 @@ func createMessage(ctx context.Context, tx *sql.Tx, account string, mailboxUID i
 // addMembership links an email into a mailbox and moves the four counts
 // (FR-M.1). The queries that decide thread counts start from the
 // thread index, so a bulk backfill stays index-shaped (PLAN §4 risk).
+// The counts move only when the membership is fresh: an upsert that
+// hits an already-live row is a no-op for the counters, mirroring
+// removeMembershipLocked's decrement-only-when-live (otherwise every
+// duplicate arrival of the same uid set inflates the mailbox counts).
 func addMembership(ctx context.Context, tx *sql.Tx, account string, mailboxUID int64, emailID string, seq int64) error {
+	existed, err := hasLiveMembership(ctx, tx, mailboxUID, emailID)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO email_mailbox(account, mailbox_uid, email_id, removed_modseq, added_modseq)
 		 VALUES (?, ?, ?, 0, ?)
@@ -207,6 +226,9 @@ func addMembership(ctx context.Context, tx *sql.Tx, account string, mailboxUID i
 		 DO UPDATE SET removed_modseq = 0, added_modseq = excluded.added_modseq`,
 		account, mailboxUID, emailID, seq); err != nil {
 		return fmt.Errorf("store: add membership: %w", err)
+	}
+	if existed {
+		return nil
 	}
 	// Counts: this email's own contribution, plus thread edges that were
 	// not present before this insert.
@@ -638,6 +660,20 @@ func mapUID(ctx context.Context, tx *sql.Tx, account, folder string, uidValidity
 		return fmt.Errorf("store: map uid: %w", err)
 	}
 	return nil
+}
+
+// hasLiveMembership reports whether an email currently sits live in a
+// mailbox (removed_modseq = 0). The transaction holding it is exclusive,
+// so the answer stays valid through the membership write that follows.
+func hasLiveMembership(ctx context.Context, tx *sql.Tx, mailboxUID int64, emailID string) (bool, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM email_mailbox
+		 WHERE mailbox_uid = ? AND email_id = ? AND removed_modseq = 0`,
+		mailboxUID, emailID).Scan(&n); err != nil {
+		return false, fmt.Errorf("store: membership check: %w", err)
+	}
+	return n > 0, nil
 }
 
 // liveEmailByMsgID finds a live email by any of the message's own
