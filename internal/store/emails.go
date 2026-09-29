@@ -109,7 +109,7 @@ func (s *Store) PutMessages(ctx context.Context, account, folder string, recs []
 				continue
 			}
 
-			if err := createMessage(ctx, tx, account, mailboxUID, folder, rec, keywords, seq); err != nil {
+			if _, err := createMessage(ctx, tx, account, mailboxUID, folder, rec, keywords, seq); err != nil {
 				return err
 			}
 			mailboxDirty = true
@@ -126,11 +126,12 @@ func (s *Store) PutMessages(ctx context.Context, account, folder string, recs []
 	})
 }
 
-// createMessage mints ids and writes the four rows for one new message.
-func createMessage(ctx context.Context, tx *sql.Tx, account string, mailboxUID int64, folder string, rec *MessageRec, keywords map[string]bool, seq int64) error {
+// createMessage mints ids and writes the four rows for one new message,
+// returning the JMAP id it created.
+func createMessage(ctx context.Context, tx *sql.Tx, account string, mailboxUID int64, folder string, rec *MessageRec, keywords map[string]bool, seq int64) (string, error) {
 	id, err := mintID(ctx, tx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	threadID, err := deriveThread(ctx, tx, account, ThreadInput{
 		MessageID:  first(rec.MessageIDs),
@@ -139,11 +140,11 @@ func createMessage(ctx context.Context, tx *sql.Tx, account string, mailboxUID i
 		Subject:    rec.Subject,
 	}, seq)
 	if err != nil {
-		return err
+		return "", err
 	}
 	kwJSON, err := jsonString(keywords)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO emails(id, account, thread_id, keywords, received_at, size,
@@ -151,19 +152,19 @@ func createMessage(ctx context.Context, tx *sql.Tx, account string, mailboxUID i
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, account, threadID, kwJSON, rec.ReceivedAt.UnixMicro(), rec.Size,
 		boolInt(rec.HasAttachment), rec.Preview, seq, seq); err != nil {
-		return fmt.Errorf("store: insert email: %w", err)
+		return "", fmt.Errorf("store: insert email: %w", err)
 	}
 	msgIDs, err := jsonString(rec.MessageIDs)
 	if err != nil {
-		return err
+		return "", err
 	}
 	inReplyTo, err := jsonString(rec.InReplyTo)
 	if err != nil {
-		return err
+		return "", err
 	}
 	refs, err := jsonString(rec.References)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var sentAt any
 	if rec.SentAt != nil {
@@ -175,24 +176,24 @@ func createMessage(ctx context.Context, tx *sql.Tx, account string, mailboxUID i
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, rec.HeadersJSON, msgIDs, inReplyTo, refs,
 		sentAt, rec.SubjectL, rec.FromL, rec.ToL, rec.Structure); err != nil {
-		return fmt.Errorf("store: insert content: %w", err)
+		return "", fmt.Errorf("store: insert content: %w", err)
 	}
 	if err := addMembership(ctx, tx, account, mailboxUID, id, seq); err != nil {
-		return err
+		return "", err
 	}
 	if rec.UID != 0 || rec.UIDValidity != 0 {
 		if err := mapUID(ctx, tx, account, folder, rec.UIDValidity, rec.UID, id); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if mid := firstNonEmpty(rec.MessageIDs); mid != "" {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR REPLACE INTO email_msgid(account, msgid, email_id) VALUES (?, ?, ?)`,
 			account, mid, id); err != nil {
-			return fmt.Errorf("store: index message-id: %w", err)
+			return "", fmt.Errorf("store: index message-id: %w", err)
 		}
 	}
-	return nil
+	return id, nil
 }
 
 // addMembership links an email into a mailbox and moves the four counts
@@ -414,58 +415,13 @@ func (s *Store) RemoveUIDs(ctx context.Context, account, folder string, uidValid
 			if emailID == "" {
 				continue
 			}
-			if _, err := tx.ExecContext(ctx,
-				`DELETE FROM imap_uids WHERE account = ? AND folder = ? AND uidvalidity = ? AND uid = ?`,
-				account, folder, uidValidity, uid); err != nil {
-				return err
-			}
-			mb, err := tx.ExecContext(ctx,
-				`UPDATE email_mailbox SET removed_modseq = ?
-				 WHERE mailbox_uid = ? AND email_id = ? AND removed_modseq = 0`,
-				seq, mailboxUID, emailID)
+			removed, err := removeMembershipLocked(ctx, tx, account, mailboxUID, folder, emailID, seq)
 			if err != nil {
-				return fmt.Errorf("store: unlink: %w", err)
-			}
-			if n, _ := mb.RowsAffected(); n == 0 {
-				continue
-			}
-			// Counts for the departure, then let orphanEmails decide the
-			// tombstone.
-			var threadID, kw string
-			if err := tx.QueryRowContext(ctx,
-				`SELECT thread_id, keywords FROM emails WHERE id = ? AND account = ?`,
-				emailID, account).Scan(&threadID, &kw); err != nil {
 				return err
 			}
-			unread := !seenIn(kw)
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE mailboxes SET total_emails = total_emails - 1,
-				   unread_emails = unread_emails - ?, updated_modseq = ?
-				 WHERE rowid = ? AND account = ?`,
-				boolInt(unread), seq, mailboxUID, account); err != nil {
-				return err
+			if removed {
+				orphans = append(orphans, orphan{uid: mailboxUID, id: emailID})
 			}
-			if n, err := threadMembers(ctx, tx, account, mailboxUID, threadID, emailID, false); err != nil {
-				return err
-			} else if n == 0 {
-				if _, err := tx.ExecContext(ctx,
-					`UPDATE mailboxes SET total_threads = total_threads - 1 WHERE rowid = ? AND account = ?`,
-					mailboxUID, account); err != nil {
-					return err
-				}
-			}
-			if unread {
-				if n, err := threadMembers(ctx, tx, account, mailboxUID, threadID, emailID, true); err != nil {
-					return err
-				} else if n == 0 {
-					if _, err := tx.ExecContext(ctx,
-						`UPDATE mailboxes SET unread_threads = unread_threads - 1 WHERE rowid = ? AND account = ?`,
-						mailboxUID, account); err != nil {
-						return err
-					}
-				}
-			}
-			orphans = append(orphans, orphan{uid: mailboxUID, id: emailID})
 		}
 		if err := orphanEmails(ctx, tx, account, seq, orphans); err != nil {
 			return err
