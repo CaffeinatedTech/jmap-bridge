@@ -26,10 +26,12 @@ func NewSetError(typ string, properties []string, description string) SetError {
 }
 
 // SetResponse is the RFC 8620 §5.3 /set response shape (FR-J.4): absent
-// collections are JSON null — never [] or {} — and Updated is an array
-// of ids, the form Fastmail, Stalwart and jmap-tui's flexible decoder
-// accept (PLAN §2.1). It ships with M0 because the shape is a protocol
-// contract of its own; M2's Email/set and M2's Mailbox/set fill it in.
+// collections are JSON null — never [] or {} — `created` is an
+// Id[Foo] map, `updated` an Id[Foo|null] map and `destroyed` an Id[]
+// list, which is what the RFC defines and what Fastmail and Stalwart
+// were measured answering (2026-09-29). It ships with M0 because the
+// shape is a protocol contract of its own; M2's Email/set, M2's
+// Mailbox/set and M3's implicit submission Email/set fill it in.
 type SetResponse struct {
 	AccountID string `json:"accountId"`
 	// OldState is null unless the caller knows the pre-mutation state
@@ -37,12 +39,29 @@ type SetResponse struct {
 	OldState *string `json:"oldState"`
 	NewState string  `json:"newState"`
 
-	Created      map[string]any      `json:"created"`
-	Updated      []string            `json:"updated"`
-	Destroyed    []string            `json:"destroyed"`
-	NotCreated   map[string]SetError `json:"notCreated"`
-	NotUpdated   map[string]SetError `json:"notUpdated"`
-	NotDestroyed map[string]SetError `json:"notDestroyed"`
+	Created      map[string]any           `json:"created"`
+	Updated      map[string]*UpdateDetail `json:"updated"`
+	Destroyed    []string                 `json:"destroyed"`
+	NotCreated   map[string]SetError      `json:"notCreated"`
+	NotUpdated   map[string]SetError      `json:"notUpdated"`
+	NotDestroyed map[string]SetError      `json:"notDestroyed"`
+}
+
+// UpdateDetail is the value side of a /set response's `updated` map
+// (RFC 8620 §5.3 Id[Foo|null]): an object of changes the client did not
+// ask for, or null when there are none. The bridge always has none — it
+// applies exactly the patch it was given — so every entry is null, the
+// same answer Fastmail and Stalwart give.
+type UpdateDetail struct{}
+
+// markUpdated records one id as changed with no unrequested changes. A
+// nil Updated marshals as JSON null, which is RFC 8620 §5.3's "nothing
+// was updated" (FR-J.4: null, never [] or {}).
+func (r *SetResponse) markUpdated(id string) {
+	if r.Updated == nil {
+		r.Updated = map[string]*UpdateDetail{}
+	}
+	r.Updated[id] = nil
 }
 
 // set converts a methodErr into the SetError a /set member failure

@@ -56,8 +56,10 @@ Measured from `jmap-tui/internal/jmapclient` on 2026-09-28:
     sorts incl. `Mailbox/query` by `sortOrder`,
   - `Email/set` patches `keywords/<kw>` and `mailboxIds/<id>` using `true`/`null`
     (`null` removes — Fastmail rejects `false`),
-  - `updated` in a set response may be an **array** (Stalwart) or an **object**
-    (go-jmap's typed assumption) — the bridge sends the array form,
+  - `updated` in a set response is an **object** `{"id": null}` — RFC 8620 §5.3
+    `Id[Foo|null]`, measured on Fastmail and Stalwart 2026-09-29 (jmap-tui's
+    wrapper also tolerates an array, but the RFC shape is the map, and go-jmap's
+    typed field only decodes that),
   - `EmailSubmission/set` with `onSuccessUpdateEmail` patches, response carries
     `undoStatus`, `sendAt`.
 - URL/auth policy: cleartext `http://` accepted **only for loopback**; credentials

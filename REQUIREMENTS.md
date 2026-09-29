@@ -323,8 +323,10 @@ requirements are `NFR-<n>`.
   reference arguments (`Email/get` reading `/ids` from an `Email/query` result)
   and `/createdIds` where used.
 - **FR-J.4** Set responses use the RFC 8620 §5.3 shapes exactly: absent
-  collections are `null` (not `[]`/`{}`), `updated` is an **array of ids**, error
-  maps carry per-id SetError objects with `type`/`properties`/`description`.
+  collections are `null` (not `[]`/`{}`), `created` is an `Id[Foo]` map, `updated`
+  an `Id[Foo|null]` map (never an array of ids), `destroyed` an `Id[]` list, and
+  error maps carry per-id SetError objects with
+  `type`/`properties`/`description`.
 - **FR-J.5** Capabilities advertised match what is actually implemented and
   configured (mail always; submission when SMTP configured; contacts per FR-P.3;
   core always). `uploadUrl`/`downloadUrl`/`eventSourceUrl` are only advertised

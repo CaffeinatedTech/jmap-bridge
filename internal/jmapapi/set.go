@@ -79,7 +79,7 @@ func (h *Handler) emailSet(ctx context.Context, acct *Account, raw json.RawMessa
 		if patch.Empty() {
 			// A patch that asks for nothing still counts as updated
 			// (RFC 8620 §5.3) — it just moves no state.
-			resp.Updated = append(resp.Updated, id)
+			resp.markUpdated(id)
 			continue
 		}
 		if err := acct.Backend.ApplyEmailPatch(ctx, acct.ID, id, patch); err != nil {
@@ -89,7 +89,7 @@ func (h *Handler) emailSet(ctx context.Context, acct *Account, raw json.RawMessa
 			resp.NotUpdated[id] = setErrFor(err, patchErrorProperty(patch))
 			continue
 		}
-		resp.Updated = append(resp.Updated, id)
+		resp.markUpdated(id)
 	}
 	if args.Destroy != nil {
 		for _, id := range *args.Destroy {
@@ -400,7 +400,7 @@ func (h *Handler) mailboxSet(ctx context.Context, acct *Account, raw json.RawMes
 			resp.NotUpdated[id] = setErrFor(err, "")
 			continue
 		}
-		resp.Updated = append(resp.Updated, id)
+		resp.markUpdated(id)
 	}
 	if args.Destroy != nil {
 		for _, id := range *args.Destroy {

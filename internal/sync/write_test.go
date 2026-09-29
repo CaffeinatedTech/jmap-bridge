@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -140,6 +141,30 @@ func setErrors(t *testing.T, res jmapResult, key string) map[string]jmapapi.SetE
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatalf("decode %s: %v", key, err)
 	}
+	return out
+}
+
+// updatedIDs reads a /set response's `updated` — an Id[Foo|null] map,
+// not a list (RFC 8620 §5.3) — as the set of ids it names.
+func updatedIDs(t *testing.T, res jmapResult) []string {
+	t.Helper()
+	raw, ok := res.Args["updated"]
+	if !ok || raw == nil {
+		return nil
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal updated: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("updated = %s, want a map of id to null (RFC 8620 §5.3)", b)
+	}
+	out := make([]string, 0, len(m))
+	for id := range m {
+		out = append(out, id)
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -287,7 +312,7 @@ func TestEmailSetStarIsVisibleToSecondClient(t *testing.T) {
 		"accountId": "acct",
 		"update":    map[string]any{id: map[string]any{"keywords/$flagged": true}},
 	})
-	if got := idList(t, old, "updated"); len(got) != 1 || got[0] != id {
+	if got := updatedIDs(t, old); len(got) != 1 || got[0] != id {
 		t.Fatalf("updated = %v, want [%s]", got, id)
 	}
 	oldState, _ := old.Args["oldState"].(string)
@@ -318,7 +343,7 @@ func TestEmailSetStarIsVisibleToSecondClient(t *testing.T) {
 		"accountId": "acct",
 		"update":    map[string]any{id: map[string]any{"keywords/$flagged": nil}},
 	})
-	if got := idList(t, undo, "updated"); len(got) != 1 {
+	if got := updatedIDs(t, undo); len(got) != 1 {
 		t.Errorf("undo updated = %v", got)
 	}
 	if e := emailByID(t, env, id); e.Keywords["$flagged"] {

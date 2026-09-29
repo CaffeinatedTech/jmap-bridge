@@ -284,7 +284,7 @@ func (h *Handler) implicitEmailSet(ctx context.Context, acct *Account, applied [
 			resp.NotUpdated[p.emailID] = setErrFor(err, patchErrorProperty(p.patch))
 			continue
 		}
-		resp.Updated = append(resp.Updated, p.emailID)
+		resp.markUpdated(p.emailID)
 	}
 	// Read-your-writes: the state this response ends with includes the
 	// patches it just reported (FR-M.13).

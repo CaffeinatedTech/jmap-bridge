@@ -239,7 +239,7 @@ func TestSubmissionComposeSendFilesSent(t *testing.T) {
 		t.Errorf("implicit call id = %q, want the submission's %q (Stalwart's shape, PLAN §2.1)",
 			implicit.CallID, batch[1].CallID)
 	}
-	updated := idList(t, implicit, "updated")
+	updated := updatedIDs(t, implicit)
 	if len(updated) != 1 || updated[0] != draftID {
 		t.Errorf("implicit updated = %v, want [%s]", updated, draftID)
 	}

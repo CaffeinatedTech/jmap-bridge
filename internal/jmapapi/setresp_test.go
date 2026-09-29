@@ -34,7 +34,8 @@ func TestSetResponseShapes(t *testing.T) {
 func TestSetResponsePopulated(t *testing.T) {
 	resp := NewSetResponse("personal", "3")
 	desc := "IMAP said no"
-	resp.Updated = []string{"em-1", "em-2"}
+	resp.markUpdated("em-1")
+	resp.markUpdated("em-2")
 	resp.NotUpdated = map[string]SetError{
 		"em-3": NewSetError("serverFail", nil, desc),
 		"em-4": NewSetError("invalidProperties", []string{"subject"}, ""),
@@ -47,9 +48,18 @@ func TestSetResponsePopulated(t *testing.T) {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	updated, ok := decoded["updated"].([]any)
-	if !ok || len(updated) != 2 || updated[0] != "em-1" {
-		t.Fatalf("updated = %v, want an array of ids", decoded["updated"])
+	updated, ok := decoded["updated"].(map[string]any)
+	if !ok || len(updated) != 2 {
+		t.Fatalf("updated = %v, want the Id[Foo|null] map (RFC 8620 §5.3)", decoded["updated"])
+	}
+	for _, id := range []string{"em-1", "em-2"} {
+		v, present := updated[id]
+		if !present {
+			t.Errorf("updated is missing %s: %v", id, updated)
+		}
+		if v != nil {
+			t.Errorf("updated[%s] = %v, want null (the bridge reports no unrequested changes)", id, v)
+		}
 	}
 	notUpdated := decoded["notUpdated"].(map[string]any)
 	e3 := notUpdated["em-3"].(map[string]any)

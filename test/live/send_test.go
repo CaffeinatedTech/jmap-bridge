@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -196,7 +197,7 @@ func TestLiveSendComposeFilesSent(t *testing.T) {
 	if batch[2]["__name"] != "Email/set" {
 		t.Fatalf("third response = %v, want the implicit Email/set (RFC 8621 §7.5)", batch[2]["__name"])
 	}
-	if updated := stringList(batch[2]["updated"]); len(updated) != 1 || updated[0] != draftID {
+	if updated := updatedKeys(t, batch[2]); len(updated) != 1 || updated[0] != draftID {
 		t.Errorf("implicit updated = %v, want [%s]", updated, draftID)
 	}
 	t.Log("submission accepted and its patch applied")
@@ -339,13 +340,26 @@ func names(batch []map[string]any) []string {
 	return out
 }
 
-func stringList(v any) []string {
-	list, _ := v.([]any)
-	out := make([]string, 0, len(list))
-	for _, e := range list {
-		if s, ok := e.(string); ok {
-			out = append(out, s)
-		}
+// updatedKeys reads a /set response's `updated` map (RFC 8620 §5.3
+// Id[Foo|null]) as its sorted ids.
+func updatedKeys(t *testing.T, res map[string]any) []string {
+	t.Helper()
+	raw, ok := res["updated"]
+	if !ok || raw == nil {
+		return nil
 	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal updated: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("updated = %s, want a map of id to null (RFC 8620 §5.3)", b)
+	}
+	out := make([]string, 0, len(m))
+	for id := range m {
+		out = append(out, id)
+	}
+	sort.Strings(out)
 	return out
 }
