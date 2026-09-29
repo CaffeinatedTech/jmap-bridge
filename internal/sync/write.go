@@ -250,7 +250,11 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 		return err
 	}
 
-	_, err = e.st.CommitPatch(ctx, account, emailID, kwAdd, kwRemove, adds, remSet)
+	kwChanged, err := e.st.CommitPatch(ctx, account, emailID, kwAdd, kwRemove, adds, remSet)
+	e.log.Debug("sync: email patch committed",
+		"email", emailID, "kwAdd", kwAdd, "kwRemove", kwRemove,
+		"addedMailboxes", len(adds), "removedMailboxes", len(remSet),
+		"keywordsChanged", kwChanged, "copies", len(copies))
 	return err
 }
 
