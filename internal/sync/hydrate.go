@@ -86,29 +86,10 @@ func (e *Engine) hydrate(ctx context.Context, id string) error {
 	return err
 }
 
-// doHydrate is the owner's fetch: locate, select, PEEK the message,
-// parse it, commit it (FR-S.8).
+// doHydrate is the owner's fetch: get the bytes, parse them, commit
+// them (FR-S.8).
 func (e *Engine) doHydrate(id string) error {
-	locs, err := e.st.Locations(context.Background(), e.cfg.Account, []string{id})
-	if err != nil {
-		return err
-	}
-	loc, ok := locs[id]
-	if !ok {
-		return fmt.Errorf("%w: %s has no backend location", errNotHydrated, id)
-	}
-	e.workMu.Lock()
-	defer e.workMu.Unlock()
-	if e.work == nil {
-		return errNotConnected
-	}
-	e.hydrateFetches.Add(1)
-	opCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	if _, err := e.work.Examine(opCtx, loc.Folder, nil); err != nil {
-		return err
-	}
-	raw, err := e.work.FetchBody(opCtx, loc.UID)
+	raw, err := e.fetchRawBody(id)
 	if err != nil {
 		return err
 	}
@@ -119,12 +100,45 @@ func (e *Engine) doHydrate(id string) error {
 	if len(res.Values) == 0 && len(res.Attachments) == 0 {
 		return fmt.Errorf("%w: %s parsed empty", errNotHydrated, id)
 	}
-	_ = e.work.Unselect(opCtx)
 	if err := e.st.PutHydrated(context.Background(), e.cfg.Account, id, res); err != nil {
 		return err
 	}
 	e.log.Debug("sync: hydrated", "email", id)
 	return nil
+}
+
+// fetchRawBody downloads one message's bytes over the work connection:
+// the fetch half of hydration (FR-S.8), and how a submission gets the
+// raw message of a draft the bridge did not build itself (FR-M.15). An
+// id the cache cannot yet address on the server yields
+// [errNotHydrated]; the fetch runs under the engine's own context, so a
+// caller that walks away does not waste a completed download.
+func (e *Engine) fetchRawBody(id string) ([]byte, error) {
+	locs, err := e.st.Locations(context.Background(), e.cfg.Account, []string{id})
+	if err != nil {
+		return nil, err
+	}
+	loc, ok := locs[id]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s has no backend location", errNotHydrated, id)
+	}
+	e.workMu.Lock()
+	defer e.workMu.Unlock()
+	if e.work == nil {
+		return nil, errNotConnected
+	}
+	e.hydrateFetches.Add(1)
+	opCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if _, err := e.work.Examine(opCtx, loc.Folder, nil); err != nil {
+		return nil, err
+	}
+	raw, err := e.work.FetchBody(opCtx, loc.UID)
+	if err != nil {
+		return nil, err
+	}
+	_ = e.work.Unselect(opCtx)
+	return raw, nil
 }
 
 // fetchPreviews fills missing previews for a batch of ids, grouped by

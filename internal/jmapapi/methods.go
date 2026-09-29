@@ -30,6 +30,10 @@ func (h *Handler) method(name string) methodFunc {
 		return h.emailSet
 	case "Thread/get":
 		return h.threadGet
+	case "Identity/get":
+		return h.identityGet
+	case "EmailSubmission/set":
+		return h.emailSubmissionSet
 	default:
 		return nil
 	}
@@ -429,6 +433,13 @@ func emailObject(e *Email, args *getArgs) map[string]any {
 		"hasAttachment": e.HasAttachment,
 		"preview":       e.Preview,
 	}
+	// blobId travels once the bridge holds the raw bytes: it is the id
+	// of a copy we cached (a draft we built, a message we fetched to
+	// send), never one we would have to download to answer a read
+	// (D-2, RFC 8621 §4.1.1).
+	if e.BlobID != "" {
+		obj["blobId"] = e.BlobID
+	}
 	if len(e.Keywords) > 0 {
 		obj["keywords"] = map[string]bool(e.Keywords)
 	}
@@ -698,9 +709,10 @@ func serverFail(err error) *methodErr {
 //
 // Property names the object does not carry are ignored rather than
 // rejected: the RFC asks for invalidArguments there, but the bridge
-// models a subset of each type's properties (no top-level blobId yet,
-// M3) and refusing a request for one would fail a read that could have
-// been answered.
+// models a subset of each type's properties (a part of Email that has
+// no value yet — blobId until the raw copy is cached —, or a property
+// of a type it does not model at all) and refusing a request for one
+// would fail a read that could have been answered.
 func filterProps(obj map[string]any, props *[]string) map[string]any {
 	if props == nil {
 		return obj

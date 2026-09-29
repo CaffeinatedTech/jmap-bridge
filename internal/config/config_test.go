@@ -295,3 +295,28 @@ func TestBadDurationNamesKey(t *testing.T) {
 		t.Fatalf("error %q does not name interval", err)
 	}
 }
+
+// TestSMTPRequiresAddress pins FR-M.14/FR-M.15: an account that can send
+// must be able to say who it is, because accounts.address is both the
+// identity Identity/get answers with and the envelope sender.
+func TestSMTPRequiresAddress(t *testing.T) {
+	noAddress := strings.Replace(minimalLoopback, "address = \"me@example.com\"\n", "", 1)
+	toml := noAddress + `
+  [accounts.imap]
+  host = "imap.example.com"
+  port = 993
+  username = "me@example.com"
+  password = "pw"
+
+  [accounts.smtp]
+  host = "smtp.example.com"
+  port = 465
+`
+	wantErrKey(t, toml, "accounts[0].address")
+
+	// With the address present the same configuration loads.
+	cfg := mustLoad(t, strings.Replace(toml, "id = \"personal\"", "id = \"personal\"\naddress = \"me@example.com\"", 1))
+	if cfg.Accounts[0].Address == "" {
+		t.Error("address was dropped")
+	}
+}

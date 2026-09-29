@@ -136,6 +136,13 @@ func (c *Config) validateAccount(i int, a *Account) error {
 		if err := validateSMTP(fmt.Sprintf("accounts[%d].smtp", i), a.SMTP); err != nil {
 			return err
 		}
+		// The address is what Identity/get answers with and what the
+		// envelope sender is built from (FR-M.14, FR-M.15): an account
+		// that can send must be able to say who it is.
+		if a.Address == "" {
+			return errKey(fmt.Sprintf("accounts[%d].address", i),
+				"required when [accounts.smtp] is configured (the sending identity and envelope sender)")
+		}
 	}
 	if a.CardDAV != nil && a.CardDAV.URL != "" {
 		if err := validateAbsoluteURL(a.CardDAV.URL, "carddav.url must be an absolute URL"); err != nil {

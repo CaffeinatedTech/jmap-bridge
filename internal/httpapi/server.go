@@ -117,8 +117,9 @@ func (s *Server) sessionState(acct *config.Account, user string) string {
 
 // handleSession serves GET /{account}/.well-known/jmap (FR-J.1). URLs
 // are built from base_url, never the request Host header (FR-D.2), and
-// upload/download/eventSource appear only once their endpoints exist
-// (FR-J.5).
+// every capability advertised here is one this account can actually
+// use: submission only for an account with SMTP behind it (FR-J.5,
+// FR-M.14).
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	acct := s.authorize(w, r, r.PathValue("account"))
 	if acct == nil {
@@ -137,39 +138,49 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	base := strings.TrimRight(s.cfg.BaseURL, "/")
-	session := map[string]any{
-		"capabilities": map[string]any{
-			"urn:ietf:params:jmap:core": map[string]any{
-				"maxSizeUpload":         maxSizeUpload,
-				"maxConcurrentUpload":   4,
-				"maxSizeRequest":        maxSizeRequest,
-				"maxConcurrentRequests": 8,
-				"maxCallsInRequest":     256,
-				"maxObjectsInGet":       512,
-				"maxObjectsInSet":       512,
+	// RFC 8621 §1.3.2: the session-level capability is an empty object,
+	// the account-level one carries maxDelayedSend (0 — v0.1 does not
+	// do delayed send). It appears only when this account has an SMTP
+	// server to submit through (FR-J.5, FR-M.14).
+	capabilities := map[string]any{
+		// RFC 8621 §1.3.1: the session-level mail capability is an
+		// empty object; the limits live on the account.
+		"urn:ietf:params:jmap:mail": map[string]any{},
+	}
+	accountCapabilities := map[string]any{
+		"urn:ietf:params:jmap:mail": map[string]any{
+			"maxMailboxesPerEmail":       100,
+			"maxMailboxDepth":            20,
+			"maxSizeMailboxName":         255,
+			"maxSizeAttachmentsPerEmail": maxSizeUpload,
+			"emailQuerySortOptions": []string{
+				"receivedAt", "subject", "from", "size", "hasAttachment",
 			},
-			// RFC 8621 §1.3.1: the session-level mail capability is an
-			// empty object; the limits live on the account.
-			"urn:ietf:params:jmap:mail": map[string]any{},
+			// Mailbox/set exists as of M2 (FR-M.12), so top-level
+			// creation may be advertised honestly (FR-J.5).
+			"mayCreateTopLevelMailbox": true,
 		},
+	}
+	if canSend(acct) {
+		capabilities[jmapapi.SubmissionURN] = map[string]any{}
+		accountCapabilities[jmapapi.SubmissionURN] = map[string]any{"maxDelayedSend": 0}
+	}
+	capabilities["urn:ietf:params:jmap:core"] = map[string]any{
+		"maxSizeUpload":         maxSizeUpload,
+		"maxConcurrentUpload":   4,
+		"maxSizeRequest":        maxSizeRequest,
+		"maxConcurrentRequests": 8,
+		"maxCallsInRequest":     256,
+		"maxObjectsInGet":       512,
+		"maxObjectsInSet":       512,
+	}
+	session := map[string]any{
+		"capabilities": capabilities,
 		"accounts": map[string]any{
 			acct.ID: map[string]any{
-				"name":       name,
-				"isPersonal": true,
-				"accountCapabilities": map[string]any{
-					"urn:ietf:params:jmap:mail": map[string]any{
-						"maxMailboxesPerEmail":       100,
-						"maxMailboxDepth":            20,
-						"maxSizeMailboxName":         255,
-						"maxSizeAttachmentsPerEmail": maxSizeUpload,
-						"emailQuerySortOptions": []string{
-							"receivedAt", "subject", "from", "size", "hasAttachment",
-						},
-						// Mailbox/set exists as of M2 (FR-M.12), so top-level
-						// creation may be advertised honestly (FR-J.5).
-						"mayCreateTopLevelMailbox": true,
-					},
-				},
+				"name":                name,
+				"isPersonal":          true,
+				"accountCapabilities": accountCapabilities,
 			},
 		},
 		"primaryAccounts": map[string]any{
@@ -231,10 +242,48 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		ID:           acct.ID,
 		Store:        s.store,
 		Backend:      s.backends[acct.ID],
+		Capabilities: capabilitiesFor(acct),
+		Identity:     identityFor(acct),
 		SessionState: s.sessionState(acct, user),
 	}
 	status, resp := s.jmap.Dispatch(r.Context(), jacct, body)
 	writeJSON(w, status, resp, nil)
+}
+
+// canSend reports whether this account may be offered submission
+// (FR-J.5): it needs an SMTP server to send through *and* an IMAP
+// backend, because the engine that submits is the same one that files
+// the sent message and applies the caller's patches — an account with
+// SMTP but no IMAP has no engine behind it (main skips those).
+func canSend(acct *config.Account) bool {
+	return acct.SMTP != nil && acct.IMAP != nil
+}
+
+// capabilitiesFor is what this account offers (FR-J.5): core and mail
+// always, submission only once it can actually send. The session
+// advertises this set and dispatch accepts `using` entries from it, so
+// the two can never drift apart.
+func capabilitiesFor(acct *config.Account) []string {
+	caps := []string{"urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"}
+	if canSend(acct) {
+		caps = append(caps, jmapapi.SubmissionURN)
+	}
+	return caps
+}
+
+// identityFor builds the account's sendable identity (FR-M.14): the
+// configured address, signed with the account's display name, under an
+// id that is stable across restarts. An account that cannot send has
+// none — and then neither the capability nor Identity/get exist.
+func identityFor(acct *config.Account) *jmapapi.Identity {
+	if !canSend(acct) || acct.Address == "" {
+		return nil
+	}
+	return &jmapapi.Identity{
+		ID:    jmapapi.IdentityID(acct.ID),
+		Name:  acct.Name,
+		Email: acct.Address,
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any, extra map[string]string) {

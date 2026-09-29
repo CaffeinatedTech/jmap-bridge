@@ -9,6 +9,10 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
 )
 
+// mailCaps is what an account with no SMTP behind it offers (FR-J.5):
+// dispatch refuses a `using` entry the account context does not carry.
+var mailCaps = []string{"urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"}
+
 // TestGetAlwaysReturnsID pins RFC 8620 §5.1: "The id property of the
 // object is *always* returned, even if not explicitly requested." A
 // client that asked for a narrow property list and got no ids back
@@ -21,7 +25,7 @@ func TestGetAlwaysReturnsID(t *testing.T) {
 	}{{"Email/get", "subject"}, {"Mailbox/get", "name"}} {
 		st := fixture.New()
 		h := jmapapi.NewHandler(st)
-		acct := &jmapapi.Account{ID: "acct1", Store: st}
+		acct := &jmapapi.Account{ID: "acct1", Store: st, Capabilities: mailCaps}
 		body, err := json.Marshal(map[string]any{
 			"using": []string{"urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"},
 			"methodCalls": []any{[]any{tc.method, map[string]any{

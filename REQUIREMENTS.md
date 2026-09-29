@@ -204,20 +204,27 @@ requirements are `NFR-<n>`.
   `accounts.address` (+ optional configured display name), with `mayDelete: false`
   and a stable id; it is only served when the submission capability is advertised.
 - **FR-M.15 `EmailSubmission/set` (create)**: resolves `#reference` or direct
-  `emailId`, builds the envelope from the identity and recipients, submits over
-  SMTP (password or XOAUTH2), and on acceptance `APPEND`s the message to Sent with
-  `\Seen`, applies the caller's `onSuccessUpdateEmail` patches locally, and returns
-  `created` with `undoStatus: "final"` (and `sendAt` only when delayed send is
-  requested — not in v0.1). On SMTP rejection: `notCreated` carrying the SMTP
-  response, and **no** Sent copy. `onSuccessDestroyEmail` is rejected with
+  `emailId`, builds the envelope from the identity and recipients (To, Cc and
+  Bcc alike, with **Bcc stripped from the transmitted bytes**), submits over
+  SMTP, and on acceptance files the message in Sent in exactly one way — the
+  caller's `onSuccessUpdateEmail` when it moves the Email into a mailbox
+  (never also `APPEND`, which would leave two copies), otherwise `APPEND`ing
+  the message with `\Seen`. The `onSuccess*` effects are performed by one
+  implicit `Email/set` whose response follows (RFC 8621 §7.5), and the
+  response carries `created` with `undoStatus: "final"` (and `sendAt` only
+  when delayed send is requested — not in v0.1). On SMTP rejection:
+  `notCreated` carrying the SMTP response, and **no** Sent copy; nothing after
+  a successful submission is ever reported as a failed create (the client
+  would send twice). `onSuccessDestroyEmail` is rejected with
   `invalidProperties` (client-side fallback exists in jmap-tui).
-- **FR-M.16 Blob upload** (`POST /upload/{account}`) accepts a body up to the
-  configured cap, rejects unsupported/oversized content with RFC 8620 error
-  codes, stores it, and returns `{accountId, blobId, type, size}`.
-- **FR-M.17 Blob download** (`GET /download/{account}/{blobId}/{name}`) serves
-  stored blobs with correct media type and `Content-Disposition`, expands all RFC
-  8620 template placeholders (`{accountId}`, `{blobId}`, `{name}`, `{type}`), and
-  rejects ids from another account.
+- **FR-M.16 Blob upload** (`POST /{account}/upload/`, the session's
+  `{accountId}` expanding into the account path prefix) accepts a body up to
+  the configured cap, rejects unsupported/oversized content with RFC 8620
+  error codes, stores it, and returns `{accountId, blobId, type, size}`.
+- **FR-M.17 Blob download** (`GET /{account}/download/{blobId}/{name}`) serves
+  stored blobs with correct media type and `Content-Disposition`, expands all
+  RFC 8620 template placeholders (`{accountId}`, `{blobId}`, `{name}`, `{type}`
+  in the session's template), and rejects ids from another account.
 - **FR-M.18 Gmail mail semantics**: label add/remove behaves as mailbox
   add/remove for clients; archive removes from INBOX only; messages remain listed
   in All Mail; Sent/Drafts use Gmail's special folders (`[Gmail]/Sent Mail`,

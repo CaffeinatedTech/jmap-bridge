@@ -288,7 +288,12 @@ func TestLiveWriteTriageRoundTrips(t *testing.T) {
 	defer engCancel()
 	go eng.Run(engCtx)
 
-	acct := &jmapapi.Account{ID: "livetest", Store: st, Backend: eng}
+	acct := &jmapapi.Account{
+		ID: "livetest", Store: st, Backend: eng,
+		Capabilities: []string{
+			"urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail",
+		},
+	}
 	h := jmapapi.NewHandler(st)
 
 	// Backfill: the seeded message and the two folders are known.

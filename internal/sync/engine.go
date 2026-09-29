@@ -22,6 +22,7 @@ import (
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/submit"
 )
 
 // Config is one engine's tunables, straight from the [sync] config
@@ -29,10 +30,11 @@ import (
 type Config struct {
 	Account        string
 	IMAP           imapdrv.Config
-	Interval       time.Duration // poll fallback for non-idled folders
-	BatchSize      int           // backfill batch (FR-S.3)
-	PrefetchWindow time.Duration // 0 disables prefetch (FR-S.9)
-	Concurrency    int           // hydration workers (FR-S.9 rate limit)
+	SMTP           *submit.Config // nil: the account has no submission server (FR-J.5)
+	Interval       time.Duration  // poll fallback for non-idled folders
+	BatchSize      int            // backfill batch (FR-S.3)
+	PrefetchWindow time.Duration  // 0 disables prefetch (FR-S.9)
+	Concurrency    int            // hydration workers (FR-S.9 rate limit)
 }
 
 // Engine runs one account's sync.

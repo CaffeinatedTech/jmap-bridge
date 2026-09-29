@@ -25,6 +25,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/push"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/submit"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/sync"
 )
 
@@ -138,14 +139,15 @@ func run(args []string) error {
 	}
 }
 
-// syncConfig lifts one account's [sync]/[search]/[imap] settings into
-// the engine's view.
+// syncConfig lifts one account's [sync]/[search]/[imap]/[smtp] settings
+// into the engine's view. An account with no [smtp] block gets a nil
+// SMTP: it can be read from and written to, but not sent from (FR-J.5).
 func syncConfig(cfg *config.Config, a *config.Account) sync.Config {
 	tls := true
 	if a.IMAP.TLS != nil {
 		tls = *a.IMAP.TLS
 	}
-	return sync.Config{
+	out := sync.Config{
 		Account: a.ID,
 		IMAP: imapdrv.Config{
 			Host:     a.IMAP.Host,
@@ -159,6 +161,17 @@ func syncConfig(cfg *config.Config, a *config.Account) sync.Config {
 		PrefetchWindow: cfg.Sync.PrefetchWindow.Std(),
 		Concurrency:    cfg.Search.Concurrency,
 	}
+	if a.SMTP != nil {
+		out.SMTP = &submit.Config{
+			Host:     a.SMTP.Host,
+			Port:     a.SMTP.Port,
+			TLS:      a.SMTP.TLS,
+			Auth:     a.SMTP.Auth,
+			Username: a.SMTP.Username,
+			Password: a.SMTP.Password,
+		}
+	}
+	return out
 }
 
 // purgeLoop applies NFR-4's tombstone retention daily: /changes stays

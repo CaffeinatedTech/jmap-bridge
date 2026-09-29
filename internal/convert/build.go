@@ -1,6 +1,7 @@
 package convert
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -456,4 +457,48 @@ func wrapBase64(data []byte) string {
 func escapeQuoted(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	return r.Replace(s)
+}
+
+// StripBcc removes the Bcc header field (and its folds) from a message
+// on its way out: RFC 8621 §7.5 requires a server to drop Bcc during
+// delivery, while the copy filed in Sent keeps it — a Sent record that
+// forgot who was bcc'd would be the wrong record. The body is copied
+// through untouched; only the header block is walked.
+func StripBcc(msg []byte) []byte {
+	out := make([]byte, 0, len(msg))
+	rest := msg
+	drop := false
+	for len(rest) > 0 {
+		var line []byte
+		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+			line, rest = rest[:i+1], rest[i+1:]
+		} else {
+			line, rest = rest, nil
+		}
+		trimmed := bytes.TrimRight(line, "\r\n")
+		if len(trimmed) == 0 {
+			// End of the header block: everything left is the body.
+			out = append(out, line...)
+			out = append(out, rest...)
+			return out
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			// A folded continuation belongs to the header above it.
+			if drop {
+				continue
+			}
+		} else {
+			drop = isBccHeader(trimmed)
+			if drop {
+				continue
+			}
+		}
+		out = append(out, line...)
+	}
+	return out
+}
+
+// isBccHeader reports whether a header line is the Bcc field.
+func isBccHeader(line []byte) bool {
+	return len(line) > 3 && line[3] == ':' && bytes.EqualFold(line[:3], []byte("Bcc"))
 }

@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,10 +19,15 @@ import (
 // verify every mutation through a *second* IMAP session, which is the
 // M2 gate's "visible from another client" half in-process (PLAN §12).
 
+// mailCaps is the capability set testAccount offers: core and mail,
+// with submission joining once an M3 test configures SMTP (FR-J.5).
+var mailCaps = []string{"urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"}
+
 type jmapResult struct {
-	Name string
-	Args map[string]any
-	Raw  json.RawMessage
+	Name   string
+	CallID string
+	Args   map[string]any
+	Raw    json.RawMessage
 }
 
 // jmap runs one method call and returns its response. A method-level
@@ -36,41 +42,78 @@ func jmap(t *testing.T, acct *jmapapi.Account, h *jmapapi.Handler, method string
 }
 
 func jmapTry(acct *jmapapi.Account, h *jmapapi.Handler, method string, args any) (jmapResult, error) {
-	body, err := json.Marshal(map[string]any{
-		"using":       []string{"urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"},
-		"methodCalls": []any{[]any{method, args, "c1"}},
-	})
+	out, err := dispatchBatch(acct, h, []any{method, args, "c1"})
 	if err != nil {
 		return jmapResult{}, err
+	}
+	if len(out) != 1 {
+		return jmapResult{}, &dispatchErr{status: 200, body: fmt.Sprintf("got %d responses, want 1", len(out))}
+	}
+	if out[0].Name == "error" {
+		return jmapResult{}, &dispatchErr{status: 200, body: string(out[0].Raw)}
+	}
+	return out[0], nil
+}
+
+// jmapBatch runs several method calls in one request — the shape a
+// composing client sends: create the draft and submit it together, so
+// the submission can name the draft "#draft" (RFC 8620 §3.4, §3.7).
+// Responses come back in order, including any implicit call the server
+// appended (RFC 8621 §7.5). A method-level error is a response here,
+// not a Go error: a batch is not atomic.
+func jmapBatch(t *testing.T, acct *jmapapi.Account, h *jmapapi.Handler, calls ...[]any) []jmapResult {
+	t.Helper()
+	out, err := dispatchBatch(acct, h, calls...)
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	return out
+}
+
+// dispatchBatch marshals the calls, dispatches them, and decodes every
+// response triple. `using` is derived from the account's own
+// capabilities — exactly what a client that read the session sends.
+func dispatchBatch(acct *jmapapi.Account, h *jmapapi.Handler, calls ...[]any) ([]jmapResult, error) {
+	body, err := json.Marshal(map[string]any{
+		"using":       acct.Capabilities,
+		"methodCalls": calls,
+	})
+	if err != nil {
+		return nil, err
 	}
 	status, out := h.Dispatch(context.Background(), acct, body)
 	raw, err := json.Marshal(out)
 	if err != nil {
-		return jmapResult{}, err
+		return nil, err
 	}
 	if status != 200 {
-		return jmapResult{}, &dispatchErr{status: status, body: string(raw)}
+		return nil, &dispatchErr{status: status, body: string(raw)}
 	}
-	// methodResponses is an array of [name, args, callId] triples.
 	var wire struct {
 		MethodResponses [][]json.RawMessage `json:"methodResponses"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
-		return jmapResult{}, err
+		return nil, err
 	}
-	triples := wire.MethodResponses
-	if len(triples) == 0 {
-		return jmapResult{}, &dispatchErr{status: status, body: string(raw)}
+	results := make([]jmapResult, 0, len(wire.MethodResponses))
+	for _, triple := range wire.MethodResponses {
+		if len(triple) != 3 {
+			return nil, &dispatchErr{status: status, body: string(raw)}
+		}
+		var name, callID string
+		_ = json.Unmarshal(triple[0], &name)
+		_ = json.Unmarshal(triple[2], &callID)
+		res := jmapResult{Name: name, CallID: callID, Raw: triple[1]}
+		if name != "error" {
+			if err := json.Unmarshal(triple[1], &res.Args); err != nil {
+				return nil, err
+			}
+		} else {
+			_ = json.Unmarshal(triple[1], &res.Args)
+		}
+		results = append(results, res)
 	}
-	name := string(mustUnquote(triples[0][0]))
-	if name == "error" {
-		return jmapResult{}, &dispatchErr{status: status, body: string(triples[0][1])}
-	}
-	var m map[string]any
-	if err := json.Unmarshal(triples[0][1], &m); err != nil {
-		return jmapResult{}, err
-	}
-	return jmapResult{Name: name, Args: m, Raw: triples[0][1]}, nil
+	return results, nil
 }
 
 type dispatchErr struct {
@@ -80,14 +123,6 @@ type dispatchErr struct {
 
 func (e *dispatchErr) Error() string {
 	return "method error (HTTP " + strconv.Itoa(e.status) + "): " + e.body
-}
-
-func mustUnquote(raw json.RawMessage) []byte {
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return []byte(s)
-	}
-	return raw
 }
 
 // setErrors reads one of notCreated/notUpdated/notDestroyed.
@@ -124,7 +159,9 @@ func idList(t *testing.T, res jmapResult, key string) []string {
 
 // testAccount builds the per-request account context production builds.
 func testAccount(env *testEnv) (*jmapapi.Account, *jmapapi.Handler) {
-	return &jmapapi.Account{ID: "acct", Store: env.st, Backend: env.eng},
+	return &jmapapi.Account{
+			ID: "acct", Store: env.st, Backend: env.eng, Capabilities: mailCaps,
+		},
 		jmapapi.NewHandler(env.st)
 }
 

@@ -6,7 +6,9 @@
 package convert
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"mime"
 	"net/mail"
 	"strconv"
@@ -139,6 +141,92 @@ func Summary(env Envelope, root *Part, receivedAt time.Time, size int64) store.M
 
 		HasAttachment: hasAttachment,
 	}
+}
+
+// SummaryFromRaw builds the store's header-level record from a complete
+// RFC 5322 message the bridge already holds in memory. It is how a
+// submission files its Sent copy (PLAN §7.2): the record is derived
+// from exactly the bytes that were sent, instead of from an IMAP
+// ENVELOPE the next sync pass would have to deliver first.
+//
+// A header the parser cannot read is left out of the record rather than
+// failing it: a Sent copy must exist even for a message with an odd
+// address header, and the summary fields the query mirrors feed are the
+// ones that parsed.
+func SummaryFromRaw(raw []byte, receivedAt time.Time) (store.MessageRec, error) {
+	mr, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return store.MessageRec{}, fmt.Errorf("convert: read message headers: %w", err)
+	}
+	h := mr.Header
+	subject := decodeWords(h.Get("Subject"))
+	from := headerAddresses(h, "From")
+	to := headerAddresses(h, "To")
+	cc := headerAddresses(h, "Cc")
+
+	headers := map[string]any{}
+	if subject != "" {
+		headers["subject"] = subject
+	}
+	for key, addrs := range map[string][]Address{
+		"from": from, "to": to, "cc": cc,
+		"bcc": headerAddresses(h, "Bcc"), "replyTo": headerAddresses(h, "Reply-To"),
+	} {
+		if j := jmapAddresses(addrs); len(j) > 0 {
+			headers[key] = j
+		}
+	}
+	hj, err := json.Marshal(headers)
+	if err != nil {
+		return store.MessageRec{}, fmt.Errorf("convert: encode headers: %w", err)
+	}
+	structure, err := structureOfRaw(raw)
+	if err != nil {
+		return store.MessageRec{}, fmt.Errorf("convert: structure of raw message: %w", err)
+	}
+	body, _ := ParseBody(raw)
+
+	var sentAt *time.Time
+	if t, err := mail.ParseDate(h.Get("Date")); err == nil {
+		sentAt = &t
+	}
+	return store.MessageRec{
+		ReceivedAt:  receivedAt,
+		Size:        int64(len(raw)),
+		HeadersJSON: string(hj),
+		Subject:     subject,
+		SubjectL:    strings.ToLower(subject),
+		FromL:       strings.ToLower(allAddresses(from)),
+		ToL:         strings.ToLower(allAddresses(to, cc)),
+		MessageIDs:  splitMsgIDs(h.Get("Message-Id")),
+		InReplyTo:   splitMsgIDs(h.Get("In-Reply-To")),
+		References:  splitMsgIDs(h.Get("References")),
+		SentAt:      sentAt,
+		Structure:   structure,
+		// The same test BuildDraft makes: the parsed body decides
+		// whether the message carries attachments (FR-M.4 and the
+		// summary's hasAttachment can never disagree).
+		HasAttachment: len(body.Attachments) > 0,
+		Preview:       body.Preview,
+	}, nil
+}
+
+// headerAddresses reads one address header, decoding RFC 2047 words in
+// the display names. An unparseable header reads as absent.
+func headerAddresses(h mail.Header, key string) []Address {
+	list, err := h.AddressList(key)
+	if err != nil || len(list) == 0 {
+		return nil
+	}
+	out := make([]Address, 0, len(list))
+	for _, a := range list {
+		mailbox, host := "", a.Address
+		if i := strings.LastIndex(a.Address, "@"); i >= 0 {
+			mailbox, host = a.Address[:i], a.Address[i+1:]
+		}
+		out = append(out, Address{Name: a.Name, Mailbox: mailbox, Host: host})
+	}
+	return out
 }
 
 // BuildStructure numbers a BODYSTRUCTURE tree with JMAP partIds using

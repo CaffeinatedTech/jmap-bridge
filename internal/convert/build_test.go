@@ -259,3 +259,37 @@ func TestBuildDraftLongAddressListFolds(t *testing.T) {
 		t.Errorf("parsed %d recipients, want %d", len(list), len(to))
 	}
 }
+
+// TestStripBcc pins the delivery-time Bcc removal of RFC 8621 §7.5: the
+// header and its folds go, everything else — including a line in the
+// body that looks exactly like one — stays.
+func TestStripBcc(t *testing.T) {
+	msg := "From: me@example.test\r\n" +
+		"Bcc: hidden@example.test\r\n" +
+		" bcc-fold@example.test\r\n" +
+		"Subject: hi\r\n" +
+		"Received: by x\r\n" +
+		"\r\n" +
+		"Bcc: this is body text, not a header\r\n" +
+		"\r\n.\r\n"
+	want := "From: me@example.test\r\n" +
+		"Subject: hi\r\n" +
+		"Received: by x\r\n" +
+		"\r\n" +
+		"Bcc: this is body text, not a header\r\n" +
+		"\r\n.\r\n"
+	if got := string(StripBcc([]byte(msg))); got != want {
+		t.Errorf("StripBcc =\n%q\nwant\n%q", got, want)
+	}
+
+	// Case is irrelevant (header names are case-insensitive), an absent
+	// Bcc changes nothing, and a bare-LF message survives too.
+	lower := "to: a@b.c\nbcc: hidden@x.y\nsubject: s\n\nbody\n"
+	if got := string(StripBcc([]byte(lower))); got != "to: a@b.c\nsubject: s\n\nbody\n" {
+		t.Errorf("lowercase StripBcc = %q", got)
+	}
+	none := "to: a@b.c\r\nsubject: s\r\n\r\nbody\r\n"
+	if got := string(StripBcc([]byte(none))); got != none {
+		t.Errorf("StripBcc changed a message without Bcc: %q", got)
+	}
+}

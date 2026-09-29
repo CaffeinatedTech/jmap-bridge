@@ -32,6 +32,11 @@ type Backend interface {
 	// records it (FR-M.11).
 	CreateDraft(ctx context.Context, account string, spec DraftSpec) (*CreatedEmail, error)
 
+	// SubmitEmail relays one EmailSubmission/create over SMTP and then
+	// files the sent message, never the other way round (FR-M.15,
+	// PLAN §7.2). It is the only place the bridge talks SMTP.
+	SubmitEmail(ctx context.Context, account string, spec SubmissionSpec) (*CreatedSubmission, error)
+
 	// CreateMailbox runs CREATE, refreshes role detection and returns
 	// the new mailbox id (FR-M.12).
 	CreateMailbox(ctx context.Context, account, name, parentID string) (string, error)
@@ -76,7 +81,34 @@ var (
 	// ErrBlobNotFound: a create referenced a blobId that does not exist
 	// in this account → RFC 8621 §4.6 blobNotFound.
 	ErrBlobNotFound = errors.New("jmapapi: blob not found")
+	// ErrNoRecipients: the envelope names nobody to send to → RFC 8621
+	// §7.5 noRecipients.
+	ErrNoRecipients = errors.New("jmapapi: submission has no recipients")
+	// ErrNoSubmissionBackend: the account has SMTP configured but this
+	// build cannot use it yet (only password auth exists until M4), so
+	// the send fails with a sentence instead of a dead connection.
+	ErrNoSubmissionBackend = errors.New("jmapapi: SMTP submission is not available for this account")
 )
+
+// InvalidRecipientsError reports envelope addresses the server will not
+// send to → RFC 8621 §7.5 invalidRecipients, which must carry the
+// offending list.
+type InvalidRecipientsError struct {
+	Addresses []string
+}
+
+func (e *InvalidRecipientsError) Error() string {
+	return "invalid envelope recipient(s): " + joinComma(e.Addresses)
+}
+
+// SMTPError is a refusal from the submission server: the message was
+// not accepted, so no Sent copy may be written and the SetError
+// description is the server's own reply (PLAN §7.2, FR-M.15).
+type SMTPError struct {
+	Reply string
+}
+
+func (e *SMTPError) Error() string { return "smtp: " + e.Reply }
 
 // KeywordError reports the server refusing a custom keyword (FR-M.8):
 // the write fails naming the keyword rather than dropping it silently.
@@ -159,4 +191,49 @@ type CreatedEmail struct {
 	BlobID   string `json:"blobId,omitempty"`
 	ThreadID string `json:"threadId"`
 	Size     int64  `json:"size"`
+}
+
+// SubmissionEnvelope is the SMTP envelope a client supplied (RFC 8621
+// §7). A nil Envelope on the spec means "build it from the Email's
+// To/Cc/Bcc headers", which is what the RFC falls back to.
+type SubmissionEnvelope struct {
+	MailFrom string
+	RcptTo   []string
+}
+
+// SubmissionSpec is one validated EmailSubmission/create (FR-M.15).
+// The handler has resolved the identity and the email id (including a
+// "#handle" creation reference) and checked the arguments; the backend
+// reads the message, builds the envelope when the client did not,
+// submits over SMTP, and files the sent copy.
+type SubmissionSpec struct {
+	EmailID    string
+	IdentityID string // the identity the client submitted as
+	From       string // envelope sender: the identity's address
+	Envelope   *SubmissionEnvelope
+	// Patch is this submission's onSuccessUpdateEmail. The implicit
+	// Email/set applies it (RFC 8621 §7.5); the backend only reads it
+	// to know whether the patch itself files the message into a mailbox,
+	// in which case APPENDing a second copy would leave Sent with two
+	// (PLAN §7.2).
+	Patch EmailPatch
+}
+
+// FilesItself reports whether the caller's patch moves the submitted
+// email into a mailbox — the normal compose flow moves it from Drafts
+// to Sent — so the sent record is that move and no APPEND is wanted.
+func (s SubmissionSpec) FilesItself() bool {
+	return len(s.Patch.MailboxAdd) > 0 || s.Patch.ReplaceMailboxes
+}
+
+// CreatedSubmission is one EmailSubmission object as RFC 8621 §7
+// defines it for a submission the bridge has already relayed: undo is
+// impossible, so undoStatus is "final" (FR-M.15). sendAt is omitted
+// deliberately — v0.1 has no delayed send (maxDelayedSend is 0), and
+// REQUIREMENTS FR-M.15 spells that out.
+type CreatedSubmission struct {
+	ID         string `json:"id"`
+	EmailID    string `json:"emailId"`
+	IdentityID string `json:"identityId"`
+	UndoStatus string `json:"undoStatus"`
 }

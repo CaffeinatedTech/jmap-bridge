@@ -10,6 +10,9 @@ type SetError struct {
 	// NotFound carries the ids an error refers to — RFC 8621 §4.6
 	// requires it on blobNotFound.
 	NotFound []string `json:"notFound,omitempty"`
+	// InvalidRecipients lists the addresses RFC 8621 §7.5 requires on
+	// an invalidRecipients SetError.
+	InvalidRecipients []string `json:"invalidRecipients,omitempty"`
 }
 
 // NewSetError builds a SetError. properties may be nil; description may
@@ -46,7 +49,12 @@ type SetResponse struct {
 // carries (RFC 8620 §5.3). The two shapes share a type on purpose: the
 // same code, description and properties travel through both.
 func (e *methodErr) set() SetError {
-	return SetError{Type: e.Type, Properties: e.Properties, Description: optStr(e.Description)}
+	return SetError{
+		Type:              e.Type,
+		Properties:        e.Properties,
+		Description:       optStr(e.Description),
+		InvalidRecipients: e.InvalidRecipients,
+	}
 }
 
 func optStr(s string) *string {

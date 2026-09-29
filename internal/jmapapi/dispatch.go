@@ -17,22 +17,28 @@ const (
 
 // capabilitiesAdvertised is the set of capability URNs this build
 // implements; dispatch rejects a `using` entry outside it with an
-// unknownCapability problem (FR-J.5). M0: core + mail only — submission
-// lands with M3, contacts with M6, each gated on configuration.
+// unknownCapability problem (FR-J.5). Whether an account actually
+// offers one is narrower and lives on [Account.Capabilities]: M3's
+// submission needs SMTP configured, M6's contacts need CardDAV.
 var capabilitiesAdvertised = []string{
 	"urn:ietf:params:jmap:core",
 	"urn:ietf:params:jmap:mail",
+	"urn:ietf:params:jmap:submission",
 }
 
 // Account is the per-request account context: the id every method's
 // accountId argument must match, the Store that serves it, the Backend
 // that mutates it (nil for a cache-only account, which must then refuse
-// every write rather than pretend), and the session state echoed on API
-// responses (RFC 8620 §3.4).
+// every write rather than pretend), the capability URNs this account
+// offers (FR-J.5), the sendable Identity it answers Identity/get with
+// (nil when submission is not configured, FR-M.14), and the session
+// state echoed on API responses (RFC 8620 §3.4).
 type Account struct {
 	ID           string
 	Store        Store
 	Backend      Backend
+	Capabilities []string
+	Identity     *Identity
 	SessionState string
 }
 
@@ -49,6 +55,9 @@ type methodErr struct {
 	Type        string   `json:"type"`
 	Description string   `json:"description,omitempty"`
 	Properties  []string `json:"properties,omitempty"`
+	// InvalidRecipients carries the offending addresses an
+	// invalidRecipients error must list (RFC 8621 §7.5).
+	InvalidRecipients []string `json:"invalidRecipients,omitempty"`
 }
 
 func methodErrorf(typ, format string, args ...any) *methodErr {
@@ -139,7 +148,7 @@ func (h *Handler) Dispatch(ctx context.Context, acct *Account, body []byte) (int
 		}
 	}
 	for _, urn := range *req.Using {
-		if !isAdvertised(urn) {
+		if !accountOffers(acct, urn) {
 			return 400, problem{
 				Type: "urn:ietf:params:jmap:error:unknownCapability", Status: 400,
 				Detail: "server does not support capability " + urn,
@@ -167,9 +176,54 @@ func (h *Handler) Dispatch(ctx context.Context, acct *Account, body []byte) (int
 
 	hdr := &dispatcher{h: h, acct: acct}
 	for _, c := range calls {
-		hdr.dispatch(ctx, c)
+		hdr.dispatch(withCallScope(ctx, hdr, c.CallID), c)
 	}
 	return 200, &Response{MethodResponses: hdr.out, SessionState: acct.SessionState}
+}
+
+// callResult is a method's answer when its response must be followed by
+// a second invocation: RFC 8621 §7.5 requires the implicit Email/set
+// that carries EmailSubmission/set's onSuccess* effects to come after
+// the EmailSubmission/set response itself.
+type callResult struct {
+	Value    any
+	Followup *invocation
+}
+
+// callScope is the per-call request context a method may need: its own
+// call id (so a follow-up invocation can answer the same one, what
+// Stalwart does — PLAN §2.1) and the batch's creation-reference
+// resolver. Both belong to the dispatcher, so they travel through the
+// context rather than through every method signature.
+type callScope struct {
+	callID  string
+	resolve func(ref string) (string, bool)
+}
+
+type callScopeKey struct{}
+
+func withCallScope(ctx context.Context, d *dispatcher, callID string) context.Context {
+	return context.WithValue(ctx, callScopeKey{}, &callScope{
+		callID:  callID,
+		resolve: d.resolveCreation,
+	})
+}
+
+// callScopeOf returns the scope the dispatcher bound, or nil outside a
+// dispatch (tests calling a handler directly).
+func callScopeOf(ctx context.Context) *callScope {
+	scope, _ := ctx.Value(callScopeKey{}).(*callScope)
+	return scope
+}
+
+// resolveCreationRef resolves a creation reference ("#handle") against
+// the results of earlier calls in this request. An id without the "#"
+// prefix is not a reference and does not resolve.
+func resolveCreationRef(ctx context.Context, ref string) (string, bool) {
+	if scope := callScopeOf(ctx); scope != nil && scope.resolve != nil {
+		return scope.resolve(ref)
+	}
+	return "", false
 }
 
 // dispatcher carries per-request state: prior results for reference
@@ -200,6 +254,24 @@ func decodeCall(raw json.RawMessage) (call, error) {
 
 func isAdvertised(urn string) bool {
 	for _, a := range capabilitiesAdvertised {
+		if a == urn {
+			return true
+		}
+	}
+	return false
+}
+
+// accountOffers reports whether this account may use urn: the build
+// must implement it *and* the account must offer it. The second check
+// is what keeps capability honesty honest (FR-J.5): submission is
+// known to the build but unknown to an account with no SMTP, so a
+// request naming it gets the same unknownCapability answer a client
+// sees for a URN nobody implements.
+func accountOffers(acct *Account, urn string) bool {
+	if !isAdvertised(urn) {
+		return false
+	}
+	for _, a := range acct.Capabilities {
 		if a == urn {
 			return true
 		}
@@ -238,6 +310,10 @@ func (d *dispatcher) dispatch(ctx context.Context, c call) {
 		d.fail(c.CallID, merr)
 		return
 	}
+	var followup *invocation
+	if r, ok := result.(*callResult); ok {
+		result, followup = r.Value, r.Followup
+	}
 
 	// Normalise the result to plain JSON so later calls in this request
 	// can resolve result references against it.
@@ -257,6 +333,47 @@ func (d *dispatcher) dispatch(ctx context.Context, c call) {
 	d.names[c.CallID] = c.Name
 	d.args[c.CallID] = normalized
 	d.out = append(d.out, invocation{Name: c.Name, Args: normalized, CallID: c.CallID})
+	// The follow-up rides the response list but is not registered for
+	// reference resolution: it answers the same call id as the method
+	// that triggered it (what Stalwart does, PLAN §2.1), and shadowing
+	// the method's own result would break a "#handle" reference to it.
+	if followup != nil {
+		d.out = append(d.out, *followup)
+	}
+}
+
+// resolveCreation maps "#handle" to the id an earlier call created
+// under that handle. Every prior result's `created` map is consulted —
+// the shape a client means when it points a submission at a draft it
+// created in the same batch — and the most recent one wins, since call
+// order is the batch's own.
+func (d *dispatcher) resolveCreation(ref string) (string, bool) {
+	if !strings.HasPrefix(ref, "#") {
+		return "", false
+	}
+	handle := ref[1:]
+	if handle == "" {
+		return "", false
+	}
+	found := ""
+	for _, inv := range d.out {
+		obj, ok := inv.Args.(map[string]any)
+		if !ok {
+			continue
+		}
+		created, ok := obj["created"].(map[string]any)
+		if !ok {
+			continue
+		}
+		entry, ok := created[handle].(map[string]any)
+		if !ok {
+			continue
+		}
+		if id, ok := entry["id"].(string); ok && id != "" {
+			found = id
+		}
+	}
+	return found, found != ""
 }
 
 func (d *dispatcher) fail(callID string, merr *methodErr) {
@@ -282,6 +399,16 @@ func (d *dispatcher) resolveValue(v any) (any, *methodErr) {
 			if !strings.HasPrefix(key, "#") {
 				continue
 			}
+			// Only a ResultReference object is a result reference
+			// (RFC 8620 §3.7). A "#" key whose value is something else
+			// belongs to the method: EmailSubmission/set keys its
+			// onSuccessUpdateEmail map by creation reference, and "#sub"
+			// points at a handle, not at a previous result (RFC 8621
+			// §7.5), so it travels to the method untouched.
+			refMap, ok := val.(map[string]any)
+			if !ok || !isResultRef(refMap) {
+				continue
+			}
 			name := key[1:]
 			if name == "" {
 				return nil, methodErrorf("invalidArguments", "argument name must not be just #")
@@ -289,11 +416,6 @@ func (d *dispatcher) resolveValue(v any) (any, *methodErr) {
 			if _, dup := t[name]; dup {
 				return nil, methodErrorf("invalidArguments",
 					"argument %q given in both normal and referenced form", name)
-			}
-			refMap, ok := val.(map[string]any)
-			if !ok || !isResultRef(refMap) {
-				return nil, methodErrorf("invalidArguments",
-					"argument %q must be a ResultReference object", key)
 			}
 			out, merr := d.resolveRef(refMap)
 			if merr != nil {

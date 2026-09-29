@@ -372,23 +372,49 @@ store requires at least one membership (RFC 8621 §4.1).
 
 ### 7.2 EmailSubmission/set
 
-1. Resolve `#reference` / emailId → build RFC 5322 (from `email_content`, or
-   construct from the JMAP Email for a draft created in the same batch).
-2. SMTP submit: `MAIL FROM` = identity address, `RCPT TO` = to/cc/bcc,
-   `AUTH LOGIN` or `AUTH XOAUTH2`, TLS per config.
-3. On 2xx: `APPEND` the sent message to the Sent mailbox with `\Seen`, apply the
-   caller's `onSuccessUpdateEmail` patches locally (move out of Drafts, clear
-   `$draft`), return `created` with `undoStatus: "final"` (send-delay is
-   client-side in jmap-tui; no `EmailSubmission/undo` endpoint in v0.1).
-4. On SMTP failure: `notCreated` with the SMTP reply as description. Never APPEND
-   to Sent for a message that wasn't accepted.
+1. Validate every create and every `onSuccessUpdateEmail` patch first: SMTP
+   cannot be undone, so a malformed argument must fail before anything is
+   sent. `emailId` may be a plain id or the `#handle` creation reference of
+   an `Email/set` create in the same batch (RFC 8620 §3.7), `sendAt` is
+   refused (maxDelayedSend is 0) and `onSuccessDestroyEmail` is refused
+   (client-side fallback exists in jmap-tui).
+2. SMTP submit: `MAIL FROM` = identity address, `RCPT TO` = the envelope
+   (or To+Cc+Bcc when the client supplied none), `AUTH PLAIN` over TLS or
+   loopback (XOAUTH2 arrives with M4), TLS per config, and **Bcc stripped
+   from the bytes** — the
+   envelope still carries those recipients (RFC 8621 §7.5), the Sent copy
+   keeps its Bcc header.
+3. On 2xx: file the sent message, in exactly one of two shapes. The
+   caller's `onSuccessUpdateEmail` files it when it moves the Email into a
+   mailbox — that is what every composing client sends (Drafts → Sent,
+   `$draft` cleared) and the move *is* the filing. Only when the patch says
+   nothing about membership does the bridge `APPEND` the bytes it just sent
+   to the Sent mailbox with `\Seen`, because a sent message with no record
+   anywhere is worse than one the server filed. Appending *and* patching
+   would leave two copies in Sent (jmap-tui's own gate asserts one). Return
+   `created` with `undoStatus: "final"` (send-delay is client-side in
+   jmap-tui; no `EmailSubmission/undo` endpoint in v0.1). Everything after
+   SMTP acceptance is logged, never reported as a failed create — a client
+   that retries a "failed" send sends the message twice.
+4. The `onSuccess*` effects run as one implicit `Email/set` after every
+   create has been processed, and its response follows the
+   `EmailSubmission/set` response (RFC 8621 §7.5); a patch that fails lands
+   in that response's `notUpdated`.
+5. On SMTP failure: `notCreated` with the SMTP reply as description. Never
+   APPEND to Sent for a message that wasn't accepted.
 
 ### 7.3 Blobs
 
-- `POST /upload/{account}` → size/type caps → `blobs` row + file → `blobId`.
-- `GET /download/{account}/{blobId}/{name}` with `{type}` query — RFC 8620
-  template expansion exactly as jmap-tui performs it.
-- Draft attachments reference `blobId`s; the MIME part is materialised at APPEND.
+- `POST /{account}/upload/` → size/type caps → `blobs` row + file →
+  `blobId`. The session's `{accountId}` expands into the account path
+  prefix (D-13), so one template serves every account on the origin.
+- `GET /{account}/download/{blobId}/{name}?type={type}` — RFC 8620
+  template expansion exactly as jmap-tui performs it; `{name}` becomes the
+  `Content-Disposition` filename and `{type}` the response's media type.
+- Draft attachments reference `blobId`s; the MIME part is materialised at
+  APPEND, and the bytes of a message the bridge built or fetched are kept
+  as its raw blob so `Email/get` can answer `blobId` and a submission
+  resends exactly what was stored.
 
 ---
 
@@ -528,6 +554,7 @@ has no top-level `blobId` yet (M3's blob endpoints).
 | OAuth callback requires public HTTPS | deploy friction | documented as a first-class deployment path (D-12); port-forward dev mode for everything else |
 | Lazy bodies vs. freetext search expectations | "search misses mail" | backfill is on by default, progress is visible via SSE, `search.backfill=false` documented as a trade |
 | SQLite hot rows (large mailbox counts) | slow list queries | narrow `emails` table + `email_mailbox` covering index (schema §4); count fields maintained incrementally |
+| SMTP submission is inline: a send that is accepted can no longer be rolled back, and a failure *after* acceptance (filing the Sent copy, applying a patch) cannot be reported without inviting a duplicate send | a sent message with a stale local view | id minted before the send; post-acceptance failures are logged only, and the `onSuccess*` effects run after acceptance in the implicit `Email/set` (§7.2) where a patch failure is visible as `notUpdated` |
 | Scope creep toward calendars/sharing | v0.1 slips | REQUIREMENTS out-of-scope list; roadmap (§15) is where those requests land |
 | FR-D.1 image never actually built: the dev machine has no docker-daemon access (sudo needs a password) | container problems surface late, at M7 | native binary is the documented dev/test path (AGENTS.md); `docker build` + the README `docker run` are verified on a docker-capable host before M7 sign-off |
 
