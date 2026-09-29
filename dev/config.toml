@@ -1,6 +1,7 @@
-# Local development config: loopback listener, fixture mail (M0), token
-# auth. The token below is a throwaway for loopback development only —
-# never reuse it anywhere real.
+# Local development config: loopback listener, token auth, and the
+# loopback Dovecot from dev/dovecot.conf (M1 gate backend). Every
+# credential here is a throwaway for loopback development only — never
+# reuse it anywhere real; the IMAP password mirrors dev/dovecot.conf.
 
 listen = "127.0.0.1:8080"
 base_url = "http://127.0.0.1:8080"
@@ -13,5 +14,12 @@ mode = "token"
 [[accounts]]
 id = "personal"
 name = "Personal"
-address = "me@example.test"
+address = "jmaptest@example.test"
 token = "dev-token-local-only"
+
+  [accounts.imap]
+  host = "127.0.0.1"
+  port = 143
+  tls = false
+  username = "jmaptest"
+  password = "bridge-local-gate"

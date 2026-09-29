@@ -102,8 +102,19 @@ func TestLiveSyncAndForeignFlag(t *testing.T) {
 	// from a clean slate every run.
 	ensureFolder(t, ctx, admin)
 	seed := liveMessage("jmap-bridge live gate", "<bridge-live-gate@example.test>")
-	uid := appendLive(t, ctx, admin, testFolder, seed)
-	t.Cleanup(func() { cleanupFolder(t, cfg) })
+	appendLive(t, ctx, admin, testFolder, seed)
+
+	// The latency measurement flips a message in INBOX, the folder the
+	// idle connection watches (FR-S.4/FR-S.7); other folders are
+	// poll-paced by design, so a 2s budget there would measure the
+	// wrong path. This Dovecot is the purpose-built gate server — the
+	// "don't touch Inbox" rule targets real accounts (live rules).
+	inboxSeed := liveMessage("jmap-bridge idle target", "<bridge-idle-target@example.test>")
+	inboxUID := appendLive(t, ctx, admin, "INBOX", inboxSeed)
+	t.Cleanup(func() {
+		expungeLive(t, cfg, "INBOX", inboxUID)
+		cleanupFolder(t, cfg)
+	})
 
 	// Fresh store + engine against the real account.
 	changes := make(chan struct{}, 16)
@@ -160,22 +171,22 @@ func TestLiveSyncAndForeignFlag(t *testing.T) {
 	// IDLE must be up before we measure (the poll interval is 1h).
 	waitFor(t, 30*time.Second, "idle watching", func() bool { return eng.IdleWatching() })
 
-	// The gate: flip \Seen from the second session, measure to store.
+	// The gate: flip \Flagged from the second session, measure to store.
 	drain(changes)
 	t0 := time.Now()
-	setFlag(t, ctx, admin, testFolder, uid, imap.FlagSeen, true)
+	setFlag(t, ctx, admin, "INBOX", inboxUID, imap.FlagFlagged, true)
 	waitForBudget(t, 2*time.Second, "foreign flag visible", func() bool {
 		select {
 		case <-changes:
 		default:
 		}
-		return folderHasKeyword(t, st, testFolder, "$seen")
+		return subjectHasKeyword(t, st, "jmap-bridge idle target", "$flagged")
 	})
 	t.Logf("foreign flag visible after %v (budget 2s)", time.Since(t0).Round(time.Millisecond))
 
 	// Unflip for a clean re-run, then verify hydration (FR-S.8) fetches
 	// the body on demand from the real server.
-	setFlag(t, ctx, admin, testFolder, uid, imap.FlagSeen, false)
+	setFlag(t, ctx, admin, "INBOX", inboxUID, imap.FlagFlagged, false)
 	emails, _, notFound, err := st.EmailsByID(ctx, "livetest", nil, true)
 	if err != nil {
 		t.Fatalf("Email/get with bodies: %v", err)
@@ -314,41 +325,41 @@ func folderHasSubject(t *testing.T, st *store.Store, subject string) bool {
 	return false
 }
 
-func folderHasKeyword(t *testing.T, st *store.Store, folder, keyword string) bool {
+// subjectHasKeyword checks a keyword on the message with the given
+// subject — precise, so leftover messages from other runs cannot
+// satisfy the gate by accident.
+func subjectHasKeyword(t *testing.T, st *store.Store, subject, keyword string) bool {
 	t.Helper()
-	mbs, _, err := st.Mailboxes(context.Background(), "livetest")
-	if err != nil {
-		return false
-	}
-	var folderID string
-	for _, mb := range mbs {
-		if mb.Name == folder {
-			folderID = mb.ID
-		}
-	}
-	if folderID == "" {
-		return false
-	}
 	emails, _, _, err := st.EmailsByID(context.Background(), "livetest", nil, false)
 	if err != nil {
 		return false
 	}
 	for _, e := range emails {
-		if !contains(e.MailboxIDs, folderID) {
-			continue
-		}
-		if e.Keywords[keyword] {
+		if e.Subject == subject && e.Keywords[keyword] {
 			return true
 		}
 	}
 	return false
 }
 
-func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
+// expungeLive removes one seeded INBOX message so runs stay idempotent.
+func expungeLive(t *testing.T, cfg imapdrv.Config, folder string, uid uint32) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c, err := imapclient.Dial(ctx, cfg.Host+":"+strconv.Itoa(cfg.Port),
+		&imapclient.Options{AllowInsecureAuth: !cfg.TLS})
+	if err != nil {
+		return
 	}
-	return false
+	defer func() { _ = c.Close() }()
+	if err := c.Login(ctx, cfg.Username, cfg.Password, nil); err != nil {
+		return
+	}
+	if _, err := c.Select(folder, nil).Wait(ctx); err != nil {
+		return
+	}
+	set := imap.UIDSetNum(imap.UID(uid))
+	_ = c.StoreUID(set, []imap.Flag{imap.FlagDeleted}, nil).Wait(ctx)
+	_ = c.UIDExpunge(set, nil).Wait(ctx)
 }
