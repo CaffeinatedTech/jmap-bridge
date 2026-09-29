@@ -320,3 +320,87 @@ func TestSMTPRequiresAddress(t *testing.T) {
 		t.Error("address was dropped")
 	}
 }
+
+// FR-A.10: an oauth2 account has no password fallback. A password
+// configured next to auth = "oauth2" is a startup error, and password
+// defaults must not leak into an oauth2 SMTP block.
+func TestOAuth2RefusesPasswordFallback(t *testing.T) {
+	t.Run("imap password alongside oauth2", func(t *testing.T) {
+		toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", `token = "t0ken"
+
+  [accounts.imap]
+  host = "imap.gmail.com"
+  port = 993
+  auth = "oauth2"
+  username = "me@gmail.com"
+  password = "legacy"`+"\n\n  [accounts.oauth2]\n  provider = \"google\"\n  client_id = \"cid\"\n  client_secret = \"cs\"", 1)
+		wantErrKey(t, toml, "accounts[0].imap.password")
+	})
+	t.Run("smtp password alongside oauth2", func(t *testing.T) {
+		toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", `token = "t0ken"
+
+  [accounts.imap]
+  host = "imap.gmail.com"
+  port = 993
+  auth = "oauth2"
+  username = "me@gmail.com"
+
+  [accounts.smtp]
+  host = "smtp.gmail.com"
+  port = 465
+  auth = "oauth2"
+  password = "legacy"
+
+  [accounts.oauth2]
+  provider = "google"
+  client_id = "cid"
+  client_secret = "cs"`, 1)
+		wantErrKey(t, toml, "accounts[0].smtp.password")
+	})
+	t.Run("smtp oauth2 does not inherit the imap password", func(t *testing.T) {
+		toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", `token = "t0ken"
+
+  [accounts.imap]
+  host = "imap.gmail.com"
+  port = 993
+  auth = "oauth2"
+  username = "me@gmail.com"
+
+  [accounts.smtp]
+  host = "smtp.gmail.com"
+  port = 465
+  auth = "oauth2"
+
+  [accounts.oauth2]
+  provider = "google"
+  client_id = "cid"
+  client_secret = "cs"`, 1)
+		cfg := mustLoad(t, toml)
+		if cfg.Accounts[0].SMTP.Password != "" {
+			t.Errorf("smtp.password inherited %q despite oauth2", cfg.Accounts[0].SMTP.Password)
+		}
+		if cfg.Accounts[0].SMTP.Username != "me@gmail.com" {
+			t.Errorf("smtp.username = %q, want the imap username (XOAUTH2 carries it)", cfg.Accounts[0].SMTP.Username)
+		}
+	})
+}
+
+// FR-A.9: the google provider profile needs only the client pair.
+func TestOAuth2GoogleMinimal(t *testing.T) {
+	toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", `token = "t0ken"
+
+  [accounts.imap]
+  host = "imap.gmail.com"
+  port = 993
+  auth = "oauth2"
+  username = "me@gmail.com"
+
+  [accounts.oauth2]
+  provider = "google"
+  client_id = "cid"
+  client_secret = "cs"`, 1)
+	cfg := mustLoad(t, toml)
+	if cfg.Accounts[0].OAuth2.Provider != "google" {
+		t.Fatal("provider lost")
+	}
+}

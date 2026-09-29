@@ -152,6 +152,20 @@ CREATE TABLE tokens (               -- client-facing auth tokens
 	`
 ALTER TABLE email_content ADD COLUMN raw_blob_id TEXT;
 `,
+	// v3 (M4): the OAuth2 provider's tokens per account (FR-A.5, FR-A.7).
+	// Values are opaque to the store — the OAuth layer seals them before
+	// they land here and opens them on read (FR-A.8), so this table is
+	// never the place a plaintext refresh token is found. access_expiry
+	// is unix seconds; a zero value means "unknown, refresh before use".
+	`
+CREATE TABLE oauth_tokens (
+  account TEXT PRIMARY KEY,
+  refresh_token TEXT NOT NULL,
+  access_token TEXT NOT NULL DEFAULT '',
+  access_expiry INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+`,
 }
 
 // migrate applies every not-yet-applied migration and refuses a database

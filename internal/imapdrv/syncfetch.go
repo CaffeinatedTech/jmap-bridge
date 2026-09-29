@@ -50,7 +50,8 @@ type Selection struct {
 
 // HeaderMsg is one message's header-level summary: the ENVELOPE,
 // BODYSTRUCTURE, flags, size and internal date — everything backfill
-// needs, never a body (FR-S.3, golden rule 2).
+// needs, never a body (FR-S.3, golden rule 2). On X-GM-EXT-1 servers it
+// also carries the Gmail label list and thread id (FR-S.10).
 type HeaderMsg struct {
 	UID          uint32
 	Flags        []string
@@ -59,6 +60,8 @@ type HeaderMsg struct {
 	Size         int64
 	Envelope     convert.Envelope
 	Structure    *convert.Part
+	Labels       []string
+	Thrid        uint64
 }
 
 // Examine selects the folder read-only at the connection's current
@@ -152,6 +155,11 @@ func (c *Conn) FetchHeaders(ctx context.Context, uids []uint32) ([]HeaderMsg, er
 	}
 	if c.tier != TierBaseline {
 		items = append(items, imap.FetchItemModSeq)
+	}
+	if c.GmailExt() {
+		// Open-ended item names are first-class in the request encoder;
+		// the responses come back as FetchDataRaw and are parsed below.
+		items = append(items, imap.FetchItemKeyword("X-GM-LABELS"), imap.FetchItemKeyword("X-GM-THRID"))
 	}
 	cmd := c.client.FetchUID(uidSet(uids), nil, items...)
 	var out []HeaderMsg
@@ -396,7 +404,97 @@ func headerMsgOf(data *imap.FetchMessageData) (HeaderMsg, bool) {
 			msg.Structure = mapStructure(bs.BodyStructure)
 		}
 	}
+	if v, ok := data.Items[imap.FetchDataKey("X-GM-LABELS")]; ok && len(v) > 0 {
+		if raw, ok := v[0].(*imap.FetchDataRaw); ok {
+			msg.Labels = parseGmLabels(rawValue(raw))
+		}
+	}
+	if v, ok := data.Items[imap.FetchDataKey("X-GM-THRID")]; ok && len(v) > 0 {
+		if raw, ok := v[0].(*imap.FetchDataRaw); ok {
+			msg.Thrid = parseGmThrid(rawValue(raw))
+		}
+	}
 	return msg, true
+}
+
+// rawValue drains a preserved response value's bytes; the library
+// buffers, so a single Read suffices for these bounded values (label
+// lists and thread ids never approach the in-memory capture limit).
+func rawValue(raw *imap.FetchDataRaw) string {
+	if raw == nil || raw.Reader == nil {
+		return ""
+	}
+	buf, err := io.ReadAll(raw.Reader)
+	if err != nil {
+		return ""
+	}
+	return string(buf)
+}
+
+// parseGmLabels decodes the wire form of an X-GM-LABELS value: a
+// parenthesised list of system labels in flag form ("\Inbox") and user
+// labels as astrings ("my receipts"). Values are kept exactly as sent —
+// the leading backslash included — because that is the form label writes
+// take.
+func parseGmLabels(s string) []string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "(") || !strings.HasSuffix(s, ")") {
+		return nil
+	}
+	s = s[1 : len(s)-1]
+	var out []string
+	for i := 0; i < len(s); {
+		for i < len(s) && s[i] == ' ' {
+			i++
+		}
+		if i >= len(s) {
+			break
+		}
+		if s[i] == '"' {
+			// A quoted label: honour backslash escapes.
+			i++
+			var b strings.Builder
+			closed := false
+			for ; i < len(s); i++ {
+				if s[i] == '\\' && i+1 < len(s) {
+					i++
+					b.WriteByte(s[i])
+					continue
+				}
+				if s[i] == '"' {
+					closed = true
+					i++
+					break
+				}
+				b.WriteByte(s[i])
+			}
+			if !closed {
+				return nil // malformed: drop the whole list rather than guess
+			}
+			out = append(out, b.String())
+			continue
+		}
+		// An atom or flag-form label, up to the next space or paren.
+		start := i
+		for i < len(s) && s[i] != ' ' && s[i] != '(' && s[i] != ')' {
+			i++
+		}
+		if i == start {
+			return nil // a stray paren: malformed
+		}
+		out = append(out, s[start:i])
+	}
+	return out
+}
+
+// parseGmThrid decodes X-GM-THRID: a 64-bit unsigned number Gmail
+// reports as plain digits.
+func parseGmThrid(s string) uint64 {
+	v, err := strconv.ParseUint(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 func previewOf(data *imap.FetchMessageData) (*string, bool) {

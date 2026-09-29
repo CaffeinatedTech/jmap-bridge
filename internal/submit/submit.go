@@ -28,6 +28,11 @@ type Config struct {
 	Auth     string // "password" (default) | "oauth2"
 	Username string
 	Password string
+
+	// Token, when set, supplies the XOAUTH2 bearer token and replaces
+	// password authentication (FR-A.7, FR-A.10: no fallback). force
+	// marks the retry after the server rejected the previous token.
+	Token func(ctx context.Context, force bool) (string, error)
 }
 
 // Envelope is the SMTP envelope of one submission: who the message is
@@ -36,10 +41,6 @@ type Envelope struct {
 	From       string
 	Recipients []string
 }
-
-// ErrAuthUnsupported is an auth mode this build cannot speak yet:
-// XOAUTH2 (Gmail's only option) arrives with M4 (PLAN §12).
-var ErrAuthUnsupported = errors.New("submit: this auth mode is not implemented yet (XOAUTH2 ships with M4)")
 
 // RejectedError is a refusal from the submission server: the message was
 // not accepted. Reply is the server's own words, which is what
@@ -52,10 +53,16 @@ func (e *RejectedError) Error() string { return "smtp: " + e.Reply }
 
 // Send relays msg — a complete RFC 5322 message — to cfg's server for
 // env. ctx cancels the connection, so a client that walks away never
-// leaves a socket chewing through a large message.
+// leaves a socket chewing through a large message. An OAuth2 token the
+// server rejects is retried exactly once with a forced refresh (FR-A.7);
+// net/smtp closes the connection on a failed AUTH, so the retry
+// reconnects.
 func Send(ctx context.Context, cfg Config, env Envelope, msg []byte) error {
-	if cfg.Auth == "oauth2" {
-		return ErrAuthUnsupported
+	if cfg.Auth == "oauth2" && cfg.Token == nil {
+		// FR-A.10: an oauth2 account has no password fallback — a
+		// configuration that cannot authenticate is refused up front
+		// rather than attempted PLAIN.
+		return errors.New("submit: smtp.auth = \"oauth2\" requires a token provider")
 	}
 	if env.From == "" {
 		return errors.New("submit: envelope sender is empty")
@@ -63,7 +70,22 @@ func Send(ctx context.Context, cfg Config, env Envelope, msg []byte) error {
 	if len(env.Recipients) == 0 {
 		return errors.New("submit: envelope has no recipients")
 	}
+	err := sendOnce(ctx, cfg, env, msg, false)
+	var authErr *authFailure
+	if errors.As(err, &authErr) && cfg.Token != nil {
+		return sendOnce(ctx, cfg, env, msg, true)
+	}
+	return err
+}
 
+// authFailure marks a rejected authentication: the one error class the
+// caller may retry with fresh credentials.
+type authFailure struct{ err error }
+
+func (e *authFailure) Error() string { return e.err.Error() }
+func (e *authFailure) Unwrap() error { return e.err }
+
+func sendOnce(ctx context.Context, cfg Config, env Envelope, msg []byte, force bool) error {
 	conn, err := dial(ctx, cfg)
 	if err != nil {
 		return err
@@ -96,8 +118,8 @@ func Send(ctx context.Context, cfg Config, env Envelope, msg []byte) error {
 			return wrapReply(err, "submit: starttls")
 		}
 	}
-	if cfg.Username != "" || cfg.Password != "" {
-		if err := authorize(c, cfg); err != nil {
+	if cfg.Username != "" || cfg.Password != "" || cfg.Token != nil {
+		if err := authorize(ctx, c, cfg, force); err != nil {
 			return err
 		}
 	}
@@ -156,11 +178,25 @@ func tlsConfig(host string) *tls.Config {
 	return &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
 }
 
-// authorize sends AUTH PLAIN when the server offers it. A server that
-// advertises no usable mechanism fails with a sentence rather than
-// letting the MAIL FROM reject look like a recipient problem.
-func authorize(c *smtp.Client, cfg Config) error {
+// authorize authenticates the submission connection: XOAUTH2 when a
+// token provider is set (FR-A.7, FR-A.10 — no password fallback), AUTH
+// PLAIN otherwise. force marks the caller's one retry after the server
+// rejected the previous token.
+func authorize(ctx context.Context, c *smtp.Client, cfg Config, force bool) error {
 	ok, mechanisms := c.Extension("AUTH")
+	if cfg.Token != nil {
+		if !ok || !advertises(mechanisms, "XOAUTH2") {
+			return errors.New("submit: server does not offer AUTH XOAUTH2")
+		}
+		tok, err := cfg.Token(ctx, force)
+		if err != nil {
+			return fmt.Errorf("submit: bearer token: %w", err)
+		}
+		if err := c.Auth(xoauth2Auth{username: cfg.Username, token: tok}); err != nil {
+			return &authFailure{err: wrapReply(err, "submit: AUTH")}
+		}
+		return nil
+	}
 	if !ok || !advertises(mechanisms, "PLAIN") {
 		return errors.New("submit: server does not offer AUTH PLAIN")
 	}
@@ -168,6 +204,29 @@ func authorize(c *smtp.Client, cfg Config) error {
 		return wrapReply(err, "submit: AUTH")
 	}
 	return nil
+}
+
+// xoauth2Auth speaks Gmail's SASL XOAUTH2 (Google's IMAP/SMTP extension
+// docs): the initial response carries the user and bearer token; on
+// failure the server sends the error JSON as a challenge, the client
+// answers with an empty line, and the server completes the rejection.
+type xoauth2Auth struct {
+	username string
+	token    string
+}
+
+func (a xoauth2Auth) Start(*smtp.ServerInfo) (string, []byte, error) {
+	resp := "user=" + a.username + "\x01auth=Bearer " + a.token + "\x01\x01"
+	return "XOAUTH2", []byte(resp), nil
+}
+
+func (a xoauth2Auth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if !more {
+		return nil, nil
+	}
+	// The failure payload is the server's own words; report it rather
+	// than answering the challenge and letting a generic 535 hide it.
+	return nil, fmt.Errorf("submit: auth rejected: %s", strings.TrimSpace(string(fromServer)))
 }
 
 // advertises reports whether a space-separated EHLO parameter list

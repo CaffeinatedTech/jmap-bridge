@@ -19,3 +19,8 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 	modernc.org/sqlite v1.60.0 // indirect
 )
+
+// M4: the fork carries the X-GM-EXT-1 label store and the flag-form value
+// capture the Gmail profile needs (~/projects/go-imap/PATCH-NOTES.md);
+// revert to upstream when the PR merges.
+replace github.com/kiliant/go-imap => ../go-imap

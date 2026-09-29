@@ -1,0 +1,312 @@
+package sync
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
+)
+
+// This file is the Gmail profile's write-path half (FR-S.10, FR-M.18):
+// membership changes become label changes, All Mail membership is
+// implicit, destroy routes through Trash, and the eventual-consistency
+// grace window keeps the cache from tombstoning on lists that have not
+// caught up with our own writes yet (FR-S.12).
+//
+// The read-path half (labels and thread ids in the header fetch,
+// shared-UID dedupe) lives in backfill.go and imapdrv.
+
+// graceWindow is how long a folder's uid list may keep showing stale
+// state after one of our own writes: Gmail rebuilds its per-folder
+// indexes around label changes, and a message can vanish from a list it
+// demonstrably still belongs to. Tombstones inside the window are
+// deferred to the next pass — they are recoverable, while a wrong
+// tombstone is a client-visible lie (FR-S.12).
+const graceWindow = 60 * time.Second
+
+// recordOwnWrite notes that we just changed the message identified by
+// these (folder, uid) pairs, so the next pass's reconcile can spare them
+// from tombstoning.
+func (e *Engine) recordOwnWrite(folder string, uids []uint32) {
+	if len(uids) == 0 {
+		return
+	}
+	now := time.Now()
+	e.ownMu.Lock()
+	defer e.ownMu.Unlock()
+	if e.ownWrites == nil {
+		e.ownWrites = map[string]map[uint32]time.Time{}
+	}
+	byUID := e.ownWrites[folder]
+	if byUID == nil {
+		byUID = map[uint32]time.Time{}
+		e.ownWrites[folder] = byUID
+	}
+	for _, uid := range uids {
+		byUID[uid] = now
+	}
+	// Prune while we are here: anything past twice the window can no
+	// longer matter.
+	cutoff := now.Add(-2 * graceWindow)
+	for f, m := range e.ownWrites {
+		for uid, at := range m {
+			if at.Before(cutoff) {
+				delete(m, uid)
+			}
+		}
+		if len(m) == 0 {
+			delete(e.ownWrites, f)
+		}
+	}
+}
+
+// graceFilter drops uids we wrote to recently, so a stale folder list
+// does not tombstone membership the server still holds (FR-S.12).
+func (e *Engine) graceFilter(folder string, uids []uint32) []uint32 {
+	e.ownMu.Lock()
+	defer e.ownMu.Unlock()
+	byUID := e.ownWrites[folder]
+	if len(byUID) == 0 {
+		return uids
+	}
+	cutoff := time.Now().Add(-graceWindow)
+	out := uids[:0:0]
+	for _, uid := range uids {
+		if at, ours := byUID[uid]; ours && at.After(cutoff) {
+			continue
+		}
+		out = append(out, uid)
+	}
+	return out
+}
+
+// gmLabelFor maps a mailbox to the Gmail label that implements it
+// (FR-S.10). System folders have system labels; everything else's label
+// is its mailbox path, because Gmail's user labels and IMAP folder names
+// are the same strings. The boolean is false for the implicit mailbox
+// ([Gmail]/All Mail, the archive role): its membership is server-defined
+// and no label write can express it.
+func gmLabelFor(role, path string) (label string, writable bool) {
+	switch role {
+	case "inbox":
+		return `\Inbox`, true
+	case "sent":
+		return `\Sent`, true
+	case "drafts":
+		return `\Drafts`, true
+	case "trash":
+		return `\Trash`, true
+	case "junk":
+		return `\Spam`, true
+	case "archive":
+		// \All: every message is a member by definition.
+		return "", false
+	}
+	// The two Gmail system folders SPECIAL-USE does not cover.
+	switch leafName(path) {
+	case "Starred":
+		return `\Starred`, true
+	case "Important":
+		return `\Important`, true
+	}
+	return path, true
+}
+
+// leafName returns the part of an IMAP path after the last hierarchy
+// separator (Gmail uses "/").
+func leafName(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' || path[i] == '.' {
+			return path[i+1:]
+		}
+	}
+	return path
+}
+
+// changeMembershipGmail is the Gmail half of changeMembership (FR-S.10):
+// label writes instead of copy storms. One pair of STORE commands covers
+// every add and every remove, addressed through any copy with a known
+// uid — Gmail UIDs are account-global, so the same uid answers in the
+// selected folder and everywhere else.
+func (e *Engine) changeMembershipGmail(ctx context.Context, copies []store.Copy, addSet []string, remSet []string) ([]store.MembershipAdd, error) {
+	var src *store.Copy
+	for i := range copies {
+		if copies[i].UID != 0 {
+			src = &copies[i]
+			break
+		}
+	}
+	if src == nil {
+		return nil, fmt.Errorf("%w: no folder holds a known uid for this message", jmapapi.ErrNoLocation)
+	}
+
+	addLabels, skipAdds, err := e.labelsFor(ctx, addSet, false)
+	if err != nil {
+		return nil, err
+	}
+	removeLabels, skipRemoves, err := e.labelsFor(ctx, remSet, true)
+	if err != nil {
+		return nil, err
+	}
+	// Nothing server-side to do: every add is implicit and every remove
+	// was refused above.
+	if len(addLabels) == 0 && len(removeLabels) == 0 {
+		return nil, nil
+	}
+
+	if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
+		if err := conn.StoreGmLabels(ctx, src.Folder, []uint32{src.UID}, addLabels, removeLabels); err != nil {
+			return err
+		}
+		e.recordOwnWrite(src.Folder, []uint32{src.UID})
+		for _, c := range copies {
+			if c.UID != 0 {
+				e.recordOwnWrite(c.Folder, []uint32{c.UID})
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	// The uid is unchanged: Gmail labels do not renumber messages.
+	adds := make([]store.MembershipAdd, 0, len(addSet))
+	for _, id := range addSet {
+		if skipAdds[id] {
+			// Implicit mailbox: the server already holds the message
+			// there by definition; the membership commit below reports
+			// exactly that truth (PLAN §7.1 Gmail amendment).
+			adds = append(adds, store.MembershipAdd{
+				MailboxID: id, UID: src.UID, UIDValidity: src.UIDValidity,
+			})
+		}
+	}
+	_ = skipRemoves
+	return adds, nil
+}
+
+// labelsFor resolves mailbox ids to Gmail labels. forRemoval marks the
+// implicit-mailbox check: removing from All Mail is not expressible and
+// fails the patch; adding to it is a no-op the caller commits locally.
+func (e *Engine) labelsFor(ctx context.Context, ids []string, forRemoval bool) (labels []string, implicit map[string]bool, err error) {
+	implicit = map[string]bool{}
+	if len(ids) == 0 {
+		return nil, implicit, nil
+	}
+	mbs, _, notFound, err := e.st.MailboxesByID(ctx, e.cfg.Account, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(notFound) > 0 {
+		return nil, nil, jmapapi.ErrUnknownMailbox
+	}
+	byID := map[string]*jmapapi.Mailbox{}
+	for _, mb := range mbs {
+		byID[mb.ID] = mb
+	}
+	for _, id := range ids {
+		mb, ok := byID[id]
+		if !ok {
+			return nil, nil, jmapapi.ErrUnknownMailbox
+		}
+		label, writable := gmLabelFor(mb.Role, mb.Path)
+		if writable {
+			labels = append(labels, label)
+			continue
+		}
+		if forRemoval {
+			return nil, nil, &implicitRemoveError{path: mb.Path}
+		}
+		implicit[id] = true
+	}
+	return labels, implicit, nil
+}
+
+// implicitRemoveError is the refusal for a membership removal the Gmail
+// server model cannot express: All Mail holds everything, so "remove
+// from All Mail" has no label write.
+type implicitRemoveError struct{ path string }
+
+func (e *implicitRemoveError) Error() string {
+	return "membership in " + e.path + " is managed by the server and cannot be removed"
+}
+
+// destroyEmailsGmail makes destroy permanent on Gmail (FR-M.18): copies
+// outside Trash/Spam are moved to Trash (Gmail's MOVE drops the other
+// labels), then everything is expunged inside Trash, where expunge means
+// permanent. Without a trash-role mailbox the only honest fallback is
+// the generic expunge-everywhere path, which the caller runs.
+func (e *Engine) destroyEmailsGmail(ctx context.Context, copies []store.Copy) error {
+	trashID, err := e.st.MailboxIDByRole(ctx, e.cfg.Account, "trash")
+	if err != nil {
+		return err
+	}
+	if trashID == "" {
+		return errNoTrashRole
+	}
+	trashPath, err := e.st.MailboxPath(ctx, e.cfg.Account, trashID)
+	if err != nil {
+		return err
+	}
+
+	var direct []uint32 // already in Trash or Spam: expunge in place
+	var movable []store.Copy
+	var trashUIDs []uint32
+	for _, c := range copies {
+		if c.UID == 0 {
+			return fmt.Errorf("%w: no folder holds a known uid for this message", jmapapi.ErrNoLocation)
+		}
+		if c.MailboxID == trashID {
+			direct = append(direct, c.UID)
+			continue
+		}
+		movable = append(movable, c)
+	}
+
+	if len(movable) > 0 {
+		for _, c := range movable {
+			var res imapdrv.CopyResult
+			if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
+				var err error
+				res, err = conn.MoveUIDs(ctx, c.Folder, trashPath, []uint32{c.UID})
+				return err
+			}); err != nil {
+				return err
+			}
+			// Gmail UIDs are global: the moved message keeps its uid in
+			// Trash, and the COPYUID mapping agrees when the server sent
+			// one.
+			uid := res.DestUIDs[c.UID]
+			if uid == 0 {
+				uid = c.UID
+			}
+			trashUIDs = append(trashUIDs, uid)
+			e.recordOwnWrite(c.Folder, []uint32{c.UID})
+			e.recordOwnWrite(trashPath, []uint32{uid})
+		}
+	}
+	if len(direct) > 0 || len(trashUIDs) > 0 {
+		if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
+			if len(direct) > 0 {
+				if err := conn.ExpungeUIDs(ctx, trashPath, direct); err != nil {
+					return err
+				}
+			}
+			if len(trashUIDs) > 0 {
+				return conn.ExpungeUIDs(ctx, trashPath, trashUIDs)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		e.recordOwnWrite(trashPath, append(append([]uint32{}, direct...), trashUIDs...))
+	}
+	return nil
+}
+
+// errNoTrashRole marks the Gmail destroy fallback.
+var errNoTrashRole = errors.New("gmail: account has no trash mailbox; falling back to expunge in place")

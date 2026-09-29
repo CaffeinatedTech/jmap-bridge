@@ -75,6 +75,17 @@ type Engine struct {
 	// hydrateFetches counts actual IMAP body fetches; single-flight
 	// (FR-S.8) means concurrent readers must not raise it (tests).
 	hydrateFetches atomic.Int64
+
+	// ownWrites remembers the (folder → uid → when) pairs of our own
+	// mutations, so the reconcile paths can spare them from tombstoning
+	// while Gmail's lists catch up (grace window, FR-S.12).
+	ownMu     sync.Mutex
+	ownWrites map[string]map[uint32]time.Time
+
+	// kick wakes the run loop out of its backoff sleep: the OAuth
+	// callback uses it when credentials just landed, so the next pass
+	// does not wait out a five-minute timer.
+	kick chan struct{}
 }
 
 // errNotConnected means the work connection is down; the run loop
@@ -100,12 +111,23 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 		log:         log,
 		wr:          newWriter(cfg.IMAP, log),
 		wake:        make(chan string, 8),
+		kick:        make(chan struct{}, 1),
 		flights:     map[string]*flight{},
 		prefetchSem: make(chan struct{}, cfg.Concurrency),
 		idleFolder:  "INBOX",
 	}
 	st.Ensure = e.Ensure
 	return e
+}
+
+// Kick nudges the engine to run a pass now, skipping any backoff sleep:
+// the OAuth callback calls it after credentials land (FR-A.5).
+func (e *Engine) Kick() {
+	e.requestPass("")
+	select {
+	case e.kick <- struct{}{}:
+	default:
+	}
 }
 
 // Run drives the engine until ctx ends: connect, pass, repeat, with
@@ -128,7 +150,7 @@ func (e *Engine) Run(ctx context.Context) {
 			if err := e.connect(ctx); err != nil {
 				e.log.Warn("sync: connect failed", "account", e.cfg.Account, "err", err)
 				failures++
-				if !sleepCtx(ctx, backoff(failures)) {
+				if !e.sleepOrKick(ctx, backoff(failures)) {
 					return
 				}
 				continue
@@ -148,13 +170,29 @@ func (e *Engine) Run(ctx context.Context) {
 			e.log.Warn("sync: pass failed", "account", e.cfg.Account, "err", err)
 			e.disconnect()
 			failures++
-			if !sleepCtx(ctx, backoff(failures)) {
+			if !e.sleepOrKick(ctx, backoff(failures)) {
 				e.wr.close()
 				return
 			}
 			continue
 		}
 		failures = 0
+	}
+}
+
+// sleepOrKick sleeps d, returning early when the engine was kicked (the
+// OAuth callback landed credentials mid-backoff, FR-A.5) or ctx ended.
+// The bool reports whether the loop should continue.
+func (e *Engine) sleepOrKick(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	case <-e.kick:
+		return true
 	}
 }
 
@@ -218,6 +256,7 @@ func (e *Engine) connect(ctx context.Context) error {
 	}
 	e.work = conn
 	e.connected = true
+	e.wr.noteGmail(conn.GmailExt())
 	e.log.Info("sync: connected",
 		"account", e.cfg.Account, "tier", conn.Tier().String(),
 		"compressed", conn.Compressed())

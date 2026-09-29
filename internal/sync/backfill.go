@@ -43,6 +43,7 @@ func (e *Engine) discoverWith(ctx context.Context, conn *imapdrv.Conn, record bo
 		}
 		folders = append(folders, store.Folder{
 			Name: f.Name, Delim: f.Delim, Role: f.Role, NoSelect: f.NoSelect,
+			Implicit:    f.AllMail,
 			UIDValidity: st.UIDValidity, UIDNext: st.UIDNext, HighestModSeq: st.HighestModSeq,
 		})
 		if f.Role == "inbox" && !f.NoSelect {
@@ -117,12 +118,49 @@ func (e *Engine) backfillLocked(ctx context.Context, folder string, status imapd
 		for u := uint64(cursor); u <= end; u++ {
 			uids = append(uids, uint32(u))
 		}
-		msgs, err := e.work.FetchHeaders(ctx, uids)
-		if err != nil {
-			return fmt.Errorf("backfill %q [%d..%d]: %w", folder, cursor, end, err)
-		}
-		if err := e.ingest(ctx, folder, status.UIDValidity, msgs); err != nil {
-			return err
+		// Gmail (FR-S.10): a uid the account already knows through
+		// another folder needs no header fetch — Gmail UIDs are global
+		// and flags are per-message, so only the membership and the
+		// folder mapping are missing. One shared-uid lookup replaces a
+		// full ENVELOPE round trip per already-seen message, which is
+		// most of them once All Mail has been backfilled.
+		if e.work.GmailExt() {
+			known, err := e.st.KnownSharedUIDs(ctx, e.cfg.Account, status.UIDValidity, uids)
+			if err != nil {
+				return err
+			}
+			var need []uint32
+			for _, u := range uids {
+				if _, ok := known[u]; !ok {
+					need = append(need, u)
+				}
+			}
+			if len(need) > 0 {
+				msgs, err := e.work.FetchHeaders(ctx, need)
+				if err != nil {
+					return fmt.Errorf("backfill %q [%d..%d]: %w", folder, cursor, end, err)
+				}
+				if err := e.ingest(ctx, folder, status.UIDValidity, msgs); err != nil {
+					return err
+				}
+			}
+			if len(known) > 0 {
+				knownList := make([]uint32, 0, len(known))
+				for u := range known {
+					knownList = append(knownList, u)
+				}
+				if err := e.st.LinkSharedUIDs(ctx, e.cfg.Account, folder, status.UIDValidity, knownList); err != nil {
+					return err
+				}
+			}
+		} else {
+			msgs, err := e.work.FetchHeaders(ctx, uids)
+			if err != nil {
+				return fmt.Errorf("backfill %q [%d..%d]: %w", folder, cursor, end, err)
+			}
+			if err := e.ingest(ctx, folder, status.UIDValidity, msgs); err != nil {
+				return err
+			}
 		}
 		fs.UIDValidity = status.UIDValidity
 		fs.UIDNext = status.UIDNext
@@ -183,10 +221,15 @@ func (e *Engine) incrementalLocked(ctx context.Context, folder string, status im
 		return nil
 	}
 
-	// 1. Expunges QRESYNC already told us about.
+	// 1. Expunges QRESYNC already told us about. The grace window
+	// spares uids our own writes touched (FR-S.12): a list that has not
+	// caught up must not tombstone membership the server still holds.
 	if len(sel.Vanished) > 0 {
-		if err := e.st.RemoveUIDs(ctx, e.cfg.Account, folder, sel.Status.UIDValidity, sel.Vanished); err != nil {
-			return err
+		vanished := e.graceFilter(folder, sel.Vanished)
+		if len(vanished) > 0 {
+			if err := e.st.RemoveUIDs(ctx, e.cfg.Account, folder, sel.Status.UIDValidity, vanished); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -222,7 +265,7 @@ func (e *Engine) incrementalLocked(ctx context.Context, folder string, status im
 			if err != nil {
 				return err
 			}
-			if len(vanished) > 0 {
+			if vanished = e.graceFilter(folder, vanished); len(vanished) > 0 {
 				if err := e.st.RemoveUIDs(ctx, e.cfg.Account, folder, sel.Status.UIDValidity, vanished); err != nil {
 					return err
 				}
@@ -265,7 +308,7 @@ func (e *Engine) reconcileUIDs(ctx context.Context, folder string, uv uint32) er
 	if err != nil {
 		return err
 	}
-	gone := diffGone(known, server)
+	gone := e.graceFilter(folder, diffGone(known, server))
 	if len(gone) > 0 {
 		return e.st.RemoveUIDs(ctx, e.cfg.Account, folder, uv, gone)
 	}
@@ -285,7 +328,7 @@ func (e *Engine) reconcileUIDsFrom(ctx context.Context, folder string, uv uint32
 	if err != nil {
 		return err
 	}
-	gone := diffGone(known, server)
+	gone := e.graceFilter(folder, diffGone(known, server))
 	if len(gone) > 0 {
 		if err := e.st.RemoveUIDs(ctx, e.cfg.Account, folder, uv, gone); err != nil {
 			return err
@@ -326,17 +369,22 @@ func (e *Engine) applyFlagChanges(ctx context.Context, folder string, uv uint32,
 }
 
 // ingest converts driver header records into store records and commits
-// them (FR-S.3).
+// them (FR-S.3). On X-GM-EXT-1 servers the records carry the shared-UID
+// hint, so a message first seen through another folder dedupes instead
+// of becoming a second JMAP object (FR-S.10).
 func (e *Engine) ingest(ctx context.Context, folder string, uv uint32, msgs []imapdrv.HeaderMsg) error {
 	if len(msgs) == 0 {
 		return nil
 	}
+	shared := e.work.GmailExt()
 	recs := make([]store.MessageRec, 0, len(msgs))
 	for _, m := range msgs {
 		rec := convert.Summary(m.Envelope, m.Structure, m.InternalDate, m.Size)
 		rec.UID = m.UID
 		rec.UIDValidity = uv
 		rec.Flags = m.Flags
+		rec.SharedUIDs = shared
+		rec.GmThrid = m.Thrid
 		recs = append(recs, rec)
 	}
 	return e.st.PutMessages(ctx, e.cfg.Account, folder, recs)

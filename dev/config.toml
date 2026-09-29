@@ -23,3 +23,33 @@ token = "dev-token-local-only"
   tls = false
   username = "jmaptest"
   password = "bridge-local-gate"
+
+# Gmail profile (M4): OAuth2-only (D-5). Credentials come from the
+# environment or mounted files, never inline:
+#   JMAP_BRIDGE_GMAIL_OAUTH2_CLIENT_SECRET
+# and the client-facing token below is a loopback throwaway. After
+# starting the bridge, visit http://127.0.0.1:8080/oauth/gmail/start in
+# a browser to consent; the callback stores the refresh token and kicks
+# the sync engine.
+# Set JMAP_BRIDGE_SECRET_KEY (32 bytes) to keep the stored tokens
+# encrypted at rest (FR-A.8).
+# [[accounts]]
+# id = "gmail"
+# name = "Gmail"
+# address = "me@gmail.com"
+# token = "dev-token-local-only"
+#
+#   [accounts.imap]
+#   host = "imap.gmail.com"
+#   port = 993
+#   auth = "oauth2"
+#   username = "me@gmail.com"
+#
+#   [accounts.smtp]
+#   host = "smtp.gmail.com"
+#   port = 465
+#   auth = "oauth2"
+#
+#   [accounts.oauth2]
+#   provider = "google"
+#   client_id = "…apps.googleusercontent.com"

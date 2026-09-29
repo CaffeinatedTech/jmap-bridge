@@ -105,10 +105,15 @@ func (c *Config) normalize() {
 			if a.SMTP.TLS == "" {
 				a.SMTP.TLS = "implicit"
 			}
+			// The login identity defaults for both auth modes — XOAUTH2
+			// carries the username in its initial response too.
 			if a.SMTP.Username == "" && a.IMAP != nil {
 				a.SMTP.Username = a.IMAP.Username
 			}
-			if a.SMTP.Password == "" && a.IMAP != nil {
+			// The password default only applies between password
+			// accounts: an oauth2 account must not inherit credentials
+			// that would then look like a fallback (FR-A.10).
+			if a.SMTP.Auth == "password" && a.SMTP.Password == "" && a.IMAP != nil {
 				a.SMTP.Password = a.IMAP.Password
 			}
 		}
@@ -165,6 +170,18 @@ func (c *Config) validateAccount(i int, a *Account) error {
 		if backendAuth != "" {
 			return errKey(fmt.Sprintf("accounts[%d].oauth2", i), "required when %s = \"oauth2\"", backendAuth)
 		}
+	}
+	// FR-A.10: an oauth2 account has no password fallback. A configured
+	// password next to auth = "oauth2" is a misconfiguration, not a
+	// compatibility shim — it would sit there unused until someone
+	// flipped the auth switch and silently downgraded.
+	if a.IMAP != nil && a.IMAP.Auth == "oauth2" && (a.IMAP.Password != "" || a.IMAP.PasswordFile != "") {
+		return errKey(fmt.Sprintf("accounts[%d].imap.password", i),
+			"must not be set when imap.auth = \"oauth2\" (there is no password fallback)")
+	}
+	if a.SMTP != nil && a.SMTP.Auth == "oauth2" && (a.SMTP.Password != "" || a.SMTP.PasswordFile != "") {
+		return errKey(fmt.Sprintf("accounts[%d].smtp.password", i),
+			"must not be set when smtp.auth = \"oauth2\" (there is no password fallback)")
 	}
 	return nil
 }

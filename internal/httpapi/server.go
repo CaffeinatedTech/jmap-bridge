@@ -17,6 +17,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/auth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/config"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/oauth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/push"
 )
 
@@ -37,15 +38,22 @@ type Server struct {
 	jmap     *jmapapi.Handler
 	log      *slog.Logger
 	mux      *http.ServeMux
+	// oauth maps an account id to its OAuth2 client; accounts without
+	// one have no /oauth/ endpoints at all (FR-A.5).
+	oauth map[string]*oauth.Manager
+	// kick nudges an account's sync engine after credentials land.
+	kick func(account string)
 }
 
 // New wires a Server: routing, auth, dispatch and push. store serves
 // every configured account; backends maps an account id to the object
 // that mutates it (nil for a cache-only account, which then refuses
 // every write); hub is the change signal source for the eventsource
-// endpoint (FR-J.8).
+// endpoint (FR-J.8); oauth carries the per-account OAuth2 clients
+// (FR-A.5) and kick is called after a successful consent.
 func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
 	backends map[string]jmapapi.Backend, hub *push.Hub, log *slog.Logger,
+	oauth map[string]*oauth.Manager, kick func(account string),
 ) *Server {
 	s := &Server{
 		cfg:      cfg,
@@ -56,6 +64,13 @@ func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
 		jmap:     jmapapi.NewHandler(store),
 		log:      log,
 		mux:      http.NewServeMux(),
+		oauth:    oauth,
+		kick:     kick,
+	}
+	if s.log == nil {
+		// Tests build Servers without logging; the error paths must not
+		// segfault for it.
+		s.log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	s.mux.HandleFunc("GET /{account}/.well-known/jmap", s.handleSession)
 	s.mux.HandleFunc("POST /{account}/jmap", s.handleAPI)
@@ -68,8 +83,19 @@ func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
 	return s
 }
 
-// ServeHTTP implements http.Handler.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+// ServeHTTP implements http.Handler. The OAuth2 bootstrap subtree is
+// dispatched before the mux (FR-A.5): its "/oauth/…" paths collide
+// structurally with the "/{account}/…" wildcards above — ServeMux would
+// refuse to register both — and it is deliberately NOT behind the client
+// token: the operator reaches it from a browser before any client is
+// configured, and the flow's own state is the credential (FR-A.6).
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/oauth/") {
+		s.handleOAuth(w, r)
+		return
+	}
+	s.mux.ServeHTTP(w, r)
+}
 
 // authorize resolves the path account and checks the request
 // credentials. Every failure in token mode collapses to the same 401

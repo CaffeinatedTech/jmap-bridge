@@ -38,6 +38,9 @@ type Options struct {
 	Password string
 	// FailAuth refuses AUTH with 535, the wrong-password answer.
 	FailAuth bool
+	// OAuthToken, when set, makes the fixture accept AUTH XOAUTH2 with
+	// exactly this bearer token (M4 submit path).
+	OAuthToken string
 	// RejectMail, when set, refuses MAIL FROM with this reply
 	// ("550 5.7.1 sender not permitted").
 	RejectMail string
@@ -168,9 +171,12 @@ func (s *Server) handle(conn net.Conn) {
 		switch verb {
 		case "EHLO":
 			_, _ = w.WriteString("250-fixturesmtp\r\n250-8BITMIME\r\n250-SIZE 67108864\r\n")
-			if s.opts.Username != "" || s.opts.Password != "" {
+			switch {
+			case s.opts.OAuthToken != "":
+				_, _ = w.WriteString("250 AUTH PLAIN XOAUTH2\r\n")
+			case s.opts.Username != "" || s.opts.Password != "":
 				_, _ = w.WriteString("250 AUTH PLAIN\r\n")
-			} else {
+			default:
 				_, _ = w.WriteString("250 HELP\r\n")
 			}
 			_ = w.Flush()
@@ -237,10 +243,18 @@ func (s *Server) handle(conn net.Conn) {
 	}
 }
 
-// auth answers AUTH PLAIN with an initial response in arg.
+// auth answers AUTH PLAIN with an initial response in arg, and AUTH
+// XOAUTH2 with the bearer token the fixture was configured with — the
+// M4 submit path needs a server that speaks Gmail's mechanism.
 func (s *Server) auth(arg string) string {
 	fields := strings.Fields(arg)
-	if len(fields) == 0 || !strings.EqualFold(fields[0], "PLAIN") {
+	if len(fields) == 0 {
+		return "501 5.5.4 AUTH requires a mechanism"
+	}
+	if strings.EqualFold(fields[0], "XOAUTH2") {
+		return s.authXOAUTH2(fields[1:])
+	}
+	if !strings.EqualFold(fields[0], "PLAIN") {
 		return "504 5.5.4 Unrecognized authentication type"
 	}
 	if s.opts.FailAuth {
@@ -258,6 +272,35 @@ func (s *Server) auth(arg string) string {
 	}
 	parts := strings.Split(string(raw), "\x00")
 	if len(parts) != 3 || parts[1] != s.opts.Username || parts[2] != s.opts.Password {
+		return "535 5.7.8 Authentication credentials invalid"
+	}
+	return "235 2.7.0 Authentication successful"
+}
+
+// authXOAUTH2 validates the SASL XOAUTH2 initial response:
+// "user=<user>\x01auth=Bearer <token>\x01\x01" (Google's docs). On
+// failure the server sends the error JSON as a challenge — the client
+// answers with an empty line, which the connection loop treats as the
+// continuation it is — and then completes the rejection.
+func (s *Server) authXOAUTH2(fields []string) string {
+	if s.opts.OAuthToken == "" {
+		return "504 5.5.4 Unrecognized authentication type"
+	}
+	if s.opts.FailAuth {
+		challenge := base64.StdEncoding.EncodeToString(
+			[]byte(`{"status":"400","schemes":"Bearer"}`))
+		return "334 " + challenge
+	}
+	if len(fields) == 0 {
+		return "334 "
+	}
+	raw, err := base64.StdEncoding.DecodeString(fields[0])
+	if err != nil {
+		return "535 5.7.8 Authentication credentials invalid"
+	}
+	text := string(raw)
+	want := "user=" + s.opts.Username + "\x01auth=Bearer " + s.opts.OAuthToken + "\x01\x01"
+	if text != want {
 		return "535 5.7.8 Authentication credentials invalid"
 	}
 	return "235 2.7.0 Authentication successful"

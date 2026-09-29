@@ -58,7 +58,7 @@ func newTestServerCfg(t *testing.T, cfgText string) *testServer {
 	for _, a := range cfg.Accounts {
 		tok[a.ID] = a.Token
 	}
-	handler := New(cfg, auth.NewTokens(tok), fixture.New(), nil, push.New(), nil)
+	handler := New(cfg, auth.NewTokens(tok), fixture.New(), nil, push.New(), nil, nil, nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	return &testServer{Server: ts, cfg: cfg, h: handler}
@@ -660,7 +660,7 @@ address = "me@example.test"
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
-	ts := httptest.NewServer(New(cfg, auth.NewTokens(nil), fixture.New(), nil, push.New(), nil))
+	ts := httptest.NewServer(New(cfg, auth.NewTokens(nil), fixture.New(), nil, push.New(), nil, nil, nil))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/personal/.well-known/jmap")

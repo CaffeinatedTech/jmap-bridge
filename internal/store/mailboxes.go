@@ -24,6 +24,11 @@ type Folder struct {
 	Role string
 	// NoSelect marks a hierarchy container the server refuses to select.
 	NoSelect bool
+	// Implicit marks a mailbox whose membership the server manages: on
+	// Gmail, [Gmail]/All Mail holds every message by definition, so
+	// clients may neither add to it nor remove from it (FR-S.10,
+	// FR-M.18). May-add/may-remove are false for it.
+	Implicit bool
 	// UIDValidity, UIDNext and HighestModSeq come from STATUS/SELECT.
 	UIDValidity   uint32
 	UIDNext       uint64
@@ -89,7 +94,8 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 			if role == "" && strings.EqualFold(f.Name, "INBOX") {
 				role = "inbox"
 			}
-			mayAdd := !f.NoSelect
+			mayAdd := !f.NoSelect && !f.Implicit
+			mayRemove := !f.NoSelect && !f.Implicit
 			row, ok := existing[f.Name]
 			if !ok {
 				id, err := mintID(ctx, tx)
@@ -105,7 +111,7 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?, ?, 0)`,
 					id, account, nullStr(parent), nullStr(role), f.Name, sortOrder[f.Name],
 					int64(f.UIDValidity), int64(f.UIDNext), int64(f.HighestModSeq),
-					boolInt(true), boolInt(mayAdd), boolInt(true),
+					boolInt(true), boolInt(mayAdd), boolInt(mayRemove),
 					seq, seq); err != nil {
 					return fmt.Errorf("store: create mailbox %q: %w", f.Name, err)
 				}
@@ -133,11 +139,11 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE mailboxes SET parent_id = ?, role = ?, sort_order = ?,
 				   uidvalidity = ?, uidnext = ?, highestmodseq = ?,
-				   may_add_items = ?, deleted = NULL, updated_modseq = ?
+				   may_add_items = ?, may_remove_items = ?, deleted = NULL, updated_modseq = ?
 				 WHERE id = ? AND account = ?`,
 				nullStr(parent), nullStr(role), sortOrder[f.Name],
 				int64(f.UIDValidity), int64(f.UIDNext), int64(f.HighestModSeq),
-				boolInt(mayAdd), seq, row.ID, account); err != nil {
+				boolInt(mayAdd), boolInt(mayRemove), seq, row.ID, account); err != nil {
 				return fmt.Errorf("store: update mailbox %q: %w", f.Name, err)
 			}
 		}

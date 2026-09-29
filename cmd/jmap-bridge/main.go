@@ -23,6 +23,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/httpapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/oauth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/push"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/submit"
@@ -69,6 +70,22 @@ func run(args []string) error {
 	tokens := auth.NewTokens(tokenMap(cfg))
 	hub := push.New()
 
+	// Credential encryption at rest (FR-A.8): with a key configured the
+	// OAuth2 tokens are sealed before they land in SQLite; without one
+	// the bridge runs in plaintext mode and says so loudly (PLAN §9).
+	var cipher *auth.Cipher
+	if key := os.Getenv("JMAP_BRIDGE_SECRET_KEY"); key != "" {
+		c, err := auth.NewCipher(key)
+		if err != nil {
+			return err
+		}
+		cipher = c
+		log.Info("credential encryption enabled", "key_fingerprint", cipher.Fingerprint())
+	} else if anyOAuth(cfg) {
+		log.Warn("JMAP_BRIDGE_SECRET_KEY is not set: OAuth2 tokens will be stored UNENCRYPTED " +
+			"in the data volume (plaintext mode). Configure a 32-byte key before production use.")
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -86,10 +103,26 @@ func run(args []string) error {
 		}
 	}()
 
+	// One OAuth2 client per account that has an [accounts.oauth2] block
+	// (FR-A.5); the sync engines and the HTTP bootstrap share it.
+	ts := &tokenStore{st: st}
+	managers := map[string]*oauth.Manager{}
+	for i := range cfg.Accounts {
+		a := &cfg.Accounts[i]
+		if a.OAuth2 == nil {
+			continue
+		}
+		m, err := oauth.NewManager(a.ID, oauthConfig(a), cfg.BaseURL, ts, cipher, log)
+		if err != nil {
+			return err
+		}
+		managers[a.ID] = m
+	}
+
 	// One engine per account that has an IMAP backend; an account
 	// without one serves whatever the cache holds (log, never lie) and
 	// gets no Backend, so its writes fail instead of pretending.
-	engines := 0
+	engines := map[string]*sync.Engine{}
 	backends := map[string]jmapapi.Backend{}
 	for i := range cfg.Accounts {
 		a := &cfg.Accounts[i]
@@ -97,17 +130,17 @@ func run(args []string) error {
 			log.Warn("account has no [imap] block; serving cache only", "account", a.ID)
 			continue
 		}
-		eng := sync.New(syncConfig(cfg, a), st, log)
+		eng := sync.New(syncConfig(cfg, a, managers[a.ID]), st, log)
 		backends[a.ID] = eng
+		engines[a.ID] = eng
 		go eng.Run(ctx)
-		engines++
 	}
 
 	go purgeLoop(ctx, st, log)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           httpapi.New(cfg, tokens, st, backends, hub, log),
+		Handler:           httpapi.New(cfg, tokens, st, backends, hub, log, managers, kick(engines, log)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -117,7 +150,7 @@ func run(args []string) error {
 		"base_url", cfg.BaseURL,
 		"auth_mode", cfg.Auth.Mode,
 		"accounts", accountIDs(cfg),
-		"engines", engines,
+		"engines", len(engines),
 		"backend", "sqlite+imap (M1)",
 	)
 
@@ -142,7 +175,9 @@ func run(args []string) error {
 // syncConfig lifts one account's [sync]/[search]/[imap]/[smtp] settings
 // into the engine's view. An account with no [smtp] block gets a nil
 // SMTP: it can be read from and written to, but not sent from (FR-J.5).
-func syncConfig(cfg *config.Config, a *config.Account) sync.Config {
+// The account's OAuth2 manager, when one exists, is the token provider
+// for both IMAP and SMTP XOAUTH2 (FR-A.7).
+func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager) sync.Config {
 	tls := true
 	if a.IMAP.TLS != nil {
 		tls = *a.IMAP.TLS
@@ -161,6 +196,9 @@ func syncConfig(cfg *config.Config, a *config.Account) sync.Config {
 		PrefetchWindow: cfg.Sync.PrefetchWindow.Std(),
 		Concurrency:    cfg.Search.Concurrency,
 	}
+	if a.IMAP.Auth == "oauth2" && mgr != nil {
+		out.IMAP.Token = mgr.AccessToken
+	}
 	if a.SMTP != nil {
 		out.SMTP = &submit.Config{
 			Host:     a.SMTP.Host,
@@ -170,8 +208,74 @@ func syncConfig(cfg *config.Config, a *config.Account) sync.Config {
 			Username: a.SMTP.Username,
 			Password: a.SMTP.Password,
 		}
+		if a.SMTP.Auth == "oauth2" && mgr != nil {
+			out.SMTP.Token = mgr.AccessToken
+		}
 	}
 	return out
+}
+
+// oauthConfig lifts the [accounts.oauth2] block into the oauth package's
+// view; HasCardDAV names the contacts scope for provider = "google"
+// (FR-A.9 — M6 fills contacts, the scope rides along now).
+func oauthConfig(a *config.Account) oauth.Config {
+	o := a.OAuth2
+	return oauth.Config{
+		Provider:     o.Provider,
+		ClientID:     o.ClientID,
+		ClientSecret: o.ClientSecret,
+		AuthURL:      o.AuthURL,
+		TokenURL:     o.TokenURL,
+		Scopes:       o.Scopes,
+		HasCardDAV:   a.CardDAV != nil && a.CardDAV.URL != "",
+	}
+}
+
+// tokenStore adapts the store's OAuth token table to the oauth package's
+// TokenStore interface (FR-A.8: values arrive sealed and are stored
+// exactly as handed over).
+type tokenStore struct{ st *store.Store }
+
+func (t *tokenStore) LoadToken(ctx context.Context, account string) (string, string, time.Time, error) {
+	tok, err := t.st.OAuthToken(ctx, account)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	return tok.RefreshToken, tok.AccessToken, tok.AccessExpiry, nil
+}
+
+func (t *tokenStore) SaveToken(ctx context.Context, account, refresh, access string, expiry time.Time) error {
+	return t.st.SaveOAuthToken(ctx, account, store.OAuthToken{
+		RefreshToken: refresh, AccessToken: access, AccessExpiry: expiry,
+	})
+}
+
+func (t *tokenStore) ClearToken(ctx context.Context, account string) error {
+	return t.st.ClearOAuthToken(ctx, account)
+}
+
+// kick builds the post-consent wake callback: credentials just landed,
+// so the account's engine runs a pass immediately instead of waiting out
+// its backoff (FR-A.5).
+func kick(engines map[string]*sync.Engine, log *slog.Logger) func(account string) {
+	return func(account string) {
+		eng, ok := engines[account]
+		if !ok {
+			return
+		}
+		eng.Kick()
+		log.Info("oauth: engine kicked", "account", account)
+	}
+}
+
+// anyOAuth reports whether any account needs the OAuth2 machinery.
+func anyOAuth(cfg *config.Config) bool {
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].OAuth2 != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // purgeLoop applies NFR-4's tombstone retention daily: /changes stays

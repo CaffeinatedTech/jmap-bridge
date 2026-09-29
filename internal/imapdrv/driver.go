@@ -55,6 +55,12 @@ type Config struct {
 	Username string
 	Password string
 	Logger   *slog.Logger
+
+	// Token, when set, supplies the XOAUTH2 bearer token and replaces
+	// password authentication (FR-A.7, FR-A.10: no fallback). force
+	// marks the retry after the server rejected the previous token —
+	// the driver calls it exactly once more and then reports failure.
+	Token func(ctx context.Context, force bool) (string, error)
 }
 
 // Conn is one authenticated IMAP session. It is not safe for
@@ -105,7 +111,7 @@ func Dial(ctx context.Context, cfg Config) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("imapdrv: dial %s: %w", addr, err)
 	}
-	if err := c.client.Login(ctx, cfg.Username, cfg.Password, nil); err != nil {
+	if err := c.authenticate(ctx); err != nil {
 		_ = c.client.Close()
 		return nil, fmt.Errorf("imapdrv: login: %w", err)
 	}
@@ -165,6 +171,35 @@ func (c *Conn) Close() error {
 	return c.client.Close()
 }
 
+// authenticate logs in with the configured credentials: XOAUTH2 when a
+// token provider is set (FR-A.10 — no password fallback), LOGIN
+// otherwise. A rejected token gets exactly one more attempt with a
+// forced refresh before the failure is reported (FR-A.7).
+func (c *Conn) authenticate(ctx context.Context) error {
+	if c.cfg.Token == nil {
+		return c.client.Login(ctx, c.cfg.Username, c.cfg.Password, nil)
+	}
+	tok, err := c.cfg.Token(ctx, false)
+	if err != nil {
+		return err
+	}
+	first := c.client.Authenticate(ctx, c.cfg.Username, "", &imapclient.AuthenticateOptions{
+		Mechanism: "XOAUTH2",
+		Token:     tok,
+	})
+	if first == nil {
+		return nil
+	}
+	fresh, err := c.cfg.Token(ctx, true)
+	if err != nil {
+		return first // the original rejection is what the caller cares about
+	}
+	return c.client.Authenticate(ctx, c.cfg.Username, "", &imapclient.AuthenticateOptions{
+		Mechanism: "XOAUTH2",
+		Token:     fresh,
+	})
+}
+
 // Tier reports the session's current tier (FR-S.2 recording).
 func (c *Conn) Tier() Tier { return c.tier }
 
@@ -175,6 +210,10 @@ func (c *Conn) Compressed() bool { return c.client.Compressed() }
 // SupportsPREVIEW reports RFC 8970 availability (PLAN §5 preview
 // strategy).
 func (c *Conn) SupportsPREVIEW() bool { return c.caps()["PREVIEW"] }
+
+// GmailExt reports the X-GM-EXT-1 profile (FR-S.10): Gmail's labels,
+// thread ids and shared UID namespace.
+func (c *Conn) GmailExt() bool { return c.caps()["X-GM-EXT-1"] }
 
 func (c *Conn) caps() map[string]bool { return c.client.Capabilities() }
 

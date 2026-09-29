@@ -22,6 +22,10 @@ type Folder struct {
 	Role string
 	// NoSelect marks a hierarchy container (RFC 3501 \Noselect).
 	NoSelect bool
+	// AllMail marks the \All mailbox (Gmail's [Gmail]/All Mail): its
+	// membership is implicit, so clients cannot add to it or remove
+	// from it (FR-S.10, FR-M.18).
+	AllMail bool
 }
 
 // ListFolders returns every mailbox via LIST-EXTENDED with the
@@ -38,8 +42,11 @@ func (c *Conn) ListFolders(ctx context.Context) ([]Folder, error) {
 	for _, d := range data {
 		f := Folder{Name: d.Mailbox, Delim: d.Delimiter}
 		for _, a := range d.Attrs {
-			if strings.EqualFold(string(a), `\Noselect`) {
+			switch a {
+			case imap.MailboxAttrNoSelect:
 				f.NoSelect = true
+			case imap.MailboxAttrAll:
+				f.AllMail = true
 			}
 		}
 		f.Role = roleFor(f.Name, d.Attrs)
@@ -65,8 +72,14 @@ func roleFor(name string, attrs []imap.MailboxAttr) string {
 		case imap.MailboxAttrArchive:
 			return "archive"
 		case imap.MailboxAttrAll:
-			// Gmail's [Gmail]/All Mail: no JMAP role exists; M4 maps
-			// archive semantics onto it explicitly.
+			// \All ([Gmail]/All Mail on Gmail): JMAP has no matching
+			// role, and the archive semantics REQUIREMENTS FR-M.18
+			// prescribes — "archive removes from INBOX only; the message
+			// remains listed in All Mail" — need an archive-role mailbox
+			// that already holds everything. All Mail is that mailbox
+			// (decided 2026-09-29 with the user); its membership is
+			// implicit, which the sync engine's write path enforces.
+			return "archive"
 		}
 	}
 	if strings.EqualFold(name, "INBOX") {

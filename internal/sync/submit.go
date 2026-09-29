@@ -62,11 +62,8 @@ func (e *Engine) SubmitEmail(ctx context.Context, account string, spec jmapapi.S
 	// the stored copy keeps its Bcc header, the delivered one does not.
 	if err := submit.Send(ctx, *e.cfg.SMTP, env, convert.StripBcc(raw)); err != nil {
 		var rejected *submit.RejectedError
-		switch {
-		case errors.As(err, &rejected):
+		if errors.As(err, &rejected) {
 			return nil, &jmapapi.SMTPError{Reply: rejected.Reply}
-		case errors.Is(err, submit.ErrAuthUnsupported):
-			return nil, jmapapi.ErrNoSubmissionBackend
 		}
 		return nil, err
 	}

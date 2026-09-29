@@ -29,6 +29,16 @@ type MessageRec struct {
 	Size        int64
 	ModSeq      uint64
 
+	// SharedUIDs marks a server whose UIDs identify a message across
+	// every folder (Gmail: one UID per account). When set, a record
+	// whose (uidvalidity, uid) is already mapped through another folder
+	// dedupes to that email regardless of Message-ID presence — the
+	// same server-side message cannot become two JMAP objects.
+	SharedUIDs bool
+	// GmThrid is Gmail's X-GM-THRID when the server reported one; it
+	// seeds thread ids ahead of Message-ID/References (FR-S.10).
+	GmThrid uint64
+
 	// Canonical JMAP header object and its lowercase query mirrors.
 	HeadersJSON string
 	SubjectL    string
@@ -92,6 +102,26 @@ func (s *Store) PutMessages(ctx context.Context, account, folder string, recs []
 				}
 				mailboxDirty = true
 				continue
+			}
+
+			// Shared-UID servers (Gmail): the same uidvalidity+uid in a
+			// different folder is the same server-side message, whatever
+			// its headers say. Flags are global per message there, so
+			// applying the fetched flags is always truthful.
+			if rec.SharedUIDs {
+				if id := liveEmailBySharedUID(ctx, tx, account, rec.UIDValidity, rec.UID, folder); id != "" {
+					if err := applyFlags(ctx, tx, account, id, keywords, seq); err != nil {
+						return err
+					}
+					if err := addMembership(ctx, tx, account, mailboxUID, id, seq); err != nil {
+						return err
+					}
+					if err := mapUID(ctx, tx, account, folder, rec.UIDValidity, rec.UID, id); err != nil {
+						return err
+					}
+					mailboxDirty = true
+					continue
+				}
 			}
 
 			// Dedupe: a message already known through another folder keeps
@@ -162,6 +192,7 @@ func createMessage(ctx context.Context, tx *sql.Tx, account string, mailboxUID i
 		References: rec.References,
 		InReplyTo:  rec.InReplyTo,
 		Subject:    rec.Subject,
+		GmThrid:    rec.GmThrid,
 	}, seq)
 	if err != nil {
 		return "", err
@@ -730,6 +761,24 @@ func sameKeywords(a, b map[string]bool) bool {
 	return true
 }
 
+// liveEmailBySharedUID finds a live email whose (uidvalidity, uid)
+// mapping exists in another folder — the shared-UID dedupe for servers
+// whose UIDs identify a message account-wide (FR-S.10). Same-folder hits
+// are excluded: uidEmailID already handled those as flag refreshes.
+func liveEmailBySharedUID(ctx context.Context, tx *sql.Tx, account string, uidValidity, uid uint32, folder string) string {
+	var id string
+	err := tx.QueryRowContext(ctx,
+		`SELECT iu.email_id FROM imap_uids iu JOIN emails e ON e.id = iu.email_id
+		 WHERE iu.account = ? AND iu.uidvalidity = ? AND iu.uid = ?
+		   AND iu.folder <> ? AND e.deleted IS NULL
+		 ORDER BY iu.rowid LIMIT 1`,
+		account, uidValidity, uid, folder).Scan(&id)
+	if err != nil {
+		return ""
+	}
+	return id
+}
+
 // liveEmailByMsgID finds a live email by any of the message's own
 // Message-IDs (cross-folder dedupe, FR-S.6 re-backfill).
 func liveEmailByMsgID(ctx context.Context, tx *sql.Tx, account string, msgIDs []string) string {
@@ -779,4 +828,98 @@ func firstNonEmpty(v []string) string {
 		}
 	}
 	return ""
+}
+
+// KnownSharedUIDs maps each uid to the live email the account already
+// knows under that shared uid, whichever folder mapped it (FR-S.10: on
+// Gmail one uid identifies a message account-wide). Unmapped uids are
+// simply absent; the caller fetches their headers instead.
+func (s *Store) KnownSharedUIDs(ctx context.Context, account string, uidValidity uint32, uids []uint32) (map[uint32]string, error) {
+	out := make(map[uint32]string, len(uids))
+	const chunk = 200
+	for start := 0; start < len(uids); start += chunk {
+		end := min(start+chunk, len(uids))
+		q := `SELECT iu.uid, iu.email_id FROM imap_uids iu JOIN emails e ON e.id = iu.email_id
+		      WHERE iu.account = ? AND iu.uidvalidity = ? AND e.deleted IS NULL
+		        AND iu.uid IN (`
+		args := []any{account, uidValidity}
+		for i, u := range uids[start:end] {
+			if i > 0 {
+				q += ","
+			}
+			q += "?"
+			args = append(args, u)
+		}
+		q += ")"
+		rows, err := s.db.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, fmt.Errorf("store: known shared uids: %w", err)
+		}
+		for rows.Next() {
+			var uid uint32
+			var id string
+			if err := rows.Scan(&uid, &id); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			out[uid] = id
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// LinkSharedUIDs records membership and the uid mapping for messages the
+// account already knows under their shared uid — the Gmail backfill's
+// cheap half: headers and keywords are already right (Gmail flags are
+// per-message), so only the membership and the folder mapping are
+// missing. Uids the account does not know are left alone; the engine
+// fetches those with headers instead. The store re-checks every mapping
+// inside the transaction, so a mapping that vanished between the
+// caller's lookup and here cannot produce a membership with no email.
+func (s *Store) LinkSharedUIDs(ctx context.Context, account, folder string, uidValidity uint32, uids []uint32) error {
+	if len(uids) == 0 {
+		return nil
+	}
+	return s.tx(ctx, account, true, func(tx *sql.Tx) error {
+		mailboxUID, _, err := folderRow(ctx, tx, account, folder)
+		if err != nil {
+			return err
+		}
+		seq, err := nextSeq(ctx, tx)
+		if err != nil {
+			return err
+		}
+		mailboxDirty := false
+		for _, uid := range uids {
+			id, err := uidEmailID(ctx, tx, account, folder, uidValidity, uid)
+			if err != nil {
+				return err
+			}
+			if id != "" {
+				continue // already a member of this folder
+			}
+			if id := liveEmailBySharedUID(ctx, tx, account, uidValidity, uid, folder); id != "" {
+				if err := addMembership(ctx, tx, account, mailboxUID, id, seq); err != nil {
+					return err
+				}
+				if err := mapUID(ctx, tx, account, folder, uidValidity, uid, id); err != nil {
+					return err
+				}
+				mailboxDirty = true
+			}
+		}
+		if mailboxDirty {
+			if err := touchMailboxCounts(ctx, tx, account, mailboxUID, seq); err != nil {
+				return err
+			}
+		}
+		if err := bumpEmailState(ctx, tx, account, seq); err != nil {
+			return err
+		}
+		return bumpMailboxState(ctx, tx, account, seq)
+	})
 }

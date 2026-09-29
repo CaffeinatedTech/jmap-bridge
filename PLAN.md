@@ -34,6 +34,8 @@ Config: TOML · Packaging: Docker/Kubernetes · CI: none (local gates, `AGENTS.m
 | D-17 | `AddressBook/set` stays roadmap (v0.2+); v0.1 ships `AddressBook/get\|changes` only | 2026-09-28 |
 | D-18 | Body cache is grow-only in v0.1; growth documented in README; eviction revisited only on demonstrated disk pressure | 2026-09-28 |
 | D-19 | NFR-1 / NFR-8 numbers are binding as written (no M5 "pin"); M5 revalidates by measurement, revisions are REQUIREMENTS edits | 2026-09-28 |
+| D-20 | Gmail's `[Gmail]/All Mail` maps to JMAP role `archive` and its membership is implicit (may_add/may_remove false): archive = remove `\Inbox` only, the message stays listed in All Mail (FR-M.18, approved by the user) | 2026-09-29 |
+| D-21 | kiliant/go-imap is forked (`~/projects/go-imap`, branch `feat/gmail-labels-store`) for the X-GM-EXT-1 label store + flag-form value capture; the bridge uses a `go.mod replace` until the upstream PR merges (PATCH-NOTES.md in the fork) | 2026-09-29 |
 
 ---
 
@@ -190,7 +192,7 @@ CREATE VIRTUAL TABLE email_fts USING fts5(
 
 CREATE TABLE threads (              -- thread key → thread id (FR-M.7)
   account TEXT NOT NULL,
-  thread_key TEXT NOT NULL,         -- 'm:<sha1(Message-ID)>' | 's:<sha1(base subject)>'
+  thread_key TEXT NOT NULL,         -- 'm:<sha1(Message-ID)>' | 's:<sha1(base subject)>' | 'g:<sha1(GM thrid)>' (M4)
   thread_id TEXT NOT NULL,
   last_seen INTEGER NOT NULL,
   PRIMARY KEY (account, thread_key)
@@ -247,6 +249,14 @@ CREATE TABLE email_msgid (          -- a message's own Message-ID → its email 
 
 CREATE TABLE tokens (               -- client-facing auth tokens
   account TEXT PRIMARY KEY, token_hash TEXT NOT NULL
+);
+
+CREATE TABLE oauth_tokens (         -- OAuth2 provider tokens (M4, v3)
+  account TEXT PRIMARY KEY,
+  refresh_token TEXT NOT NULL,      -- sealed by the oauth layer (FR-A.8)
+  access_token TEXT NOT NULL DEFAULT '',
+  access_expiry INTEGER NOT NULL DEFAULT 0,   -- unix seconds
+  updated_at INTEGER NOT NULL
 );
 
 ```
@@ -371,6 +381,31 @@ store requires at least one membership (RFC 8621 §4.1).
 `Mailbox/set`: `CREATE` / `RENAME` / `DELETE` (+ role detection refresh), with
 `alreadyExists`, `mailboxHasChild` and `mailboxHasEmail` (unless
 `onDestroyRemoveEmails`) reported as the RFC 8621 §2.5 SetErrors.
+
+**Gmail write profile** (M4, FR-S.10 / FR-M.18). On an X-GM-EXT-1 server
+the membership commands above become label writes:
+
+| JMAP op | Gmail op |
+|---|---|
+| add `mailboxIds/<id>` | `UID STORE ±X-GM-LABELS` on one copy holding the message — UIDs are account-global, so one command covers every folder; system folders map to their labels (`INBOX`→`\Inbox`, `[Gmail]/Sent Mail`→`\Sent`, …), user labels are the mailbox path |
+| add to `[Gmail]/All Mail` | no server command — All Mail membership is implicit (every message is there by definition); the membership commits locally because it *is* the server's state |
+| remove from `[Gmail]/All Mail` | refused: the server model cannot express it (`may_remove_items` is false for the implicit mailbox) |
+| destroy | MOVE every copy to `[Gmail]/Trash`, then `UID EXPUNGE` there — expunge is permanent only inside Trash/Spam; without a trash mailbox the generic expunge-everywhere path is the honest fallback |
+| keywords | flags are per message, not per copy: one STORE covers the account |
+
+Archiving is the client's patch "remove INBOX, add archive(=All Mail)":
+the effective delta is the `\Inbox` label removal alone, which is
+exactly Gmail's archive semantics (the message remains listed in All
+Mail). The `\All` mailbox maps to JMAP role `archive` at discovery.
+After our own writes the reconcile paths apply a grace window
+(FR-S.12): uids we touched within the last minute are not tombstoned on
+a folder list that has not caught up yet — Gmail rebuilds its per-folder
+indexes around label changes, and a premature tombstone is a
+client-visible lie while a deferred one is one pass late. Gmail's
+shared-UID namespace is honoured on the read path too: a message first
+seen through one folder is deduped by (uidvalidity, uid) in every other
+folder, and backfill skips the header fetch for uids the account already
+knows, ingesting membership-only rows instead (FR-S.10).
 
 ### 7.2 EmailSubmission/set
 
@@ -526,7 +561,7 @@ milestones but deliberately carries no completion state). Rules:
 | **M1** | SQLite store (schema §4), read-only IMAP sync (discovery, tier detection, backfill, IDLE), hydration, `/changes` + SSE, preview | real Dovecot account browsable read-only; a flag flipped in another IMAP client appears in jmap-tui ≤ 2 s | FR-S.1–.9, FR-M.1–.8, FR-J.7–.8 | ✅ done 2026-09-29 (live local Dovecot 2.4: `test/live` foreign flag → store 505 ms and jmap-tui engine 563 ms, both ≤ 2 s over IDLE+SSE; backfill, hydration and preview against the real server; jmap-tui live suite + `smoke` green over loopback) |
 | **M2** | Write path §7.1, `Mailbox/set`, drafts, IMAP-first commits | jmap-tui triage (star/archive/move/delete/undo) round-trips; changes visible from a second IMAP client | FR-M.9–.13 | ✅ done 2026-09-29 (live local Dovecot 2.4: `test/live` write gate — star/move/copy with undo, `Mailbox/set` create/rename/delete, draft `APPEND` with `\Draft`, destroy — each re-read from an **independent IMAP session**; jmap-tui triage scratch green over loopback 3× — read/star/undo/move/undo/copy/undo/archive/delete-to-trash/destroy, every step confirmed by python3/imaplib; gate caught and fixed `/get` dropping `id` per RFC 8620 §5.1) |
 | **M3** | Send §7.2, `Identity/get`, blob upload/download, `EmailSubmission/set` with `onSuccessUpdateEmail` | compose → send → message in Sent **and** delivered to a test sink; attachment round-trip byte-exact | FR-M.14–.17 | ✅ done 2026-09-29 (`test/live` M3 gate against dev Dovecot + in-process SMTP sink: batched draft+submission, `#draft` creation reference, patch files Sent, sink held the message with its attachment byte-exact and no Bcc, second IMAP session saw one `\Seen` copy — plus fixture-tier suites `TestSubmission*`, `internal/submit` against the SMTP fixture, and the jmap-tui cross-client rig: `TestLiveM5Gate` (compose→attach→send→Sent), `TestLiveM5ProbeDraftRoundTrip` and the M1/M2 bridge gates green over loopback) |
-| **M4** | Gmail profile: OAuth2 bootstrap, XOAUTH2 IMAP/SMTP, `X-GM-LABELS`↔mailboxes, All Mail/archive, `X-GM-THRID`, CONDSTORE tier validation, rate limits | live Gmail: folders+labels both ways, compose/send, archive from jmap-tui, no rate-limit warnings | FR-A.5–.10, FR-S.10, FR-S.12, FR-M.18 | pending |
+| **M4** | Gmail profile: OAuth2 bootstrap, XOAUTH2 IMAP/SMTP, `X-GM-LABELS`↔mailboxes, All Mail/archive, `X-GM-THRID`, CONDSTORE tier validation, rate limits | live Gmail: folders+labels both ways, compose/send, archive from jmap-tui, no rate-limit warnings | FR-A.5–.10, FR-S.10, FR-S.12, FR-M.18 | landed 2026-09-29 (all code + fixture gates green; the **live Gmail gate is owed** — needs a Gmail test account and a Google OAuth client, consent run via `/oauth/{account}/start`) |
 | **M5** | FTS5 + search-driven backfill, filter/sort/anchor/collapseThreads correctness, `PREVIEW`/partial-fetch, COMPRESS, 100k soak | jmap-tui live search cases green; cold browse of a 100k mailbox stays responsive; soak within NFR bounds | FR-X.1–.8, FR-S.11, NFR-1, NFR-2, NFR-8 | pending |
 | **M6** | CardDAV §8: discovery, sync-collection, PUT/DELETE, vCard↔JSContact, photo blobs, capability gating | jmap-tui `contacts_live_test` suite green against a real CardDAV server; create/edit/delete contact round-trips | FR-P.1–.13 | pending |
 | **M7** | Packaging: multi-account paths, credential encryption, metrics/health, UIDVALIDITY recovery drill, Docker image + k8s manifests, README deployment verified, `JMAP-TestSuite` run | fresh `docker run` + `kubectl` install works end-to-end from the docs; conformance suite passing; all gates green | FR-J.9–.10, FR-D.2–.12, NFR-3–.7, NFR-9–.10 | pending |
@@ -552,7 +587,8 @@ because bodies stay lazy.)
 | Risk | Impact | Mitigation |
 |---|---|---|
 | `kiliant/go-imap` is new (first release 2026-08, single maintainer, low adoption) | a client bug stalls sync | driver interface isolates it (types never leave `internal/imapdrv`); zero-dependency + frozen v1 API means vendoring is painless if upstream goes quiet; its parser fuzzing and Dovecot interop matrix de-risk the gate; tier-3 fallback always exists. `X-GM-LABELS` (M4) is requestable today via its open-ended FETCH item types. **All three tiers landed and fixture-verified 2026-09-29** (QRESYNC anchor replay incl. VANISHED, CONDSTORE CHANGEDSINCE, baseline flag refetch), **and the QRESYNC tier ran against live Dovecot 2.4 the same day** (tier=qresync, COMPRESS=DEFLATE active) |
-| Gmail eventual consistency after writes | false expunge / duplicate work | grace window before tombstoning own writes (§10) |
+| M4 needed upstream code: `StoreUID` writes labels as bare atoms (Gmail labels with spaces fail) and the decoder could not capture flag-form values in unmodelled FETCH items | Gmail label writes impossible without a fork | **forked to `~/projects/go-imap`, branch `feat/gmail-labels-store`** (branch from main, whose root module is identical to v1.1.0): one capability-gated `StoreUIDGmailLabels` command + a flag-form case in `DiscardValue`; PATCH-NOTES.md in the fork holds the PR write-up. The bridge points at the fork via a `go.mod replace` until the PR merges — the replace breaks containerised builds, so the fork must be published (e.g. `CaffeinatedTech/go-imap`) before the M7 image |
+| Gmail eventual consistency after writes | false expunge / duplicate work | grace window before tombstoning own writes (§10) — **landed with M4** (record-and-filter in the reconcile paths, FR-S.12) |
 | No Go library for vCard↔JSContact | conversion bugs, data loss | golden-pair fixtures; RFC 9554 as the normative map; Stalwart `calcard` as cross-check reference |
 | Provider extension roulette (Namecheap/cPanel) | sync failures | tier detection + capability probing at connect; strict-but-tolerant parsing; live tests per provider as they're added |
 | OAuth callback requires public HTTPS | deploy friction | documented as a first-class deployment path (D-12); port-forward dev mode for everything else |

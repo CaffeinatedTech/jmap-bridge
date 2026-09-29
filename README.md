@@ -282,6 +282,48 @@ token   = "…"                  # client password (Basic auth)
 Secrets may also be supplied as `JMAP_BRIDGE_<ACCOUNT>_<FIELD>` environment
 variables or mounted files — never commit them, never log them.
 
+Stored OAuth2 tokens are encrypted at rest with a 32-byte key from the
+`JMAP_BRIDGE_SECRET_KEY` environment variable (raw, base64, or hex). Without
+the key the bridge starts in plaintext mode and logs a prominent warning —
+fine for loopback experiments, not for a deployment with Gmail accounts.
+
+## Gmail accounts (OAuth2)
+
+Gmail is OAuth2-only (no app passwords). Create an OAuth client in Google
+Cloud Console (type "Web application", redirect URI
+`https://your-host/oauth/<account-id>/callback`), then configure:
+
+```toml
+[[accounts]]
+id      = "gmail"
+name    = "Gmail"
+address = "me@gmail.com"
+token   = "…"
+
+  [accounts.imap]
+  host = "imap.gmail.com"
+  port = 993
+  auth = "oauth2"          # no password fallback: a configured password is a startup error
+  username = "me@gmail.com"
+
+  [accounts.smtp]
+  host = "smtp.gmail.com"
+  port = 465
+  auth = "oauth2"
+
+  [accounts.oauth2]
+  provider = "google"      # endpoints and the mail scope are implied
+  client_id = "…apps.googleusercontent.com"
+  # client_secret = … (or JMAP_BRIDGE_GMAIL_OAUTH2_CLIENT_SECRET / _FILE)
+```
+
+Then consent once: open `https://your-host/oauth/gmail/start` in a browser,
+approve, and the bridge stores the refresh token and starts syncing. The
+refresh token is re-used forever after; if Google revokes it, the bridge
+logs that consent is needed again and the same URL restarts the flow.
+Labels appear as mailboxes, archiving removes Inbox membership only, and
+Gmail's thread grouping drives the client's threads.
+
 ## Development
 
 ```sh

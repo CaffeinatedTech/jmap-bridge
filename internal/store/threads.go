@@ -16,11 +16,14 @@ import (
 
 // ThreadInput is everything thread derivation needs from one message
 // (FR-M.7): Message-ID/References chains plus the normalised subject.
+// GmThrid, when non-zero, is Gmail's X-GM-THRID and outranks everything
+// else — Gmail already did the grouping (FR-S.10).
 type ThreadInput struct {
 	MessageID  string
 	References []string
 	InReplyTo  []string
 	Subject    string
+	GmThrid    uint64
 }
 
 // replyPrefixes are stripped (repeatedly, case-insensitively) when
@@ -30,6 +33,10 @@ var replyPrefixes = regexp.MustCompile(`^(?i:(?:re|fwd?|aw|antw|sv|vs)\s*:\s*)+`
 // deriveThread assigns a message to a thread, creating or merging
 // threads as needed. The key space lives in `threads`:
 //
+//	"g:<sha1(GM thrid)>"    — Gmail's own grouping, when the server
+//	                          reported X-GM-THRID (FR-S.10); it rides in
+//	                          the rfc-strength candidate list, so it both
+//	                          joins threads and binds later arrivals;
 //	"m:<sha1(Message-ID)>"  — one per RFC 5322 message id seen (own and
 //	                          referenced), so References/In-Reply-To
 //	                          chains join threads across arrival order;
@@ -143,6 +150,13 @@ func threadKeys(in ThreadInput) threadKeySet {
 		}
 		seen[id] = true
 		out.rfc = append(out.rfc, "m:"+hashKey(id))
+	}
+	if in.GmThrid != 0 {
+		// Gmail's grouping outranks the header chains: the same thrid is
+		// one thread even when References disagree with what the web UI
+		// shows (FR-S.10). Registered as an rfc-strength key so it both
+		// joins candidates and binds later arrivals.
+		out.rfc = append(out.rfc, "g:"+hashKey(fmt.Sprintf("%d", in.GmThrid)))
 	}
 	add(in.MessageID)
 	for _, r := range in.References {

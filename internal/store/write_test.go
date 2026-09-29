@@ -364,3 +364,128 @@ func TestMailboxLookups(t *testing.T) {
 		t.Errorf("unknown path id = %q (err %v), want empty", id, err)
 	}
 }
+
+// On shared-UID servers (Gmail) the same uid arrives through every
+// folder it is labelled with: the second folder's copy must dedupe to
+// the first email even when the Message-ID differs (or is absent),
+// because it is the same server-side message (FR-S.10).
+func TestPutMessagesSharedUIDDedupe(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	first := mkRec(5, "<a@example>", "shared", "a@example.test", nil, at)
+	first.SharedUIDs = true
+	if err := s.PutMessages(ctx, "acct", "INBOX", []MessageRec{first}); err != nil {
+		t.Fatal(err)
+	}
+	before, _, _, err := s.EmailsByID(ctx, "acct", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("after first folder: %d emails", len(before))
+	}
+
+	// A second folder reports the same uid with a different Message-ID:
+	// still the same message on a shared-UID server.
+	second := mkRec(5, "<b@example>", "shared", "a@example.test", []string{`\Seen`}, at)
+	second.SharedUIDs = true
+	if err := s.PutMessages(ctx, "acct", "Archive", []MessageRec{second}); err != nil {
+		t.Fatal(err)
+	}
+	after, _, _, err := s.EmailsByID(ctx, "acct", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("shared-uid duplicate minted a second email (%d)", len(after))
+	}
+	if after[0].ID != before[0].ID {
+		t.Fatal("deduped email changed id")
+	}
+	if !after[0].Keywords["$seen"] {
+		t.Error("fetched flags were not applied to the shared email")
+	}
+	// Both folders are memberships of the one object.
+	inboxID, inboxTotal, _ := mailboxByName(t, s, "INBOX")
+	allID, allTotal, _ := mailboxByName(t, s, "Archive")
+	if inboxTotal != 1 || allTotal != 1 {
+		t.Errorf("counts: INBOX %d, All Mail %d", inboxTotal, allTotal)
+	}
+	_ = inboxID
+	_ = allID
+}
+
+// LinkSharedUIDs adds the missing membership and mapping for a message
+// the account already knows under its shared uid, without touching
+// headers or keywords (the Gmail backfill's cheap half).
+func TestLinkSharedUIDsAddsMembershipOnly(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	rec := mkRec(9, "<link@example>", "linked", "a@example.test", []string{`\Flagged`}, at)
+	if err := s.PutMessages(ctx, "acct", "INBOX", []MessageRec{rec}); err != nil {
+		t.Fatal(err)
+	}
+	before, _, _, _ := s.EmailsByID(ctx, "acct", nil, false)
+	if err := s.LinkSharedUIDs(ctx, "acct", "Archive", 7, []uint32{9, 10}); err != nil {
+		t.Fatal(err)
+	}
+	after, _, _, _ := s.EmailsByID(ctx, "acct", nil, false)
+	if len(after) != len(before) {
+		t.Fatalf("LinkSharedUIDs created an email (%d → %d)", len(before), len(after))
+	}
+	if !after[0].Keywords["$flagged"] {
+		t.Error("keywords were touched by the link")
+	}
+	_, allTotal, _ := mailboxByName(t, s, "Archive")
+	if allTotal != 1 {
+		t.Errorf("All Mail total = %d, want 1", allTotal)
+	}
+}
+
+// X-GM-THRID seeds the thread: two messages sharing only the thrid (no
+// Message-ID linkage, different subjects) land in one thread, and the
+// thread key is registered for later arrivals (FR-S.10).
+func TestThreadDerivationUsesGmThrid(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	a := mkRec(1, "<t1@example>", "Completely unrelated", "a@example.test", nil, at)
+	a.GmThrid = 42
+	b := mkRec(2, "<t2@example>", "Also unrelated", "a@example.test", nil, at)
+	b.GmThrid = 42
+	if err := s.PutMessages(ctx, "acct", "INBOX", []MessageRec{a, b}); err != nil {
+		t.Fatal(err)
+	}
+	emails, _, _, err := s.EmailsByID(ctx, "acct", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emails) != 2 {
+		t.Fatalf("%d emails", len(emails))
+	}
+	if emails[0].ThreadID != emails[1].ThreadID {
+		t.Fatalf("thrid siblings split across threads: %s vs %s",
+			emails[0].ThreadID, emails[1].ThreadID)
+	}
+	// And a third message with the same thrid joins the same thread.
+	c := mkRec(3, "<t3@example>", "Third", "a@example.test", nil, at)
+	c.GmThrid = 42
+	if err := s.PutMessages(ctx, "acct", "INBOX", []MessageRec{c}); err != nil {
+		t.Fatal(err)
+	}
+	emails, _, _, _ = s.EmailsByID(ctx, "acct", nil, false)
+	if len(emails) != 3 || emails[2].ThreadID != emails[0].ThreadID {
+		t.Fatal("later thrid arrival did not join the thread")
+	}
+}

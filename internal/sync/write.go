@@ -31,6 +31,26 @@ type writer struct {
 	log   *slog.Logger
 	conn  *imapdrv.Conn
 	delim rune
+	// gmailFlag records whether the session speaks X-GM-EXT-1: the write
+	// path turns membership changes into label writes for such servers
+	// (FR-S.10). It is set from this session's dials and, before the
+	// first write, from the work connection's discovery.
+	gmailFlag bool
+}
+
+// gmail reports the session's Gmail profile under the writer lock.
+func (w *writer) gmail() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.gmailFlag
+}
+
+// noteGmail records the X-GM-EXT-1 observation of any of the account's
+// connections; they answer to the same server.
+func (w *writer) noteGmail(v bool) {
+	w.mu.Lock()
+	w.gmailFlag = w.gmailFlag || v
+	w.mu.Unlock()
 }
 
 func newWriter(cfg imapdrv.Config, log *slog.Logger) *writer {
@@ -87,6 +107,7 @@ func (w *writer) ensureLocked(ctx context.Context) (*imapdrv.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sync: write connect: %w", err)
 	}
+	w.gmailFlag = w.gmailFlag || conn.GmailExt()
 	w.conn = conn
 	w.log.Info("sync: write session up",
 		"tier", conn.Tier().String(), "compressed", conn.Compressed())
@@ -209,6 +230,18 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 			}
 		}
 		target += len(addSet)
+		// Gmail (FR-M.18): the archive-role mailbox ([Gmail]/All Mail)
+		// holds every message implicitly, so it counts as a membership
+		// even before this account's All Mail pass has recorded it —
+		// otherwise archiving the only copy would be refused here, and
+		// "archive removes from INBOX only" is exactly the flow Gmail
+		// users need.
+		if e.wr.gmail() {
+			if archiveID, err := e.st.MailboxIDByRole(ctx, account, "archive"); err == nil && archiveID != "" &&
+				!contains(remSet, archiveID) && !current[archiveID] && !contains(addSet, archiveID) {
+				target++
+			}
+		}
 		if target == 0 {
 			// An Email belongs to one or more Mailboxes at all times
 			// (RFC 8621 §4.1); destroying it is destroy's job.
@@ -245,7 +278,7 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 			return err
 		}
 	}
-	adds, err := e.changeMembership(ctx, copies, addSet, addPaths, remSet)
+	adds, err := e.changeMembershipFor(ctx, copies, addSet, addPaths, remSet)
 	if err != nil {
 		return err
 	}
@@ -277,8 +310,19 @@ func (e *Engine) storeFlagsFor(ctx context.Context, copies []store.Copy, kwAdd, 
 	add := keyword.ToIMAP(truthy(kwAdd))
 	remove := keyword.ToIMAP(truthy(kwRemove))
 	custom := customKeywords(append(append([]string{}, kwAdd...), kwRemove...))
+	// Gmail flags are per message, not per copy (FR-S.10): one STORE
+	// covers the account, and the remaining copies need nothing.
+	gmail := e.wr.gmail()
 	return e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-		for folder, uids := range byFolder {
+		folders := byFolder
+		if gmail && len(byFolder) > 1 {
+			folders = map[string][]uint32{}
+			for folder, uids := range byFolder {
+				folders[folder] = uids
+				break
+			}
+		}
+		for folder, uids := range folders {
 			if err := conn.StoreFlags(ctx, folder, uids, add, remove); err != nil {
 				if imapdrv.ServerRejected(err) && len(custom) > 0 {
 					// FR-M.8: a keyword the server will not store fails
@@ -290,6 +334,16 @@ func (e *Engine) storeFlagsFor(ctx context.Context, copies []store.Copy, kwAdd, 
 		}
 		return nil
 	})
+}
+
+// changeMembershipFor picks the membership strategy the server model
+// needs: label writes on Gmail (FR-S.10), COPY/MOVE/EXPUNGE everywhere
+// else.
+func (e *Engine) changeMembershipFor(ctx context.Context, copies []store.Copy, addSet []string, addPaths map[string]string, remSet []string) ([]store.MembershipAdd, error) {
+	if e.wr.gmail() {
+		return e.changeMembershipGmail(ctx, copies, addSet, remSet)
+	}
+	return e.changeMembership(ctx, copies, addSet, addPaths, remSet)
 }
 
 // changeMembership performs the server side of a membership change and
@@ -426,6 +480,20 @@ func (e *Engine) DestroyEmails(ctx context.Context, account, emailID string) err
 			return fmt.Errorf("%w: no uid for folder %q yet", jmapapi.ErrNoLocation, c.Folder)
 		}
 		byFolder[c.Folder] = append(byFolder[c.Folder], c.UID)
+	}
+	if len(byFolder) > 0 && e.wr.gmail() {
+		// Gmail destroy is permanent only from Trash (FR-M.18): copies
+		// are moved there first, then expunged where expunge means
+		// expunge. Without a trash mailbox the generic path below is the
+		// honest fallback.
+		if err := e.destroyEmailsGmail(ctx, copies); err != nil {
+			if !errors.Is(err, errNoTrashRole) {
+				return err
+			}
+			e.log.Warn("sync: gmail destroy without a trash mailbox, expunging in place", "err", err)
+		} else {
+			return e.st.CommitDestroy(ctx, account, []string{emailID})
+		}
 	}
 	if len(byFolder) > 0 {
 		if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {

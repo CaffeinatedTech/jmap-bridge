@@ -136,8 +136,9 @@ func TestSendRefusesUnsupportedConfigurations(t *testing.T) {
 	cfg := testConfig(sink)
 
 	if err := Send(context.Background(), Config{Host: cfg.Host, Port: cfg.Port, Auth: "oauth2"},
-		Envelope{From: "me@example.test", Recipients: []string{"you@example.test"}}, messageFixture()); !errors.Is(err, ErrAuthUnsupported) {
-		t.Errorf("oauth2 = %v, want ErrAuthUnsupported (XOAUTH2 ships with M4)", err)
+		Envelope{From: "me@example.test", Recipients: []string{"you@example.test"}}, messageFixture()); err == nil ||
+		!strings.Contains(err.Error(), "oauth2") {
+		t.Errorf("oauth2 without a token provider = %v, want a refusal naming oauth2 (FR-A.10)", err)
 	}
 	if err := Send(context.Background(), cfg, Envelope{From: "", Recipients: []string{"a@b.c"}}, nil); err == nil {
 		t.Error("empty envelope sender accepted")
@@ -158,5 +159,72 @@ func TestSendHonoursContext(t *testing.T) {
 		From: "me@example.test", Recipients: []string{"you@example.test"},
 	}, messageFixture()); err == nil {
 		t.Fatal("Send with a cancelled context succeeded")
+	}
+}
+
+// XOAUTH2 submission (FR-A.7): the bearer token rides in the SASL
+// initial response, a rejected token is retried exactly once with a
+// forced refresh, and the message lands in the sink on success only.
+func TestSendXOAUTH2(t *testing.T) {
+	sink := fixturesmtp.Start(t, fixturesmtp.Options{Username: "me@example.test", OAuthToken: "good-token"})
+	tokens := []string{"stale-token", "good-token"}
+	var forces []bool
+	cfg := Config{
+		Host: sink.Host(), Port: sink.Port(), TLS: "none", Auth: "oauth2",
+		Username: "me@example.test",
+		Token: func(_ context.Context, force bool) (string, error) {
+			forces = append(forces, force)
+			return tokens[len(forces)-1], nil
+		},
+	}
+	if err := Send(context.Background(), cfg, Envelope{
+		From: "me@example.test", Recipients: []string{"you@example.test"},
+	}, messageFixture()); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(forces) != 2 || !forces[1] {
+		t.Fatalf("token provider calls = %v, want initial + forced retry", forces)
+	}
+	waitMessages(t, sink, 1)
+}
+
+func TestSendXOAUTH2SuccessWithoutRetry(t *testing.T) {
+	sink := fixturesmtp.Start(t, fixturesmtp.Options{Username: "me@example.test", OAuthToken: "good-token"})
+	calls := 0
+	cfg := Config{
+		Host: sink.Host(), Port: sink.Port(), TLS: "none", Auth: "oauth2",
+		Username: "me@example.test",
+		Token: func(_ context.Context, _ bool) (string, error) {
+			calls++
+			return "good-token", nil
+		},
+	}
+	if err := Send(context.Background(), cfg, Envelope{
+		From: "me@example.test", Recipients: []string{"you@example.test"},
+	}, messageFixture()); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("token provider called %d times, want 1", calls)
+	}
+}
+
+func TestSendXOAUTH2RejectedAfterRetry(t *testing.T) {
+	sink := fixturesmtp.Start(t, fixturesmtp.Options{Username: "me@example.test", OAuthToken: "good-token", FailAuth: true})
+	cfg := Config{
+		Host: sink.Host(), Port: sink.Port(), TLS: "none", Auth: "oauth2",
+		Username: "me@example.test",
+		Token: func(_ context.Context, _ bool) (string, error) {
+			return "dead-token", nil
+		},
+	}
+	err := Send(context.Background(), cfg, Envelope{
+		From: "me@example.test", Recipients: []string{"you@example.test"},
+	}, messageFixture())
+	if err == nil {
+		t.Fatal("send succeeded with rejected credentials")
+	}
+	if n := len(sink.Messages()); n != 0 {
+		t.Errorf("sink holds %d messages after a rejected send", n)
 	}
 }

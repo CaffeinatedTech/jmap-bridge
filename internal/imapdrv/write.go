@@ -151,6 +151,38 @@ func (c *Conn) MoveUIDs(ctx context.Context, from, to string, uids []uint32) (Co
 	return res, nil
 }
 
+// StoreGmLabels adds and/or removes Gmail labels (X-GM-EXT-1, FR-S.10)
+// on the given uids of folder. Labels are the exact strings Gmail uses:
+// system labels in flag form ("\Inbox"), user labels as the mailbox
+// names LIST reports. Label changes are visible in every folder the
+// message lives in, so one command per direction covers the whole
+// account — this is why the Gmail write path never copies to change
+// membership. The .SILENT form skips the untagged FETCH echo; the next
+// sync pass re-reads the label list anyway.
+func (c *Conn) StoreGmLabels(ctx context.Context, folder string, uids []uint32, add, remove []string) error {
+	if len(uids) == 0 || (len(add) == 0 && len(remove) == 0) {
+		return nil
+	}
+	if err := c.selectRW(ctx, folder); err != nil {
+		return err
+	}
+	defer c.releaseSelection(ctx)
+	set := uidSet(uids)
+	if len(add) > 0 {
+		if err := c.client.StoreUIDGmailLabels(set, imapclient.StoreFlagsAdd, add,
+			&imapclient.StoreOptions{Silent: true}).Wait(ctx); err != nil {
+			return fmt.Errorf("imapdrv: store +x-gm-labels %q: %w", folder, err)
+		}
+	}
+	if len(remove) > 0 {
+		if err := c.client.StoreUIDGmailLabels(set, imapclient.StoreFlagsRemove, remove,
+			&imapclient.StoreOptions{Silent: true}).Wait(ctx); err != nil {
+			return fmt.Errorf("imapdrv: store -x-gm-labels %q: %w", folder, err)
+		}
+	}
+	return nil
+}
+
 // ExpungeUIDs permanently removes uids from folder: STORE \Deleted,
 // then UID EXPUNGE where UIDPLUS is advertised (FR-M.10). Without
 // UIDPLUS the only portable option is a bare EXPUNGE, which also removes
