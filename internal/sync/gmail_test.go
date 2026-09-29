@@ -271,29 +271,24 @@ func TestGraceWindowSparesOwnWrites(t *testing.T) {
 }
 
 // gmLabelFor's mapping table, including the two system folders
-// SPECIAL-USE does not cover and the implicit archive.
+// SPECIAL-USE does not cover. The implicit mailbox is decided by the
+// store's implicit flag before gmLabelFor is consulted, so the archive
+// role has no row here.
 func TestGmLabelFor(t *testing.T) {
-	cases := []struct {
-		role, path string
-		want       string
-		writable   bool
-	}{
-		{"inbox", "INBOX", `\Inbox`, true},
-		{"sent", "[Gmail]/Sent Mail", `\Sent`, true},
-		{"drafts", "[Gmail]/Drafts", `\Drafts`, true},
-		{"trash", "[Gmail]/Trash", `\Trash`, true},
-		{"junk", "[Gmail]/Spam", `\Spam`, true},
-		{"archive", "[Gmail]/All Mail", "", false},
-		{"", "receipts", "receipts", true},
-		{"", "work/2026", "work/2026", true},
-		{"", "[Gmail]/Starred", `\Starred`, true},
-		{"", "[Gmail]/Important", `\Important`, true},
+	cases := []struct{ role, path, want string }{
+		{"inbox", "INBOX", `\Inbox`},
+		{"sent", "[Gmail]/Sent Mail", `\Sent`},
+		{"drafts", "[Gmail]/Drafts", `\Drafts`},
+		{"trash", "[Gmail]/Trash", `\Trash`},
+		{"junk", "[Gmail]/Spam", `\Spam`},
+		{"", "receipts", "receipts"},
+		{"", "work/2026", "work/2026"},
+		{"", "[Gmail]/Starred", `\Starred`},
+		{"", "[Gmail]/Important", `\Important`},
 	}
 	for _, tc := range cases {
-		got, writable := gmLabelFor(tc.role, tc.path)
-		if got != tc.want || writable != tc.writable {
-			t.Errorf("gmLabelFor(%q,%q) = %q,%v want %q,%v",
-				tc.role, tc.path, got, writable, tc.want, tc.writable)
+		if got := gmLabelFor(tc.role, tc.path); got != tc.want {
+			t.Errorf("gmLabelFor(%q,%q) = %q, want %q", tc.role, tc.path, got, tc.want)
 		}
 	}
 }

@@ -166,6 +166,13 @@ CREATE TABLE oauth_tokens (
   updated_at INTEGER NOT NULL
 );
 `,
+	// v4 (M4): mailboxes whose membership the server manages (Gmail's
+	// \All mailbox). Detected from the LIST attribute, not the role: a
+	// plain folder named "Archive" shares the archive role but is a
+	// normal label-backed mailbox.
+	`
+ALTER TABLE mailboxes ADD COLUMN implicit INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 // migrate applies every not-yet-applied migration and refuses a database
