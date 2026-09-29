@@ -104,13 +104,14 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 				}
 				if _, err := tx.ExecContext(ctx,
 					`INSERT INTO mailboxes(id, account, parent_id, role, name, sort_order,
-					   uidvalidity, uidnext, highestmodseq,
+					   uidvalidity, uidnext, highestmodseq, implicit,
 					   may_read_items, may_add_items, may_remove_items, may_create_child,
 					   may_rename, may_delete,
 					   created_modseq, updated_modseq, updated_not_counts_modseq)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?, ?, 0)`,
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?, ?, 0)`,
 					id, account, nullStr(parent), nullStr(role), f.Name, sortOrder[f.Name],
 					int64(f.UIDValidity), int64(f.UIDNext), int64(f.HighestModSeq),
+					boolInt(f.Implicit),
 					boolInt(true), boolInt(mayAdd), boolInt(mayRemove),
 					seq, seq); err != nil {
 					return fmt.Errorf("store: create mailbox %q: %w", f.Name, err)
@@ -138,12 +139,12 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 			// move with membership, not with discovery.
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE mailboxes SET parent_id = ?, role = ?, sort_order = ?,
-				   uidvalidity = ?, uidnext = ?, highestmodseq = ?,
+				   uidvalidity = ?, uidnext = ?, highestmodseq = ?, implicit = ?,
 				   may_add_items = ?, may_remove_items = ?, deleted = NULL, updated_modseq = ?
 				 WHERE id = ? AND account = ?`,
 				nullStr(parent), nullStr(role), sortOrder[f.Name],
 				int64(f.UIDValidity), int64(f.UIDNext), int64(f.HighestModSeq),
-				boolInt(mayAdd), boolInt(mayRemove), seq, row.ID, account); err != nil {
+				boolInt(f.Implicit), boolInt(mayAdd), boolInt(mayRemove), seq, row.ID, account); err != nil {
 				return fmt.Errorf("store: update mailbox %q: %w", f.Name, err)
 			}
 		}
@@ -486,4 +487,22 @@ func mintID(ctx context.Context, tx *sql.Tx) (string, error) {
 		return "", err
 	}
 	return newID(time.Now(), seq), nil
+}
+
+// ImplicitMailboxID returns the account's server-managed mailbox — the
+// one whose membership is implicit (Gmail's \All mailbox) — or "" when
+// the account has none. The write path routes adds to it as local-only
+// commits and refuses removals from it (FR-S.10, FR-M.18).
+func (s *Store) ImplicitMailboxID(ctx context.Context, account string) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM mailboxes WHERE account = ? AND implicit = 1 AND deleted IS NULL
+		 ORDER BY name LIMIT 1`, account).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: implicit mailbox: %w", err)
+	}
+	return id, nil
 }

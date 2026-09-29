@@ -94,7 +94,7 @@ func (c *Conn) examineOnce(ctx context.Context, folder string, anchor *Anchor, t
 				ModSeq:      anchor.ModSeq,
 			}
 		}
-		st, err := c.client.ExamineSync(folder, opts).Wait(ctx)
+		st, err := waitCmd(ctx, c.client.ExamineSync(folder, opts))
 		if err != nil {
 			return Selection{}, err
 		}
@@ -117,13 +117,13 @@ func (c *Conn) examineOnce(ctx context.Context, folder string, anchor *Anchor, t
 		// Same command shape as QRESYNC without the anchor: SELECT
 		// (CONDSTORE) gives UIDNEXT/HIGHESTMODSEQ; deltas come from
 		// ChangesSince (FR-S.5 tier 2).
-		st, err := c.client.ExamineSync(folder, &imapclient.SyncSelectOptions{CondStore: true}).Wait(ctx)
+		st, err := waitCmd(ctx, c.client.ExamineSync(folder, &imapclient.SyncSelectOptions{CondStore: true}))
 		if err != nil {
 			return Selection{}, err
 		}
 		return Selection{Status: statusFrom(&st.Status.MailboxStatus), UIDValidityChanged: st.Status.UIDValidityChanged}, nil
 	default:
-		st, err := c.client.Examine(folder, nil).Wait(ctx)
+		st, err := waitCmd(ctx, c.client.Examine(folder, nil))
 		if err != nil {
 			return Selection{}, err
 		}
@@ -139,7 +139,7 @@ func (c *Conn) Unselect(ctx context.Context) error {
 	if !c.caps()["UNSELECT"] && !c.caps()["IMAP4REV2"] {
 		return nil
 	}
-	return c.client.Unselect(nil).Wait(ctx)
+	return waitVoid(ctx, c.client.Unselect(nil))
 }
 
 // FetchHeaders fetches header-level records for the given uids of the
@@ -148,6 +148,30 @@ func (c *Conn) FetchHeaders(ctx context.Context, uids []uint32) ([]HeaderMsg, er
 	if len(uids) == 0 {
 		return nil, nil
 	}
+	items := c.headerItems()
+	cmd := c.client.FetchUID(uidSet(uids), nil, items...)
+	return drainHeaderFetch(ctx, cmd)
+}
+
+// FetchHeadersSeq is FetchHeaders by sequence numbers. Gmail backfill
+// walks 1..EXISTS: the server's uid spaces are sparse (a 73k-uidnext
+// folder can hold 31 messages), and sweeping the expunged desert trips
+// Gmail's response slow-walking, while sequence ranges only ever touch
+// live messages. Each response still carries the message's UID, so the
+// caller's records are uid-keyed as usual (FR-S.10).
+func (c *Conn) FetchHeadersSeq(ctx context.Context, seqs []uint32) ([]HeaderMsg, error) {
+	if len(seqs) == 0 {
+		return nil, nil
+	}
+	items := c.headerItems()
+	cmd := c.client.Fetch(seqSet(seqs), nil, items...)
+	return drainHeaderFetch(ctx, cmd)
+}
+
+// headerItems is the header-level fetch item set: never a body (golden
+// rule 2), plus modseq where CONDSTORE is on and the Gmail extensions
+// when X-GM-EXT-1 is advertised (FR-S.10).
+func (c *Conn) headerItems() []imap.FetchItem {
 	items := []imap.FetchItem{
 		imap.FetchItemUID, imap.FetchItemFlags, imap.FetchItemInternalDate,
 		imap.FetchItemRFC822Size, imap.FetchItemEnvelope,
@@ -158,17 +182,30 @@ func (c *Conn) FetchHeaders(ctx context.Context, uids []uint32) ([]HeaderMsg, er
 	}
 	if c.GmailExt() {
 		// Open-ended item names are first-class in the request encoder;
-		// the responses come back as FetchDataRaw and are parsed below.
+		// the responses come back as FetchDataRaw and are parsed in
+		// headerMsgOf.
 		items = append(items, imap.FetchItemKeyword("X-GM-LABELS"), imap.FetchItemKeyword("X-GM-THRID"))
 	}
-	cmd := c.client.FetchUID(uidSet(uids), nil, items...)
+	return items
+}
+
+func drainHeaderFetch(ctx context.Context, cmd *imapclient.FetchCommand) ([]HeaderMsg, error) {
 	var out []HeaderMsg
 	for {
 		data, err := cmd.Next(ctx)
 		if err == io.EOF {
+			// The tagged completion has run by EOF: a [THROTTLED]-tagged
+			// OK means the fetch did not complete, and a partial batch
+			// must never be reported as the folder's whole truth.
+			if cmd.RespCode() == throttledOK {
+				return nil, ErrThrottled
+			}
 			return out, nil
 		}
 		if err != nil {
+			if IsThrottled(err) {
+				return nil, ErrThrottled
+			}
 			return nil, fmt.Errorf("imapdrv: fetch headers: %w", err)
 		}
 		msg, ok := headerMsgOf(data)
@@ -192,9 +229,15 @@ func (c *Conn) ChangesSince(ctx context.Context, modseq uint64) (changed []FlagC
 	for {
 		data, err := cmd.Next(ctx)
 		if err == io.EOF {
+			if cmd.RespCode() == throttledOK {
+				return nil, nil, ErrThrottled
+			}
 			break
 		}
 		if err != nil {
+			if IsThrottled(err) {
+				return nil, nil, ErrThrottled
+			}
 			return nil, nil, fmt.Errorf("imapdrv: changes since %d: %w", modseq, err)
 		}
 		if ch, ok := flagChangeOf(data); ok {
@@ -216,9 +259,15 @@ func (c *Conn) AllFlags(ctx context.Context) ([]FlagChange, error) {
 	for {
 		data, err := cmd.Next(ctx)
 		if err == io.EOF {
+			if cmd.RespCode() == throttledOK {
+				return nil, ErrThrottled
+			}
 			return out, nil
 		}
 		if err != nil {
+			if IsThrottled(err) {
+				return nil, ErrThrottled
+			}
 			return nil, fmt.Errorf("imapdrv: all flags: %w", err)
 		}
 		if ch, ok := flagChangeOf(data); ok {
@@ -229,16 +278,24 @@ func (c *Conn) AllFlags(ctx context.Context) ([]FlagChange, error) {
 
 // UIDs lists every uid of the selected folder (expunge detection for
 // tiers 2 and 3: a uid the store knows that is absent here has been
-// expunged).
+// expunged). A [THROTTLED]-tagged completion means the list is not the
+// folder's truth — returning it as if it were would tombstone live
+// messages (the cache lying at scale).
 func (c *Conn) UIDs(ctx context.Context) ([]uint32, error) {
 	cmd := c.client.FetchUID(imap.UIDSetRange(1, 0), nil, imap.FetchItemUID)
 	var out []uint32
 	for {
 		data, err := cmd.Next(ctx)
 		if err == io.EOF {
+			if cmd.RespCode() == throttledOK {
+				return nil, ErrThrottled
+			}
 			return out, nil
 		}
 		if err != nil {
+			if IsThrottled(err) {
+				return nil, ErrThrottled
+			}
 			return nil, fmt.Errorf("imapdrv: uid list: %w", err)
 		}
 		if uid, ok := uidOf(data); ok {
@@ -260,9 +317,15 @@ func (c *Conn) FetchPreviews(ctx context.Context, uids []uint32) (map[uint32]str
 		for {
 			data, err := cmd.Next(ctx)
 			if err == io.EOF {
+				if cmd.RespCode() == throttledOK {
+					return nil, ErrThrottled
+				}
 				return out, nil
 			}
 			if err != nil {
+				if IsThrottled(err) {
+					return nil, ErrThrottled
+				}
 				return nil, fmt.Errorf("imapdrv: preview: %w", err)
 			}
 			uid, ok := uidOf(data)
@@ -281,9 +344,15 @@ func (c *Conn) FetchPreviews(ctx context.Context, uids []uint32) (map[uint32]str
 	for {
 		data, err := cmd.Next(ctx)
 		if err == io.EOF {
+			if cmd.RespCode() == throttledOK {
+				return nil, ErrThrottled
+			}
 			return out, nil
 		}
 		if err != nil {
+			if IsThrottled(err) {
+				return nil, ErrThrottled
+			}
 			return nil, fmt.Errorf("imapdrv: partial preview: %w", err)
 		}
 		uid, ok := uidOf(data)
@@ -670,4 +739,29 @@ func parseUIDRange(s string) (uint32, uint32, bool) {
 		return 0, 0, false
 	}
 	return uint32(v), uint32(v), true
+}
+
+// seqSet builds a compact sequence-number set from a list, mirroring
+// uidSet's run coalescing.
+func seqSet(seqs []uint32) imap.SeqSet {
+	if len(seqs) == 0 {
+		return imap.SeqSet{}
+	}
+	sorted := append([]uint32(nil), seqs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	var set imap.SeqSet
+	i := 0
+	for i < len(sorted) {
+		j := i
+		for j+1 < len(sorted) && sorted[j+1] == sorted[j]+1 {
+			j++
+		}
+		if i == j {
+			set = append(set, imap.SeqSetNum(imap.SeqNum(sorted[i]))...)
+		} else {
+			set = append(set, imap.SeqSetRange(imap.SeqNum(sorted[i]), imap.SeqNum(sorted[j]))...)
+		}
+		i = j + 1
+	}
+	return set
 }

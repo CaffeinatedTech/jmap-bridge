@@ -237,8 +237,8 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 		// "archive removes from INBOX only" is exactly the flow Gmail
 		// users need.
 		if e.wr.gmail() {
-			if archiveID, err := e.st.MailboxIDByRole(ctx, account, "archive"); err == nil && archiveID != "" &&
-				!contains(remSet, archiveID) && !current[archiveID] && !contains(addSet, archiveID) {
+			if implicitID, err := e.st.ImplicitMailboxID(ctx, account); err == nil && implicitID != "" &&
+				!contains(remSet, implicitID) && !current[implicitID] && !contains(addSet, implicitID) {
 				target++
 			}
 		}

@@ -43,7 +43,7 @@ func RejectText(err error) string {
 // was selected before. Every mutating command needs a selected mailbox;
 // EXAMINE's read-only selection would make STORE fail (RFC 3501 §6.3.1).
 func (c *Conn) selectRW(ctx context.Context, folder string) error {
-	if _, err := c.client.Select(folder, nil).Wait(ctx); err != nil {
+	if _, err := waitCmd(ctx, c.client.Select(folder, nil)); err != nil {
 		return fmt.Errorf("imapdrv: select %q for write: %w", folder, err)
 	}
 	c.selected = folder
@@ -74,14 +74,14 @@ func (c *Conn) StoreFlags(ctx context.Context, folder string, uids []uint32, add
 	defer c.releaseSelection(ctx)
 	set := uidSet(uids)
 	if len(add) > 0 {
-		if err := c.client.StoreUID(set, flagsOf(add),
-			&imapclient.StoreOptions{Op: imapclient.StoreFlagsAdd}).Wait(ctx); err != nil {
+		if err := waitVoid(ctx, c.client.StoreUID(set, flagsOf(add),
+			&imapclient.StoreOptions{Op: imapclient.StoreFlagsAdd})); err != nil {
 			return fmt.Errorf("imapdrv: store +flags %q: %w", folder, err)
 		}
 	}
 	if len(remove) > 0 {
-		if err := c.client.StoreUID(set, flagsOf(remove),
-			&imapclient.StoreOptions{Op: imapclient.StoreFlagsRemove}).Wait(ctx); err != nil {
+		if err := waitVoid(ctx, c.client.StoreUID(set, flagsOf(remove),
+			&imapclient.StoreOptions{Op: imapclient.StoreFlagsRemove})); err != nil {
 			return fmt.Errorf("imapdrv: store -flags %q: %w", folder, err)
 		}
 	}
@@ -109,7 +109,7 @@ func (c *Conn) CopyUIDs(ctx context.Context, from, to string, uids []uint32) (Co
 		return CopyResult{}, err
 	}
 	defer c.releaseSelection(ctx)
-	data, err := c.client.CopyUID(uidSet(uids), to, nil).Wait(ctx)
+	data, err := waitCmd(ctx, c.client.CopyUID(uidSet(uids), to, nil))
 	if err != nil {
 		return CopyResult{}, fmt.Errorf("imapdrv: copy %q → %q: %w", from, to, err)
 	}
@@ -140,6 +140,9 @@ func (c *Conn) MoveUIDs(ctx context.Context, from, to string, uids []uint32) (Co
 	if err != nil {
 		return CopyResult{}, fmt.Errorf("imapdrv: move %q → %q: %w", from, to, err)
 	}
+	if data.RespCode == throttledOK {
+		return CopyResult{}, ErrThrottled
+	}
 	if data.ExpungedEveryDeletedMessage {
 		c.log.Warn("imapdrv: move fell back to bare EXPUNGE (no MOVE, no UIDPLUS)",
 			"from", from, "to", to)
@@ -169,14 +172,14 @@ func (c *Conn) StoreGmLabels(ctx context.Context, folder string, uids []uint32, 
 	defer c.releaseSelection(ctx)
 	set := uidSet(uids)
 	if len(add) > 0 {
-		if err := c.client.StoreUIDGmailLabels(set, imapclient.StoreFlagsAdd, add,
-			&imapclient.StoreOptions{Silent: true}).Wait(ctx); err != nil {
+		if err := waitVoid(ctx, c.client.StoreUIDGmailLabels(set, imapclient.StoreFlagsAdd, add,
+			&imapclient.StoreOptions{Silent: true})); err != nil {
 			return fmt.Errorf("imapdrv: store +x-gm-labels %q: %w", folder, err)
 		}
 	}
 	if len(remove) > 0 {
-		if err := c.client.StoreUIDGmailLabels(set, imapclient.StoreFlagsRemove, remove,
-			&imapclient.StoreOptions{Silent: true}).Wait(ctx); err != nil {
+		if err := waitVoid(ctx, c.client.StoreUIDGmailLabels(set, imapclient.StoreFlagsRemove, remove,
+			&imapclient.StoreOptions{Silent: true})); err != nil {
 			return fmt.Errorf("imapdrv: store -x-gm-labels %q: %w", folder, err)
 		}
 	}
@@ -202,14 +205,14 @@ func (c *Conn) ExpungeUIDs(ctx context.Context, folder string, uids []uint32) er
 		return fmt.Errorf("imapdrv: mark \\Deleted %q: %w", folder, err)
 	}
 	if c.caps()["UIDPLUS"] {
-		if err := c.client.UIDExpunge(set, nil).Wait(ctx); err != nil {
+		if err := waitVoid(ctx, c.client.UIDExpunge(set, nil)); err != nil {
 			return fmt.Errorf("imapdrv: uid expunge %q: %w", folder, err)
 		}
 		return nil
 	}
 	c.log.Warn("imapdrv: expunge without UIDPLUS removes every \\Deleted message in the folder",
 		"folder", folder)
-	if err := c.client.Expunge(nil).Wait(ctx); err != nil {
+	if err := waitVoid(ctx, c.client.Expunge(nil)); err != nil {
 		return fmt.Errorf("imapdrv: expunge %q: %w", folder, err)
 	}
 	return nil
@@ -224,7 +227,7 @@ func (c *Conn) AppendMessage(ctx context.Context, folder string, raw []byte, fla
 		return 0, 0, fmt.Errorf("imapdrv: append to %q: empty message", folder)
 	}
 	opts := &imapclient.AppendOptions{Flags: flagsOf(flags), InternalDate: internalDate}
-	data, err := c.client.Append(ctx, folder, opts, int64(len(raw)), bytes.NewReader(raw)).Wait(ctx)
+	data, err := waitCmd(ctx, c.client.Append(ctx, folder, opts, int64(len(raw)), bytes.NewReader(raw)))
 	if err != nil {
 		return 0, 0, fmt.Errorf("imapdrv: append %q: %w", folder, err)
 	}
@@ -236,7 +239,7 @@ func (c *Conn) AppendMessage(ctx context.Context, folder string, raw []byte, fla
 
 // CreateMailbox creates a folder (FR-M.12).
 func (c *Conn) CreateMailbox(ctx context.Context, path string) error {
-	if err := c.client.Create(path, nil).Wait(ctx); err != nil {
+	if err := waitVoid(ctx, c.client.Create(path, nil)); err != nil {
 		return fmt.Errorf("imapdrv: create %q: %w", path, err)
 	}
 	return nil
@@ -246,7 +249,7 @@ func (c *Conn) CreateMailbox(ctx context.Context, path string) error {
 // typically a non-empty destination, or a hierarchy it will not break —
 // is returned verbatim so the SetError description can quote it.
 func (c *Conn) RenameMailbox(ctx context.Context, from, to string) error {
-	if err := c.client.Rename(from, to, nil).Wait(ctx); err != nil {
+	if err := waitVoid(ctx, c.client.Rename(from, to, nil)); err != nil {
 		return fmt.Errorf("imapdrv: rename %q → %q: %w", from, to, err)
 	}
 	return nil
@@ -255,7 +258,7 @@ func (c *Conn) RenameMailbox(ctx context.Context, from, to string) error {
 // DeleteMailbox deletes a folder; a server that refuses (non-empty, or
 // selected elsewhere) surfaces its own message through the error.
 func (c *Conn) DeleteMailbox(ctx context.Context, path string) error {
-	if err := c.client.Delete(path, nil).Wait(ctx); err != nil {
+	if err := waitVoid(ctx, c.client.Delete(path, nil)); err != nil {
 		return fmt.Errorf("imapdrv: delete %q: %w", path, err)
 	}
 	return nil
@@ -265,7 +268,7 @@ func (c *Conn) DeleteMailbox(ctx context.Context, path string) error {
 // before its first command so a socket the server dropped hours ago
 // fails before a COPY can be half-applied).
 func (c *Conn) Ping(ctx context.Context) error {
-	return c.client.Noop(nil).Wait(ctx)
+	return waitVoid(ctx, c.client.Noop(nil))
 }
 
 // SupportsMove reports RFC 6851 availability (the caller prefers a

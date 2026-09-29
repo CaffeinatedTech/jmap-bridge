@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/convert"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
@@ -32,6 +33,17 @@ func (e *Engine) discoverWith(ctx context.Context, conn *imapdrv.Conn, record bo
 	statuses := make(map[string]imapdrv.FolderStatus, len(list))
 	idleCandidate := ""
 	for _, f := range list {
+		if f.NoSelect {
+			// A hierarchy container the server refuses to select
+			// (Gmail's "[Gmail]"): it answers STATUS with NO
+			// [NONEXISTENT], so it gets no status and never enters the
+			// pass order or IDLE. The mailbox row still exists — the
+			// server does list it — with zero sync state.
+			folders = append(folders, store.Folder{
+				Name: f.Name, Delim: f.Delim, Role: f.Role, NoSelect: f.NoSelect,
+			})
+			continue
+		}
 		st, err := conn.Status(ctx, f.Name)
 		if err != nil {
 			return nil, fmt.Errorf("status %q: %w", f.Name, err)
@@ -40,6 +52,7 @@ func (e *Engine) discoverWith(ctx context.Context, conn *imapdrv.Conn, record bo
 			UIDValidity:   st.UIDValidity,
 			UIDNext:       st.UIDNext,
 			HighestModSeq: st.HighestModSeq,
+			Messages:      st.Messages,
 		}
 		folders = append(folders, store.Folder{
 			Name: f.Name, Delim: f.Delim, Role: f.Role, NoSelect: f.NoSelect,
@@ -61,9 +74,11 @@ func (e *Engine) discoverWith(ctx context.Context, conn *imapdrv.Conn, record bo
 		e.log.Info("sync: uidvalidity changed, folder reset", "folder", name)
 	}
 	if record {
-		names := make([]string, 0, len(folders))
-		for _, f := range folders {
-			names = append(names, f.Name)
+		// The pass order covers selectable folders only; a NoSelect
+		// container has no status entry, so a pass can never target it.
+		names := make([]string, 0, len(statuses))
+		for name := range statuses {
+			names = append(names, name)
 		}
 		e.folders = names
 	}
@@ -98,14 +113,24 @@ func (e *Engine) syncFolderLocked(ctx context.Context, folder string, status ima
 }
 
 // backfillLocked ingests the folder's headers in resumable batches
-// (FR-S.3): one EXAMINE, then UID-range header fetches up to the
-// snapshot's uidnext — never bodies, never more than batch_size uids
-// per round trip (FR-S.12).
+// (FR-S.3): one EXAMINE, then fetches up to the snapshot's end — never
+// bodies, never more than batch_size messages per round trip (FR-S.12).
+//
+// On Gmail the walk is by SEQUENCE number up to EXISTS (FR-S.10):
+// Gmail's uid spaces are sparse — a 73k-uidnext folder can hold 31
+// messages — and sweeping expunged uid ranges trips Gmail's response
+// slow-walking (observed live: 22 s per batch on [Gmail]/Spam, then a
+// silent stall). Sequence ranges touch only live messages, and each
+// response carries the uid the records key on. fs.BackfillUID holds the
+// last sequence fetched for Gmail folders (uid cursor elsewhere).
 func (e *Engine) backfillLocked(ctx context.Context, folder string, status imapdrv.FolderStatus, fs store.FolderSync) error {
 	if _, err := e.work.Examine(ctx, folder, nil); err != nil {
 		return err
 	}
 	batch := e.cfg.BatchSize
+	if e.work.GmailExt() {
+		return e.backfillGmailLocked(ctx, folder, status, fs, batch)
+	}
 	for cursor := fs.BackfillUID + 1; uint64(cursor) < status.UIDNext; {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -274,8 +299,9 @@ func (e *Engine) incrementalLocked(ctx context.Context, folder string, status im
 				return err
 			}
 		}
-		// CONDSTORE names no expunges: the uid list is the truth.
-		if err := e.reconcileUIDs(ctx, folder, sel.Status.UIDValidity); err != nil {
+		// CONDSTORE names no expunges: the uid list is the truth,
+		// swept only when the server's count disagrees with ours.
+		if err := e.reconcileUIDs(ctx, folder, sel.Status.UIDValidity, sel.Status.Messages); err != nil {
 			return err
 		}
 	default: // TierBaseline
@@ -298,13 +324,23 @@ func (e *Engine) incrementalLocked(ctx context.Context, folder string, status im
 
 // reconcileUIDs diffs the server's uid list against the store's and
 // tombstones the difference (FR-S.5: tombstones, never silent row
-// deletions).
-func (e *Engine) reconcileUIDs(ctx context.Context, folder string, uv uint32) error {
-	server, err := e.work.UIDs(ctx)
+// deletions). The sweep is gated on the server's own count first: when
+// EXAMINE's EXISTS equals the store's live count for the folder, no
+// expunge can have gone unnoticed — an expunge plus an arrival in the
+// same window is caught anyway, because the arrival is ingested before
+// this check and tips the counts. On Gmail's sparse folders the sweep
+// is a five-figure response, so skipping it when counts agree is what
+// keeps a pass light enough never to trip the provider's throttle
+// (FR-S.12). A count mismatch sweeps as before.
+func (e *Engine) reconcileUIDs(ctx context.Context, folder string, uv uint32, exists uint32) error {
+	known, err := e.st.FolderUIDs(ctx, e.cfg.Account, folder)
 	if err != nil {
 		return err
 	}
-	known, err := e.st.FolderUIDs(ctx, e.cfg.Account, folder)
+	if exists == uint32(len(known)) {
+		return nil
+	}
+	server, err := e.work.UIDs(ctx)
 	if err != nil {
 		return err
 	}
@@ -403,4 +439,56 @@ func diffGone(known, server []uint32) []uint32 {
 		}
 	}
 	return gone
+}
+
+// backfillGmailLocked is the sequence-walking Gmail half of backfill:
+// batches of live messages by sequence number, uid-keyed records, one
+// save per batch so a restart resumes where the store says it stopped
+// (FR-S.3), and a short inter-batch pause — 500-header round trips at
+// full speed are how a provider starts slow-walking you (FR-S.12).
+func (e *Engine) backfillGmailLocked(ctx context.Context, folder string, status imapdrv.FolderStatus, fs store.FolderSync, batch int) error {
+	for cursor := fs.BackfillUID + 1; uint64(cursor) <= uint64(status.Messages); {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		end := uint64(cursor) + uint64(batch) - 1
+		if end > uint64(status.Messages) {
+			end = uint64(status.Messages)
+		}
+		seqs := make([]uint32, 0, end-uint64(cursor)+1)
+		for s := uint64(cursor); s <= end; s++ {
+			seqs = append(seqs, uint32(s))
+		}
+		msgs, err := e.work.FetchHeadersSeq(ctx, seqs)
+		if err != nil {
+			return fmt.Errorf("backfill %q seq [%d..%d]: %w", folder, cursor, end, err)
+		}
+		if err := e.ingest(ctx, folder, status.UIDValidity, msgs); err != nil {
+			return err
+		}
+		fs.UIDValidity = status.UIDValidity
+		fs.UIDNext = status.UIDNext
+		fs.BackfillUID = uint32(end)
+		if err := e.st.SaveFolderSync(ctx, e.cfg.Account, folder, fs); err != nil {
+			return err
+		}
+		cursor = uint32(end) + 1
+		e.log.Debug("sync: backfill batch",
+			"folder", folder, "through", end, "of", status.Messages)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(gmailBatchPace):
+		}
+	}
+	fs.UIDValidity = status.UIDValidity
+	fs.UIDNext = status.UIDNext
+	fs.HighestModSeq = status.HighestModSeq
+	fs.BackfillDone = true
+	if err := e.st.SaveFolderSync(ctx, e.cfg.Account, folder, fs); err != nil {
+		return err
+	}
+	e.log.Info("sync: backfill complete",
+		"folder", folder, "messages", status.Messages, "tier", e.work.Tier().String())
+	return nil
 }

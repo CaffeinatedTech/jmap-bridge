@@ -111,6 +111,15 @@ func Dial(ctx context.Context, cfg Config) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("imapdrv: dial %s: %w", addr, err)
 	}
+	// Some servers (Gmail) send no CAPABILITY response code in their
+	// greeting; SASL mechanism selection needs the list before auth, so
+	// ask explicitly when the greeting came without one.
+	if len(c.caps()) == 0 {
+		if err := c.client.Capability(ctx, nil); err != nil {
+			_ = c.client.Close()
+			return nil, fmt.Errorf("imapdrv: capability: %w", err)
+		}
+	}
 	if err := c.authenticate(ctx); err != nil {
 		_ = c.client.Close()
 		return nil, fmt.Errorf("imapdrv: login: %w", err)
@@ -137,7 +146,7 @@ func Dial(ctx context.Context, cfg Config) (*Conn, error) {
 		enable = append(enable, "UTF8=ACCEPT")
 	}
 	if len(enable) > 0 {
-		if _, err := c.client.Enable(nil, enable...).Wait(ctx); err != nil {
+		if _, err := waitCmd(ctx, c.client.Enable(nil, enable...)); err != nil {
 			log.Warn("imapdrv: ENABLE partially refused", "err", err, "wanted", enable)
 			c.reassessTier()
 		}

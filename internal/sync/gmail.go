@@ -20,6 +20,14 @@ import (
 // The read-path half (labels and thread ids in the header fetch,
 // shared-UID dedupe) lives in backfill.go and imapdrv.
 
+// gmailBatchPace is the pause between Gmail backfill batches (FR-S.12).
+// The live gate calibrated it the hard way: ~300 headers/s sustained for
+// twelve minutes put the account into Gmail's IMAP throttle, where
+// further commands answer "OK [THROTTLED]" and writes are silently
+// dropped. A batch every couple of seconds (~150 headers/s) stays under
+// it; the backfill is resumable, so patience is free.
+const gmailBatchPace = 5 * time.Second
+
 // graceWindow is how long a folder's uid list may keep showing stale
 // state after one of our own writes: Gmail rebuilds its per-folder
 // indexes around label changes, and a message can vanish from a list it
@@ -87,33 +95,30 @@ func (e *Engine) graceFilter(folder string, uids []uint32) []uint32 {
 // gmLabelFor maps a mailbox to the Gmail label that implements it
 // (FR-S.10). System folders have system labels; everything else's label
 // is its mailbox path, because Gmail's user labels and IMAP folder names
-// are the same strings. The boolean is false for the implicit mailbox
-// ([Gmail]/All Mail, the archive role): its membership is server-defined
-// and no label write can express it.
-func gmLabelFor(role, path string) (label string, writable bool) {
+// are the same strings. The implicit mailbox ([Gmail]/All Mail) is
+// decided by the store's implicit flag before this is consulted — its
+// membership is server-defined and no label write can express it.
+func gmLabelFor(role, path string) string {
 	switch role {
 	case "inbox":
-		return `\Inbox`, true
+		return `\Inbox`
 	case "sent":
-		return `\Sent`, true
+		return `\Sent`
 	case "drafts":
-		return `\Drafts`, true
+		return `\Drafts`
 	case "trash":
-		return `\Trash`, true
+		return `\Trash`
 	case "junk":
-		return `\Spam`, true
-	case "archive":
-		// \All: every message is a member by definition.
-		return "", false
+		return `\Spam`
 	}
 	// The two Gmail system folders SPECIAL-USE does not cover.
 	switch leafName(path) {
 	case "Starred":
-		return `\Starred`, true
+		return `\Starred`
 	case "Important":
-		return `\Important`, true
+		return `\Important`
 	}
-	return path, true
+	return path
 }
 
 // leafName returns the part of an IMAP path after the last hierarchy
@@ -204,6 +209,13 @@ func (e *Engine) labelsFor(ctx context.Context, ids []string, forRemoval bool) (
 	if len(notFound) > 0 {
 		return nil, nil, jmapapi.ErrUnknownMailbox
 	}
+	// The implicit mailbox is the store's implicit flag (the \All
+	// attribute at discovery), not the archive role: a plain folder
+	// named "Archive" shares the role but is a normal label mailbox.
+	allID, err := e.st.ImplicitMailboxID(ctx, e.cfg.Account)
+	if err != nil {
+		return nil, nil, err
+	}
 	byID := map[string]*jmapapi.Mailbox{}
 	for _, mb := range mbs {
 		byID[mb.ID] = mb
@@ -213,15 +225,14 @@ func (e *Engine) labelsFor(ctx context.Context, ids []string, forRemoval bool) (
 		if !ok {
 			return nil, nil, jmapapi.ErrUnknownMailbox
 		}
-		label, writable := gmLabelFor(mb.Role, mb.Path)
-		if writable {
-			labels = append(labels, label)
+		if id == allID {
+			if forRemoval {
+				return nil, nil, &implicitRemoveError{path: mb.Path}
+			}
+			implicit[id] = true
 			continue
 		}
-		if forRemoval {
-			return nil, nil, &implicitRemoveError{path: mb.Path}
-		}
-		implicit[id] = true
+		labels = append(labels, gmLabelFor(mb.Role, mb.Path))
 	}
 	return labels, implicit, nil
 }

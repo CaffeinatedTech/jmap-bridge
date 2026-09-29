@@ -1,0 +1,41 @@
+# Gmail live-gate config (M4): loopback listener, OAuth2-only account.
+# The client secret comes from the environment (never this file):
+# the launch script maps .env's JMAP_BRIDGE_GMAIL_OAUTH onto
+# JMAP_BRIDGE_GMAIL_OAUTH2_CLIENT_SECRET. The encryption key for stored
+# tokens comes from JMAP_BRIDGE_SECRET_KEY (held in /tmp/opencode/gmail-key
+# for the gate so sealed tokens stay readable across restarts).
+#
+# Redirect URI registered on the OAuth client:
+#   http://127.0.0.1:8080/oauth/gmail/callback
+
+listen = "127.0.0.1:8080"
+base_url = "http://127.0.0.1:8080"
+data_dir = "./data"
+log_level = "info"
+
+[sync]
+interval = "60s"
+
+[auth]
+mode = "token"
+
+[[accounts]]
+id = "gmail"
+name = "Gmail"
+address = "cyaegha@gmail.com"
+token = "dev-token-gmail-local-only"
+
+  [accounts.imap]
+  host = "imap.gmail.com"
+  port = 993
+  auth = "oauth2"
+  username = "cyaegha@gmail.com"
+
+  [accounts.smtp]
+  host = "smtp.gmail.com"
+  port = 465
+  auth = "oauth2"
+
+  [accounts.oauth2]
+  provider = "google"
+  client_id = "407910920774-n95ghvq5cpe2jte26dcfchq8cu26g7vr.apps.googleusercontent.com"

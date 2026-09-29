@@ -30,12 +30,19 @@ type Folder struct {
 
 // ListFolders returns every mailbox via LIST-EXTENDED with the
 // SPECIAL-USE return option (FR-S.1). "*" matches through hierarchy
-// separators, so one round trip covers the whole tree.
+// separators, so one round trip covers the whole tree. The command form
+// (not the convenience wrapper) keeps the tagged response code visible:
+// a [THROTTLED] LIST must be an error — feeding a partial list to the
+// store's reconciliation would tombstone every folder the throttle
+// happened to omit.
 func (c *Conn) ListFolders(ctx context.Context) ([]Folder, error) {
-	data, err := c.client.ListMailboxes(ctx, "", "*", &imapclient.ListOptions{
+	data, err := waitCmd(ctx, c.client.List("", "*", &imapclient.ListOptions{
 		ReturnOptions: []imapclient.ListReturnOption{imapclient.ListReturnSpecialUse},
-	})
+	}))
 	if err != nil {
+		if IsThrottled(err) {
+			return nil, ErrThrottled
+		}
 		return nil, fmt.Errorf("imapdrv: list: %w", err)
 	}
 	out := make([]Folder, 0, len(data))
@@ -43,13 +50,15 @@ func (c *Conn) ListFolders(ctx context.Context) ([]Folder, error) {
 		f := Folder{Name: d.Mailbox, Delim: d.Delimiter}
 		for _, a := range d.Attrs {
 			switch a {
-			case imap.MailboxAttrNoSelect:
+			case imap.MailboxAttrNoSelect, imap.MailboxAttrNonExistent:
+				// \NonExistent is IMAP4rev2's name for what rev1 called
+				// \Noselect; Gmail's "[Gmail]" container reports it.
 				f.NoSelect = true
 			case imap.MailboxAttrAll:
 				f.AllMail = true
 			}
 		}
-		f.Role = roleFor(f.Name, d.Attrs)
+		f.Role = roleFor(f.Name, d.Attrs, c.GmailExt())
 		out = append(out, f)
 	}
 	return out, nil
@@ -57,8 +66,11 @@ func (c *Conn) ListFolders(ctx context.Context) ([]Folder, error) {
 
 // roleFor maps SPECIAL-USE attributes (RFC 6154) to JMAP roles, with a
 // well-known-name fallback for servers that implement SPECIAL-USE only
-// by convention (FR-S.1, FR-M.1).
-func roleFor(name string, attrs []imap.MailboxAttr) string {
+// by convention (FR-S.1, FR-M.1). On an X-GM-EXT-1 server the fallback
+// is off: Gmail labels named "Sent" or "Trash" are ordinary labels, and
+// granting them roles would collide with the SPECIAL-USE system folders
+// ([Gmail]/Sent Mail, [Gmail]/Bin) and make role lookups ambiguous.
+func roleFor(name string, attrs []imap.MailboxAttr, gmail bool) string {
 	for _, a := range attrs {
 		switch a {
 		case imap.MailboxAttrSent:
@@ -84,6 +96,11 @@ func roleFor(name string, attrs []imap.MailboxAttr) string {
 	}
 	if strings.EqualFold(name, "INBOX") {
 		return "inbox"
+	}
+	if gmail {
+		// Gmail: labels are labels; only SPECIAL-USE and INBOX name
+		// carry roles (FR-S.10's label namespace).
+		return ""
 	}
 	// Well-known top-level names (no SPECIAL-USE on many cPanel boxes).
 	base := name
@@ -117,7 +134,7 @@ func roleFor(name string, attrs []imap.MailboxAttr) string {
 // LIST already reports the separator per mailbox, and names are stored
 // exactly as LIST returns them.
 func (c *Conn) Namespace(ctx context.Context) (prefix string, delim rune, err error) {
-	data, err := c.client.Namespace(nil).Wait(ctx)
+	data, err := waitCmd(ctx, c.client.Namespace(nil))
 	if err != nil {
 		return "", 0, fmt.Errorf("imapdrv: namespace: %w", err)
 	}
@@ -151,15 +168,16 @@ type FolderStatus struct {
 
 // Status reads one folder's status without selecting it.
 func (c *Conn) Status(ctx context.Context, folder string) (FolderStatus, error) {
-	data, err := c.client.Status(folder, &imapclient.StatusOptions{
+	st, err := waitCmd(ctx, c.client.Status(folder, &imapclient.StatusOptions{
 		Items: []imap.StatusItem{
 			imap.StatusItemMessages, imap.StatusItemUIDNext, imap.StatusItemUIDValidity,
 			imap.StatusItemUnseen, imap.StatusItemHighestModSeq,
 		},
-	}).Wait(ctx)
+	}))
 	if err != nil {
 		return FolderStatus{}, fmt.Errorf("imapdrv: status %q: %w", folder, err)
 	}
+	data := st
 	return FolderStatus{
 		UIDValidity:   data.UIDValidity,
 		UIDNext:       uint64(data.UIDNext),

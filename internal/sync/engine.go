@@ -169,6 +169,19 @@ func (e *Engine) Run(ctx context.Context) {
 		if err := e.doPass(ctx, hint); err != nil {
 			e.log.Warn("sync: pass failed", "account", e.cfg.Account, "err", err)
 			e.disconnect()
+			// A [THROTTLED] pass is the provider saying "back off": the
+			// standard failure ladder would knock again in seconds.
+			// Cooldown first (FR-S.12); a kick still wakes us early.
+			if imapdrv.IsThrottled(err) {
+				e.log.Warn("sync: provider throttled the account, cooling down",
+					"account", e.cfg.Account, "cooldown", throttleCooldown.String())
+				failures = 0
+				if !e.sleepOrKick(ctx, throttleCooldown) {
+					e.wr.close()
+					return
+				}
+				continue
+			}
 			failures++
 			if !e.sleepOrKick(ctx, backoff(failures)) {
 				e.wr.close()
@@ -179,6 +192,12 @@ func (e *Engine) Run(ctx context.Context) {
 		failures = 0
 	}
 }
+
+// throttleCooldown is how long the engine stays quiet after a pass the
+// provider answered with [THROTTLED] — long enough for Gmail's rate
+// window to reset, short enough that the next IDLE tick recovers
+// without operator help.
+const throttleCooldown = 15 * time.Minute
 
 // sleepOrKick sleeps d, returning early when the engine was kicked (the
 // OAuth callback landed credentials mid-backoff, FR-A.5) or ctx ended.

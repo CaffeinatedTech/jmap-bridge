@@ -219,3 +219,80 @@ func TestListFoldersAllMail(t *testing.T) {
 		t.Errorf("Sent Mail role = %q", byName["[Gmail]/Sent Mail"].Role)
 	}
 }
+
+// An OK [THROTTLED] means the command was NOT completed (Google's
+// documented semantics): the driver converts it to ErrThrottled so no
+// caller can commit locally on its strength (FR-S.12).
+func TestThrottledOKIsFailure(t *testing.T) {
+	f := startFakeIMAP(t, "CAPABILITY IMAP4rev1 AUTH=PLAIN", func(tag, line string) []string {
+		switch {
+		case strings.Contains(line, "CAPABILITY"):
+			return []string{"* CAPABILITY IMAP4rev1 UIDPLUS X-GM-EXT-1"}
+		case strings.Contains(line, " SELECT "):
+			return []string{
+				"* 1 EXISTS",
+				"* OK [UIDVALIDITY 42] uv",
+				"* OK [UIDNEXT 9] un",
+				tag + " OK [READ-WRITE] selected",
+			}
+		case strings.Contains(line, "UNSELECT"):
+			return []string{tag + " OK"}
+		case strings.Contains(line, "UID STORE"):
+			return []string{tag + " OK [THROTTLED] not completed"}
+		}
+		return nil
+	})
+	c := dialFake(t, f, Config{Username: "tester", Password: "pw"})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := c.StoreGmLabels(ctx, "INBOX", []uint32{7}, []string{"x"}, nil)
+	if !IsThrottled(err) {
+		t.Fatalf("err = %v, want ErrThrottled", err)
+	}
+}
+
+// A [THROTTLED]-tagged FETCH after partial data means the batch is not
+// the folder's truth: the driver refuses it instead of letting a
+// partial backfill batch advance the cursor.
+func TestThrottledFetchRefusesPartialBatch(t *testing.T) {
+	f := startFakeIMAP(t, "CAPABILITY IMAP4rev1 AUTH=PLAIN", func(tag, line string) []string {
+		switch {
+		case strings.Contains(line, "CAPABILITY"):
+			return []string{"* CAPABILITY IMAP4rev1 X-GM-EXT-1"}
+		case strings.Contains(line, " EXAMINE ") || strings.Contains(line, " SELECT "):
+			return []string{
+				"* 1 EXISTS",
+				"* OK [UIDVALIDITY 42] uv",
+				"* OK [UIDNEXT 3] un",
+			}
+		case strings.Contains(line, "UID FETCH"):
+			return []string{
+				`* 1 FETCH (UID 1 FLAGS () INTERNALDATE "01-Jan-2026 10:00:00 +0000" ` +
+					`RFC822.SIZE 10 ENVELOPE (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL) ` +
+					`BODYSTRUCTURE ("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1))`,
+				tag + " OK [THROTTLED] partial",
+			}
+		}
+		return nil
+	})
+	c := dialFake(t, f, Config{Username: "tester", Password: "pw"})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.Examine(ctx, "INBOX", nil); err != nil {
+		t.Fatalf("examine: %v", err)
+	}
+	_, err := c.FetchHeaders(ctx, []uint32{1})
+	if !IsThrottled(err) {
+		t.Fatalf("err = %v, want ErrThrottled for the partial batch", err)
+	}
+}
+
+// A NO [THROTTLED] is the same refusal in its plain form.
+func TestIsThrottledNOForm(t *testing.T) {
+	if !IsThrottled(ErrThrottled) {
+		t.Fatal("sentinel not recognised")
+	}
+	if IsThrottled(context.DeadlineExceeded) {
+		t.Fatal("plain errors must not read as throttled")
+	}
+}
