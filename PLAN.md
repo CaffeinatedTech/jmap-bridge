@@ -523,7 +523,7 @@ milestones but deliberately carries no completion state). Rules:
 | **M0** | Repo skeleton, TOML config + validation, HTTP session + `POST /jmap` dispatch (derived from jmap-tui's `test/mockjmap`), fixture store, Dockerfile, gates green | jmap-tui connects to `http://127.0.0.1:PORT/{account}` and browses fixture mail | FR-J.1–.6, FR-A.1–.4 (A.4 config-level; live login lands M1/M3), FR-A.11–.12, FR-D.1 | ✅ done 2026-09-29 (jmap-tui live suite over loopback) |
 | **M1** | SQLite store (schema §4), read-only IMAP sync (discovery, tier detection, backfill, IDLE), hydration, `/changes` + SSE, preview | real Dovecot account browsable read-only; a flag flipped in another IMAP client appears in jmap-tui ≤ 2 s | FR-S.1–.9, FR-M.1–.8, FR-J.7–.8 | ✅ done 2026-09-29 (live local Dovecot 2.4: `test/live` foreign flag → store 505 ms and jmap-tui engine 563 ms, both ≤ 2 s over IDLE+SSE; backfill, hydration and preview against the real server; jmap-tui live suite + `smoke` green over loopback) |
 | **M2** | Write path §7.1, `Mailbox/set`, drafts, IMAP-first commits | jmap-tui triage (star/archive/move/delete/undo) round-trips; changes visible from a second IMAP client | FR-M.9–.13 | ✅ done 2026-09-29 (live local Dovecot 2.4: `test/live` write gate — star/move/copy with undo, `Mailbox/set` create/rename/delete, draft `APPEND` with `\Draft`, destroy — each re-read from an **independent IMAP session**; jmap-tui triage scratch green over loopback 3× — read/star/undo/move/undo/copy/undo/archive/delete-to-trash/destroy, every step confirmed by python3/imaplib; gate caught and fixed `/get` dropping `id` per RFC 8620 §5.1) |
-| **M3** | Send §7.2, `Identity/get`, blob upload/download, `EmailSubmission/set` with `onSuccessUpdateEmail` | compose → send → message in Sent **and** delivered to a test sink; attachment round-trip byte-exact | FR-M.14–.17 | pending |
+| **M3** | Send §7.2, `Identity/get`, blob upload/download, `EmailSubmission/set` with `onSuccessUpdateEmail` | compose → send → message in Sent **and** delivered to a test sink; attachment round-trip byte-exact | FR-M.14–.17 | ✅ done 2026-09-29 (`test/live` M3 gate against dev Dovecot + in-process SMTP sink: batched draft+submission, `#draft` creation reference, patch files Sent, sink held the message with its attachment byte-exact and no Bcc, second IMAP session saw one `\Seen` copy — plus fixture-tier suites `TestSubmission*`, `internal/submit` against the SMTP fixture, and the jmap-tui cross-client rig: `TestLiveM5Gate` (compose→attach→send→Sent), `TestLiveM5ProbeDraftRoundTrip` and the M1/M2 bridge gates green over loopback) |
 | **M4** | Gmail profile: OAuth2 bootstrap, XOAUTH2 IMAP/SMTP, `X-GM-LABELS`↔mailboxes, All Mail/archive, `X-GM-THRID`, CONDSTORE tier validation, rate limits | live Gmail: folders+labels both ways, compose/send, archive from jmap-tui, no rate-limit warnings | FR-A.5–.10, FR-S.10, FR-S.12, FR-M.18 | pending |
 | **M5** | FTS5 + search-driven backfill, filter/sort/anchor/collapseThreads correctness, `PREVIEW`/partial-fetch, COMPRESS, 100k soak | jmap-tui live search cases green; cold browse of a 100k mailbox stays responsive; soak within NFR bounds | FR-X.1–.8, FR-S.11, NFR-1, NFR-2, NFR-8 | pending |
 | **M6** | CardDAV §8: discovery, sync-collection, PUT/DELETE, vCard↔JSContact, photo blobs, capability gating | jmap-tui `contacts_live_test` suite green against a real CardDAV server; create/edit/delete contact round-trips | FR-P.1–.13 | pending |
@@ -537,9 +537,11 @@ milestones but deliberately carries no completion state). Rules:
 than faked): `Mailbox/set` accepts only `name`/`parentId` — a client-set
 `sortOrder`, `role` or `isSubscribed` is refused with `invalidProperties`,
 because role and order are re-derived from the server on every discovery pass
-and a value we cannot keep must not be acknowledged; `/get` ignores property
-names it does not model instead of answering `invalidArguments`; and Email/get
-has no top-level `blobId` yet (M3's blob endpoints).
+and a value we cannot keep must not be acknowledged; and `/get` ignores
+property names it does not model instead of answering `invalidArguments`.
+(Email/get's top-level `blobId` landed with M3: it names the raw copy the
+bridge holds — a message it built or fetched — and is absent until it does,
+because bodies stay lazy.)
 
 ---
 

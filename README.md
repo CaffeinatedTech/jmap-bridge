@@ -33,8 +33,10 @@ second protocol to every client, run one bridge:
 
 - **JMAP Mail (RFC 8621)** — browse, search, read, flag, move, archive, delete,
   threads, drafts. Session, result references, `/changes`, state strings, SSE push.
-- **Sending** — `EmailSubmission/set` over SMTP (password or OAuth2), filed into
-  Sent via IMAP `APPEND`, with the client's `onSuccessUpdateEmail` honoured.
+- **Sending** — `EmailSubmission/set` over SMTP (password or OAuth2), Bcc
+  stripped on the wire, the sent message filed into Sent either by the
+  client's `onSuccessUpdateEmail` or by an IMAP `APPEND` — never both — and
+  `Identity/get` for the from-address.
 - **Contacts (RFC 9610)** — `AddressBook/*` and `ContactCard/*`, translated to the
   provider's CardDAV (vCard ↔ JSContact per RFC 9553/9554). Photo blobs included.
 - **Hybrid local cache** — headers, flags, MIME structure and a full-text index are
