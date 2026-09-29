@@ -29,27 +29,33 @@ const (
 
 // Server is the bridge's HTTP handler.
 type Server struct {
-	cfg    *config.Config
-	tokens *auth.Tokens
-	store  jmapapi.Store
-	hub    *push.Hub
-	jmap   *jmapapi.Handler
-	log    *slog.Logger
-	mux    *http.ServeMux
+	cfg      *config.Config
+	tokens   *auth.Tokens
+	store    jmapapi.Store
+	backends map[string]jmapapi.Backend
+	hub      *push.Hub
+	jmap     *jmapapi.Handler
+	log      *slog.Logger
+	mux      *http.ServeMux
 }
 
 // New wires a Server: routing, auth, dispatch and push. store serves
-// every configured account; hub is the change signal source for the
-// eventsource endpoint (FR-J.8).
-func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store, hub *push.Hub, log *slog.Logger) *Server {
+// every configured account; backends maps an account id to the object
+// that mutates it (nil for a cache-only account, which then refuses
+// every write); hub is the change signal source for the eventsource
+// endpoint (FR-J.8).
+func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
+	backends map[string]jmapapi.Backend, hub *push.Hub, log *slog.Logger,
+) *Server {
 	s := &Server{
-		cfg:    cfg,
-		tokens: tokens,
-		store:  store,
-		hub:    hub,
-		jmap:   jmapapi.NewHandler(store),
-		log:    log,
-		mux:    http.NewServeMux(),
+		cfg:      cfg,
+		tokens:   tokens,
+		store:    store,
+		backends: backends,
+		hub:      hub,
+		jmap:     jmapapi.NewHandler(store),
+		log:      log,
+		mux:      http.NewServeMux(),
 	}
 	s.mux.HandleFunc("GET /{account}/.well-known/jmap", s.handleSession)
 	s.mux.HandleFunc("POST /{account}/jmap", s.handleAPI)
@@ -159,9 +165,9 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 						"emailQuerySortOptions": []string{
 							"receivedAt", "subject", "from", "size", "hasAttachment",
 						},
-						// No Mailbox/set until M2, so the account cannot
-						// claim top-level creation works (FR-J.5).
-						"mayCreateTopLevelMailbox": false,
+						// Mailbox/set exists as of M2 (FR-M.12), so top-level
+						// creation may be advertised honestly (FR-J.5).
+						"mayCreateTopLevelMailbox": true,
 					},
 				},
 			},
@@ -224,6 +230,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	jacct := &jmapapi.Account{
 		ID:           acct.ID,
 		Store:        s.store,
+		Backend:      s.backends[acct.ID],
 		SessionState: s.sessionState(acct, user),
 	}
 	status, resp := s.jmap.Dispatch(r.Context(), jacct, body)

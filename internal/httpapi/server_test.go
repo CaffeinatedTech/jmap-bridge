@@ -46,7 +46,7 @@ func newTestServer(t *testing.T) *testServer {
 		"personal": "tok-personal",
 		"work":     "tok-work",
 	})
-	ts := httptest.NewServer(New(cfg, tokens, fixture.New(), push.New(), nil))
+	ts := httptest.NewServer(New(cfg, tokens, fixture.New(), nil, push.New(), nil))
 	t.Cleanup(ts.Close)
 	return &testServer{Server: ts, cfg: cfg}
 }
@@ -191,8 +191,10 @@ func TestSessionShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("accountCapabilities = %v", acctCaps)
 	}
-	if mailCap["mayCreateTopLevelMailbox"] != false {
-		t.Errorf("mayCreateTopLevelMailbox = %v, want false until Mailbox/set exists", mailCap["mayCreateTopLevelMailbox"])
+	// Mailbox/set exists as of M2 (FR-M.12), so the account may claim
+	// top-level creation honestly (FR-J.5).
+	if mailCap["mayCreateTopLevelMailbox"] != true {
+		t.Errorf("mayCreateTopLevelMailbox = %v, want true once Mailbox/set ships", mailCap["mayCreateTopLevelMailbox"])
 	}
 	if got := mailCap["emailQuerySortOptions"]; got == nil {
 		t.Error("emailQuerySortOptions missing")
@@ -629,7 +631,7 @@ address = "me@example.test"
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
-	ts := httptest.NewServer(New(cfg, auth.NewTokens(nil), fixture.New(), push.New(), nil))
+	ts := httptest.NewServer(New(cfg, auth.NewTokens(nil), fixture.New(), nil, push.New(), nil))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/personal/.well-known/jmap")

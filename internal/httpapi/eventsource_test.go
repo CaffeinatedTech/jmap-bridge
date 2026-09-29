@@ -41,7 +41,7 @@ func newSSEEnv(t *testing.T) *sseEnv {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	tokens := auth.NewTokens(map[string]string{cfg.Accounts[0].ID: cfg.Accounts[0].Token})
-	ts := httptest.NewServer(New(cfg, tokens, st, hub, nil))
+	ts := httptest.NewServer(New(cfg, tokens, st, nil, hub, nil))
 	t.Cleanup(ts.Close)
 	return &sseEnv{ts: ts, st: st, hub: hub, token: cfg.Accounts[0].Token}
 }

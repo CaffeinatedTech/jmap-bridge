@@ -9,13 +9,21 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 )
 
-// discoverLocked lists folders with STATUS and reconciles them into the
-// store (FR-S.1). It returns each folder's fresh status for the
-// incremental phase and is also where UIDVALIDITY resets surface
-// (FR-S.6): SyncFolders names the folders it reset and their cursors
-// start over.
+// discoverLocked is the work pass's discovery (FR-S.1).
 func (e *Engine) discoverLocked(ctx context.Context) (map[string]imapdrv.FolderStatus, error) {
-	conn := e.work
+	return e.discoverWith(ctx, e.work, true)
+}
+
+// discoverWith lists folders with STATUS on conn and reconciles them
+// into the store. It returns each folder's fresh status and is also
+// where UIDVALIDITY resets surface (FR-S.6): SyncFolders names the
+// folders it reset and their cursors start over.
+//
+// record marks whether this call may update the engine's folder list —
+// the write path refreshes roles after Mailbox/set from its own
+// connection (FR-M.12) without touching state the work pass owns under
+// workMu.
+func (e *Engine) discoverWith(ctx context.Context, conn *imapdrv.Conn, record bool) (map[string]imapdrv.FolderStatus, error) {
 	list, err := conn.ListFolders(ctx)
 	if err != nil {
 		return nil, err
@@ -51,11 +59,13 @@ func (e *Engine) discoverLocked(ctx context.Context) (map[string]imapdrv.FolderS
 		}
 		e.log.Info("sync: uidvalidity changed, folder reset", "folder", name)
 	}
-	names := make([]string, 0, len(folders))
-	for _, f := range folders {
-		names = append(names, f.Name)
+	if record {
+		names := make([]string, 0, len(folders))
+		for _, f := range folders {
+			names = append(names, f.Name)
+		}
+		e.folders = names
 	}
-	e.folders = names
 	if idleCandidate != "" {
 		e.setCurrentIdleFolder(idleCandidate)
 	}

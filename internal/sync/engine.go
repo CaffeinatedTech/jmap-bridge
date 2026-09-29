@@ -50,6 +50,10 @@ type Engine struct {
 	// wake carries pass requests: a folder hint, or "" for a full pass.
 	wake chan string
 
+	// wr is the dedicated write session (PLAN §7.1): mutations never
+	// queue behind a pass holding workMu.
+	wr *writer
+
 	// idleFolder is the folder the idle connection watches (the inbox
 	// role when discovery finds one); idleLoop reads it under idleMu.
 	idleMu     sync.Mutex
@@ -92,6 +96,7 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 		cfg:         cfg,
 		st:          st,
 		log:         log,
+		wr:          newWriter(cfg.IMAP, log),
 		wake:        make(chan string, 8),
 		flights:     map[string]*flight{},
 		prefetchSem: make(chan struct{}, cfg.Concurrency),
@@ -114,6 +119,7 @@ func (e *Engine) Run(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
 			e.disconnect()
+			e.wr.close()
 			return
 		}
 		if !e.isWorkConnected() {
@@ -133,6 +139,7 @@ func (e *Engine) Run(ctx context.Context) {
 		case <-ticker.C:
 		case <-ctx.Done():
 			e.disconnect()
+			e.wr.close()
 			return
 		}
 		if err := e.doPass(ctx, hint); err != nil {
@@ -140,6 +147,7 @@ func (e *Engine) Run(ctx context.Context) {
 			e.disconnect()
 			failures++
 			if !sleepCtx(ctx, backoff(failures)) {
+				e.wr.close()
 				return
 			}
 			continue

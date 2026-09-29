@@ -22,6 +22,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/config"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/httpapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/push"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/sync"
@@ -85,8 +86,10 @@ func run(args []string) error {
 	}()
 
 	// One engine per account that has an IMAP backend; an account
-	// without one serves whatever the cache holds (log, never lie).
+	// without one serves whatever the cache holds (log, never lie) and
+	// gets no Backend, so its writes fail instead of pretending.
 	engines := 0
+	backends := map[string]jmapapi.Backend{}
 	for i := range cfg.Accounts {
 		a := &cfg.Accounts[i]
 		if a.IMAP == nil {
@@ -94,6 +97,7 @@ func run(args []string) error {
 			continue
 		}
 		eng := sync.New(syncConfig(cfg, a), st, log)
+		backends[a.ID] = eng
 		go eng.Run(ctx)
 		engines++
 	}
@@ -102,7 +106,7 @@ func run(args []string) error {
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           httpapi.New(cfg, tokens, st, hub, log),
+		Handler:           httpapi.New(cfg, tokens, st, backends, hub, log),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
