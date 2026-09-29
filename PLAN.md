@@ -354,14 +354,21 @@ Email/query with a text/filter component
 | update `keywords/$seen` | `UID STORE … (\Seen)` — `$seen↔\Seen`, `$draft↔\Draft`, `$flagged↔\Flagged`, `$answered↔\Answered`, `$deleted↔\Deleted`, `$labelN`/custom keywords ↔ IMAP keywords verbatim |
 | add `mailboxIds/<id>` | `UID COPY` (or `UID MOVE` where the semantics are move) |
 | remove `mailboxIds/<id>` | `UID MOVE` to target, or `COPY` + `STORE \Deleted` + `UID EXPUNGE` (UIDPLUS) fallback |
-| destroy | `UID MOVE` to Trash when configured, else `STORE \Deleted` + `UID EXPUNGE` |
+| destroy | `STORE \Deleted` + `UID EXPUNGE` (UIDPLUS) in **every** folder holding the message — destroy is permanent (RFC 8621 §4.6); a client files to Trash with a `mailboxIds` patch instead |
 | create (draft) | `APPEND` to Drafts with `\Draft \Seen` + `$draft` |
 | Gmail label change | `UID STORE +X-GM-LABELS (…)` where supported (avoids copy storms) |
 
 Local commit + modseq bump + SSE **only after** the IMAP command returns OK; on
 failure the JMAP response carries `notUpdated`/`notDestroyed` with `serverFail`.
+Patch values follow RFC 8620 §5.3 — `true` adds, `null` removes — and `false`
+also removes (Stalwart accepts it, Fastmail rejects it; accepting both never
+breaks a client while the canonical form works everywhere). A patch that would
+leave an Email in no Mailbox is refused with `invalidProperties`, since the mail
+store requires at least one membership (RFC 8621 §4.1).
 
-`Mailbox/set`: `CREATE` / `RENAME` / `DELETE` (+ role detection refresh).
+`Mailbox/set`: `CREATE` / `RENAME` / `DELETE` (+ role detection refresh), with
+`alreadyExists`, `mailboxHasChild` and `mailboxHasEmail` (unless
+`onDestroyRemoveEmails`) reported as the RFC 8621 §2.5 SetErrors.
 
 ### 7.2 EmailSubmission/set
 
@@ -489,7 +496,7 @@ milestones but deliberately carries no completion state). Rules:
 |---|---|---|---|---|
 | **M0** | Repo skeleton, TOML config + validation, HTTP session + `POST /jmap` dispatch (derived from jmap-tui's `test/mockjmap`), fixture store, Dockerfile, gates green | jmap-tui connects to `http://127.0.0.1:PORT/{account}` and browses fixture mail | FR-J.1–.6, FR-A.1–.4 (A.4 config-level; live login lands M1/M3), FR-A.11–.12, FR-D.1 | ✅ done 2026-09-29 (jmap-tui live suite over loopback) |
 | **M1** | SQLite store (schema §4), read-only IMAP sync (discovery, tier detection, backfill, IDLE), hydration, `/changes` + SSE, preview | real Dovecot account browsable read-only; a flag flipped in another IMAP client appears in jmap-tui ≤ 2 s | FR-S.1–.9, FR-M.1–.8, FR-J.7–.8 | ✅ done 2026-09-29 (live local Dovecot 2.4: `test/live` foreign flag → store 505 ms and jmap-tui engine 563 ms, both ≤ 2 s over IDLE+SSE; backfill, hydration and preview against the real server; jmap-tui live suite + `smoke` green over loopback) |
-| **M2** | Write path §7.1, `Mailbox/set`, drafts, IMAP-first commits | jmap-tui triage (star/archive/move/delete/undo) round-trips; changes visible from a second IMAP client | FR-M.9–.13 | pending |
+| **M2** | Write path §7.1, `Mailbox/set`, drafts, IMAP-first commits | jmap-tui triage (star/archive/move/delete/undo) round-trips; changes visible from a second IMAP client | FR-M.9–.13 | ✅ done 2026-09-29 (live local Dovecot 2.4: `test/live` write gate — star/move/copy with undo, `Mailbox/set` create/rename/delete, draft `APPEND` with `\Draft`, destroy — each re-read from an **independent IMAP session**; jmap-tui triage scratch green over loopback 3× — read/star/undo/move/undo/copy/undo/archive/delete-to-trash/destroy, every step confirmed by python3/imaplib; gate caught and fixed `/get` dropping `id` per RFC 8620 §5.1) |
 | **M3** | Send §7.2, `Identity/get`, blob upload/download, `EmailSubmission/set` with `onSuccessUpdateEmail` | compose → send → message in Sent **and** delivered to a test sink; attachment round-trip byte-exact | FR-M.14–.17 | pending |
 | **M4** | Gmail profile: OAuth2 bootstrap, XOAUTH2 IMAP/SMTP, `X-GM-LABELS`↔mailboxes, All Mail/archive, `X-GM-THRID`, CONDSTORE tier validation, rate limits | live Gmail: folders+labels both ways, compose/send, archive from jmap-tui, no rate-limit warnings | FR-A.5–.10, FR-S.10, FR-S.12, FR-M.18 | pending |
 | **M5** | FTS5 + search-driven backfill, filter/sort/anchor/collapseThreads correctness, `PREVIEW`/partial-fetch, COMPRESS, 100k soak | jmap-tui live search cases green; cold browse of a 100k mailbox stays responsive; soak within NFR bounds | FR-X.1–.8, FR-S.11, NFR-1, NFR-2, NFR-8 | pending |
@@ -499,6 +506,14 @@ milestones but deliberately carries no completion state). Rules:
 **Verification assets**: jmap-tui's live integration suite pointed at the bridge
 (`JMAP_BRIDGE_TEST_*`); its `mockjmap`-derived fixtures seeded M0; Fastmail's
 `JMAP-TestSuite` (Perl) as the external conformance gate at M7.
+
+**Known conformance gaps for that M7 run** (deliberate, and rejected rather
+than faked): `Mailbox/set` accepts only `name`/`parentId` — a client-set
+`sortOrder`, `role` or `isSubscribed` is refused with `invalidProperties`,
+because role and order are re-derived from the server on every discovery pass
+and a value we cannot keep must not be acknowledged; `/get` ignores property
+names it does not model instead of answering `invalidArguments`; and Email/get
+has no top-level `blobId` yet (M3's blob endpoints).
 
 ---
 
