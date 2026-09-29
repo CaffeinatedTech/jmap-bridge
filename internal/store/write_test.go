@@ -208,8 +208,10 @@ func TestCommitDestroyDropsEveryMembership(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	id := seedOne(t, s, 1, "<dup@example>", "in two places")
+	// The Sent copy must agree with the INBOX seed's flags (none): the
+	// dedupe rule only merges copies whose server state matches.
 	if err := s.PutMessages(ctx, "acct", "Sent", []MessageRec{
-		mkRec(9, "<dup@example>", "in two places", "a@example.test", []string{`\Seen`},
+		mkRec(9, "<dup@example>", "in two places", "a@example.test", nil,
 			time.Date(2026, 9, 1, 11, 0, 0, 0, time.UTC)),
 	}); err != nil {
 		t.Fatalf("second membership: %v", err)

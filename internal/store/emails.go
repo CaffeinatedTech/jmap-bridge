@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -95,17 +96,29 @@ func (s *Store) PutMessages(ctx context.Context, account, folder string, recs []
 
 			// Dedupe: a message already known through another folder keeps
 			// its id — the same mail is one JMAP Email with two mailboxes.
-			// Only cross-folder, though: when the known email already has a
-			// live membership in this folder, this arrival is a second
-			// delivery of the same Message-ID and gets its own message
-			// (two rows in one mailbox = two deliveries, and reusing the
-			// id would inflate the membership the counts rely on).
+			// Three limits keep that merge lossless (the cache never
+			// reports state the server does not hold):
+			//   - cross-folder only: a second copy in the same folder is a
+			//     second delivery and gets its own message (reusing the id
+			//     would inflate the membership the counts rely on);
+			//   - flags-agree only: JMAP keywords are per-object, so two
+			//     IMAP copies whose flags differ (self-sent mail: the Sent
+			//     copy is \Seen, the delivered copy is not) cannot share
+			//     one object truthfully — whichever folder synced last
+			//     would win and the unread counts would flap by race;
+			//   - \Recent is ignored in the comparison: it is per-session
+			//     bookkeeping the server stamps on arrival, not message
+			//     state a client sees consistently.
 			if id := liveEmailByMsgID(ctx, tx, account, rec.MessageIDs); id != "" {
 				liveHere, err := hasLiveMembership(ctx, tx, mailboxUID, id)
 				if err != nil {
 					return err
 				}
-				if !liveHere {
+				agree, err := flagsAgree(ctx, tx, account, id, keywords)
+				if err != nil {
+					return err
+				}
+				if !liveHere && agree {
 					if err := applyFlags(ctx, tx, account, id, keywords, seq); err != nil {
 						return err
 					}
@@ -674,6 +687,47 @@ func hasLiveMembership(ctx context.Context, tx *sql.Tx, mailboxUID int64, emailI
 		return false, fmt.Errorf("store: membership check: %w", err)
 	}
 	return n > 0, nil
+}
+
+// flagsAgree reports whether an incoming copy's keywords match the
+// stored email's, ignoring \Recent (the ephemeral per-session flag).
+// Only then can the copies share one JMAP object without the cache
+// misrepresenting one of them.
+func flagsAgree(ctx context.Context, tx *sql.Tx, account, emailID string, incoming map[string]bool) (bool, error) {
+	var kwJSON string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT keywords FROM emails WHERE id = ? AND account = ?`, emailID, account).Scan(&kwJSON); err != nil {
+		return false, fmt.Errorf("store: read keywords: %w", err)
+	}
+	stored := map[string]bool{}
+	if err := json.Unmarshal([]byte(kwJSON), &stored); err != nil {
+		return false, fmt.Errorf("store: decode keywords: %w", err)
+	}
+	return sameKeywords(stored, incoming), nil
+}
+
+// sameKeywords compares two keyword sets for equality, ignoring \Recent
+// and false entries.
+func sameKeywords(a, b map[string]bool) bool {
+	norm := func(m map[string]bool) map[string]bool {
+		out := map[string]bool{}
+		for k, v := range m {
+			if v && k != `\Recent` {
+				out[k] = true
+			}
+		}
+		return out
+	}
+	na, nb := norm(a), norm(b)
+	if len(na) != len(nb) {
+		return false
+	}
+	for k := range na {
+		if !nb[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // liveEmailByMsgID finds a live email by any of the message's own

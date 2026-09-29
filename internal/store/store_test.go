@@ -253,6 +253,42 @@ func TestPutMessagesSameFolderDuplicateDeliveries(t *testing.T) {
 	assertCountsMatchRecount(t, s, "acct")
 }
 
+// TestAppendThenConflictingDeliveryStaysSeparate pins the flags-agree
+// half of the dedupe rule: a Sent copy stored \Seen and the same
+// Message-ID delivered unflagged into INBOX (self-sent mail) are two
+// IMAP messages whose state one JMAP object cannot hold truthfully, so
+// they stay separate emails and the delivered copy counts as unread.
+func TestAppendThenConflictingDeliveryStaysSeparate(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if _, err := s.SyncFolders(ctx, "acct", testFolders()); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	rec := mkRec(26, "<self@x>", "self-sent", "me@example.test", []string{`\Seen`}, at)
+	if _, err := s.CommitAppend(ctx, "acct", "Sent", rec); err != nil {
+		t.Fatal(err)
+	}
+	delivered := mkRec(53, "<self@x>", "self-sent", "me@example.test", []string{`\Recent`}, at)
+	if err := s.PutMessages(ctx, "acct", "INBOX", []MessageRec{delivered}); err != nil {
+		t.Fatal(err)
+	}
+	emails, _, _, err := s.EmailsByID(ctx, "acct", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emails) != 2 {
+		t.Errorf("conflicting copies merged: %d emails, want 2", len(emails))
+	}
+	if _, total, unread := mailboxByName(t, s, "INBOX"); total != 1 || unread != 1 {
+		t.Errorf("inbox counts = %d/%d, want 1/1 (delivery is unread)", total, unread)
+	}
+	if _, total, _ := mailboxByName(t, s, "Sent"); total != 1 {
+		t.Errorf("sent total = %d, want 1", total)
+	}
+	assertCountsMatchRecount(t, s, "acct")
+}
+
 func TestFlagUpdateMovesUnreadAndState(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

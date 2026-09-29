@@ -116,7 +116,10 @@ requirements are `NFR-<n>`.
 - **FR-S.3** Initial backfill fetches per folder, in batches, `UID, FLAGS,
   INTERNALDATE, RFC822.SIZE, ENVELOPE, BODYSTRUCTURE` — **never full bodies**.
   It is resumable across restarts (no re-download of completed ranges) and
-  reports progress.
+  reports progress. Ingest deduplicates by Message-ID across folders only when
+  the copies' flag sets agree (ignoring `\Recent`) and never within one folder;
+  copies whose flags differ stay separate emails — one JMAP object cannot
+  truthfully carry two IMAP copies' keyword state.
 - **FR-S.4** Liveness: `IDLE` on INBOX and watched folders; on disconnect,
   exponential backoff reconnect; when IDLE is unavailable or unreliable, poll on
   `sync.interval`.
