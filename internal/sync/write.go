@@ -315,12 +315,14 @@ func (e *Engine) changeMembership(ctx context.Context, copies []store.Copy, addS
 		var res imapdrv.CopyResult
 		err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
 			var err error
+			e.log.Debug("sync: move", "from", moveSrc.Folder, "to", addPaths[dstID], "uid", moveSrc.UID)
 			res, err = conn.MoveUIDs(ctx, moveSrc.Folder, addPaths[dstID], []uint32{moveSrc.UID})
 			return err
 		})
 		if err != nil {
 			return nil, err
 		}
+		e.log.Debug("sync: move done", "destUIDs", res.DestUIDs, "destUIDValidity", res.DestUIDValidity)
 		adds := []store.MembershipAdd{{
 			MailboxID: dstID, UID: res.DestUIDs[moveSrc.UID], UIDValidity: res.DestUIDValidity,
 		}}
@@ -353,6 +355,7 @@ func (e *Engine) changeMembership(ctx context.Context, copies []store.Copy, addS
 		var res imapdrv.CopyResult
 		err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
 			var err error
+			e.log.Debug("sync: copy", "from", src.Folder, "to", addPaths[dstID], "uid", src.UID)
 			res, err = conn.CopyUIDs(ctx, src.Folder, addPaths[dstID], []uint32{src.UID})
 			return err
 		})
@@ -390,6 +393,7 @@ func (e *Engine) expungeCopies(ctx context.Context, copies []store.Copy, remove 
 	}
 	return e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
 		for folder, uids := range byFolder {
+			e.log.Debug("sync: expunge", "folder", folder, "uids", uids)
 			if err := conn.ExpungeUIDs(ctx, folder, uids); err != nil {
 				return err
 			}
