@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/keyword"
 )
@@ -41,20 +42,28 @@ type MembershipAdd struct {
 	UIDValidity uint32
 }
 
-// EmailLive reports whether an email exists and is not tombstoned — the
-// existence check behind "unknown id ⇒ notFound" (FR-M.13).
-func (s *Store) EmailLive(ctx context.Context, account, emailID string) (bool, error) {
+// EmailState reports whether an email row exists at all and whether it
+// is live (not tombstoned). The distinction matters: destroying an id
+// the cache has already tombstoned is a no-op success (FR-M.10), while
+// updating one — or destroying an id never seen — is notFound.
+func (s *Store) EmailState(ctx context.Context, account, emailID string) (exists, live bool, err error) {
 	var one int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT 1 FROM emails WHERE id = ? AND account = ? AND deleted IS NULL`,
+	err = s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM emails WHERE id = ? AND account = ?`,
 		emailID, account).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("store: email live: %w", err)
+		return false, false, fmt.Errorf("store: email state: %w", err)
 	}
-	return true, nil
+	var deleted sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT deleted FROM emails WHERE id = ? AND account = ?`,
+		emailID, account).Scan(&deleted); err != nil {
+		return false, false, fmt.Errorf("store: email state: %w", err)
+	}
+	return true, !deleted.Valid, nil
 }
 
 // EmailCopies returns every folder copy of one email, including the uid
@@ -114,80 +123,55 @@ func (s *Store) EmailCopies(ctx context.Context, account, emailID string) ([]Cop
 	return out, nil
 }
 
-// CommitKeywordPatch applies a keyword change the server already
-// accepted (FR-M.9): add sets, remove clears, and the unread counts and
-// type states follow exactly as they would for a foreign flag change.
-// It reports whether anything actually moved — an unchanged patch still
-// belongs in the response's `updated`, but must not manufacture a
-// state-string bump or an SSE event.
-func (s *Store) CommitKeywordPatch(ctx context.Context, account, emailID string, add, remove []string) (bool, error) {
-	changed := false
-	err := s.tx(ctx, account, true, func(tx *sql.Tx) error {
-		var kwJSON string
-		err := tx.QueryRowContext(ctx,
-			`SELECT keywords FROM emails WHERE id = ? AND account = ? AND deleted IS NULL`,
-			emailID, account).Scan(&kwJSON)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("store: keyword patch: %s is not live", emailID)
-		}
-		if err != nil {
-			return fmt.Errorf("store: keyword patch: %w", err)
-		}
-		kw := map[string]bool{}
-		if kwJSON != "" {
-			if err := jsonUnmarshal(kwJSON, &kw); err != nil {
-				return fmt.Errorf("store: decode keywords: %w", err)
-			}
-		}
-		for _, k := range add {
-			if !kw[k] {
-				kw[k] = true
-				changed = true
-			}
-		}
-		for _, k := range remove {
-			if kw[k] {
-				delete(kw, k)
-				changed = true
-			}
-		}
-		if !changed {
-			return nil
-		}
-		seq, err := nextSeq(ctx, tx)
-		if err != nil {
-			return err
-		}
-		if err := applyFlags(ctx, tx, account, emailID, kw, seq); err != nil {
-			return err
-		}
-		if err := bumpEmailState(ctx, tx, account, seq); err != nil {
-			return err
-		}
-		return bumpMailboxState(ctx, tx, account, seq)
-	})
-	return changed, err
-}
-
-// CommitMembershipPatch applies a mailbox membership change the server
-// already accepted: additions link (and map the new uid when COPYUID
-// gave us one), removals unlink and move counts, and an email that ends
-// up with no membership at all is tombstoned — the same code path a
-// foreign expunge takes, so /changes can never tell the two apart.
+// CommitPatch applies an Email/set update the server already accepted
+// (FR-M.9): keyword deltas and membership deltas in one transaction, so
+// the response's state string, the counters and the single SSE
+// notification all describe the same commit. IMAP-first means this runs
+// only after the STORE/COPY/MOVE/EXPUNGE returned OK.
 //
-// A patch can out-run the sync engine: if the engine saw our expunge
-// and tombstoned the email before this transaction ran, an addition
-// clears that tombstone again (the message demonstrably exists — we just
-// put it there).
-func (s *Store) CommitMembershipPatch(ctx context.Context, account, emailID string, adds []MembershipAdd, removes []string) error {
-	if len(adds) == 0 && len(removes) == 0 {
-		return nil
+// A patch can also out-run the sync engine: if the engine saw our
+// expunge and tombstoned the email before this transaction ran, an
+// addition clears that tombstone again (the message demonstrably exists
+// — we just put it there).
+func (s *Store) CommitPatch(ctx context.Context, account, emailID string, kwAdd, kwRemove []string, adds []MembershipAdd, removes []string) (kwChanged bool, err error) {
+	// Decide what actually moves before opening a transaction: a patch
+	// that changes nothing must not bump a state floor, allocate a seq
+	// or wake every connected client (the response still lists the id as
+	// updated — RFC 8620 §5.3 — it just isn't a /changes event).
+	cur, err := s.currentKeywords(ctx, account, emailID)
+	if err != nil {
+		return false, err
 	}
-	return s.tx(ctx, account, true, func(tx *sql.Tx) error {
+	kwAdd = diffAdd(kwAdd, cur)
+	kwRemove = diffRemove(kwRemove, cur)
+	kwChanged = len(kwAdd) > 0 || len(kwRemove) > 0
+	if !kwChanged && len(adds) == 0 && len(removes) == 0 {
+		return false, nil
+	}
+
+	err = s.tx(ctx, account, true, func(tx *sql.Tx) error {
 		seq, err := nextSeq(ctx, tx)
 		if err != nil {
 			return err
 		}
+		// --- keywords ---
+		if kwChanged {
+			kw := map[string]bool{}
+			for k, v := range cur {
+				kw[k] = v
+			}
+			for _, k := range kwAdd {
+				kw[k] = true
+			}
+			for _, k := range kwRemove {
+				delete(kw, k)
+			}
+			if err := applyFlags(ctx, tx, account, emailID, kw, seq); err != nil {
+				return err
+			}
+		}
+
+		// --- membership ---
 		for _, add := range adds {
 			mailboxUID, path, err := mailboxByID(ctx, tx, account, add.MailboxID)
 			if err != nil {
@@ -220,6 +204,118 @@ func (s *Store) CommitMembershipPatch(ctx context.Context, account, emailID stri
 			if removed {
 				orphans = append(orphans, orphan{uid: mailboxUID, id: emailID})
 			}
+		}
+		if len(orphans) > 0 {
+			if err := orphanEmails(ctx, tx, account, seq, orphans); err != nil {
+				return err
+			}
+		}
+
+		if err := bumpEmailState(ctx, tx, account, seq); err != nil {
+			return err
+		}
+		return bumpMailboxState(ctx, tx, account, seq)
+	})
+	return kwChanged, err
+}
+
+// EmailKeywords reads one email's keyword set (no hydration side
+// effects — the backend needs it to resolve the whole-property patch
+// form before it can talk to the server).
+func (s *Store) EmailKeywords(ctx context.Context, account, emailID string) (map[string]bool, error) {
+	return s.currentKeywords(ctx, account, emailID)
+}
+
+// currentKeywords reads one email's keyword set ("" row → error: the
+// caller has already established the email exists).
+func (s *Store) currentKeywords(ctx context.Context, account, emailID string) (map[string]bool, error) {
+	var kwJSON string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT keywords FROM emails WHERE id = ? AND account = ?`,
+		emailID, account).Scan(&kwJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("store: patch: %s not found", emailID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: patch keywords: %w", err)
+	}
+	kw := map[string]bool{}
+	if kwJSON != "" {
+		if err := jsonUnmarshal(kwJSON, &kw); err != nil {
+			return nil, fmt.Errorf("store: decode keywords: %w", err)
+		}
+	}
+	return kw, nil
+}
+
+// diffAdd/diffRemove reduce a requested delta to the part that is
+// actually a change.
+func diffAdd(want []string, have map[string]bool) []string {
+	var out []string
+	for _, k := range want {
+		if !have[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func diffRemove(want []string, have map[string]bool) []string {
+	var out []string
+	for _, k := range want {
+		if have[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// EmptyFolder removes every message a folder holds from the cache —
+// the local half of destroying a mailbox with onDestroyRemoveEmails
+// (RFC 8621 §2.5): each copy is unlinked, mail that lived only there is
+// tombstoned, and the uid mappings go with them.
+func (s *Store) EmptyFolder(ctx context.Context, account, folder string) error {
+	return s.tx(ctx, account, true, func(tx *sql.Tx) error {
+		mailboxUID, _, err := folderRow(ctx, tx, account, folder)
+		if err != nil {
+			return err
+		}
+		seq, err := nextSeq(ctx, tx)
+		if err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx,
+			`SELECT DISTINCT email_id FROM imap_uids WHERE account = ? AND folder = ?`,
+			account, folder)
+		if err != nil {
+			return fmt.Errorf("store: folder members: %w", err)
+		}
+		var emailIDs []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			emailIDs = append(emailIDs, id)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		var orphans []orphan
+		for _, emailID := range emailIDs {
+			removed, err := removeMembershipLocked(ctx, tx, account, mailboxUID, folder, emailID, seq)
+			if err != nil {
+				return err
+			}
+			if removed {
+				orphans = append(orphans, orphan{uid: mailboxUID, id: emailID})
+			}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM imap_uids WHERE account = ? AND folder = ?`, account, folder); err != nil {
+			return fmt.Errorf("store: drop folder uids: %w", err)
 		}
 		if len(orphans) > 0 {
 			if err := orphanEmails(ctx, tx, account, seq, orphans); err != nil {
@@ -289,12 +385,20 @@ func (s *Store) CommitDestroy(ctx context.Context, account string, ids []string)
 	})
 }
 
+// AppendResult is what a committed APPEND produced: the new id plus the
+// server-set properties RFC 8621 §4.6 requires in Email/set `created`.
+type AppendResult struct {
+	ID       string
+	ThreadID string
+	Size     int64
+}
+
 // CommitAppend inserts a message the bridge itself just APPENDed (the
-// draft path, FR-M.11) and returns its JMAP id. The record carries the
-// uid the server assigned, so cache and server agree from the first
-// read instead of waiting for a sync pass to notice the new message.
-func (s *Store) CommitAppend(ctx context.Context, account, folder string, rec MessageRec) (string, error) {
-	var id string
+// draft path, FR-M.11). The record carries the uid the server assigned,
+// so cache and server agree from the first read instead of waiting for
+// a sync pass to notice the new message.
+func (s *Store) CommitAppend(ctx context.Context, account, folder string, rec MessageRec) (AppendResult, error) {
+	var out AppendResult
 	err := s.tx(ctx, account, true, func(tx *sql.Tx) error {
 		mailboxUID, _, err := folderRow(ctx, tx, account, folder)
 		if err != nil {
@@ -304,9 +408,15 @@ func (s *Store) CommitAppend(ctx context.Context, account, folder string, rec Me
 		if err != nil {
 			return err
 		}
-		id, err = createMessage(ctx, tx, account, mailboxUID, folder, &rec, keyword.FromIMAP(rec.Flags), seq)
+		id, err := createMessage(ctx, tx, account, mailboxUID, folder, &rec, keyword.FromIMAP(rec.Flags), seq)
 		if err != nil {
 			return err
+		}
+		out.ID = id
+		if err := tx.QueryRowContext(ctx,
+			`SELECT thread_id, size FROM emails WHERE id = ? AND account = ?`,
+			id, account).Scan(&out.ThreadID, &out.Size); err != nil {
+			return fmt.Errorf("store: read created email: %w", err)
 		}
 		if err := touchMailboxCounts(ctx, tx, account, mailboxUID, seq); err != nil {
 			return err
@@ -315,6 +425,26 @@ func (s *Store) CommitAppend(ctx context.Context, account, folder string, rec Me
 			return err
 		}
 		return bumpMailboxState(ctx, tx, account, seq)
+	})
+	if err != nil {
+		return AppendResult{}, err
+	}
+	return out, nil
+}
+
+// PutBlob stores one immutable blob (the raw bytes of a message we just
+// built, so Email/set `created` can answer with a blobId and M3's
+// submission can reuse the bytes) and returns its id.
+func (s *Store) PutBlob(ctx context.Context, account, mediaType string, data []byte) (string, error) {
+	var id string
+	// No publish: a blob is not a JMAP object, and no type state moves.
+	err := s.tx(ctx, "", false, func(tx *sql.Tx) error {
+		seq, err := nextSeq(ctx, tx)
+		if err != nil {
+			return err
+		}
+		id = newID(time.Now(), seq)
+		return s.blobs.put(ctx, tx, account, id, mediaType, data)
 	})
 	if err != nil {
 		return "", err
@@ -375,10 +505,12 @@ func (s *Store) MailboxIDByRole(ctx context.Context, account, role string) (stri
 
 // CommitMailboxRename rewrites a mailbox's path in place after the
 // server accepted RENAME, keeping its id — RFC 8621 §5.1: renaming is
-// an update, never a new object — and rewriting every descendant path
-// with it. Descendants keep their own parent ids; only the renamed row
-// moves.
-func (s *Store) CommitMailboxRename(ctx context.Context, account, id, oldPath, newPath, newParentID string, delim rune) error {
+// an update, never a new object. renameChildren reports what LIST said
+// the server did to the subtree: conformant servers rename descendants
+// too (RFC 3501 §6.3.5), others move only the node, and the cache must
+// follow LIST either way (golden rule 1). Descendants keep their own
+// parent ids; only the renamed row moves.
+func (s *Store) CommitMailboxRename(ctx context.Context, account, id, oldPath, newPath, newParentID string, delim rune, renameChildren bool) error {
 	if oldPath == newPath {
 		return nil
 	}
@@ -403,7 +535,7 @@ func (s *Store) CommitMailboxRename(ctx context.Context, account, id, oldPath, n
 			newPath, nullStr(newParentID), seq, id, account); err != nil {
 			return fmt.Errorf("store: rename mailbox: %w", err)
 		}
-		if delim != 0 {
+		if renameChildren && delim != 0 {
 			prefix := escapeLike(oldPath+string(delim)) + "%"
 			// length()/substr() keep the offset in characters, so a
 			// non-ASCII folder name does not split a rune.

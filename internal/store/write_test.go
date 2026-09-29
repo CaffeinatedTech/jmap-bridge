@@ -60,7 +60,7 @@ func TestCommitKeywordPatchMovesCountsAndState(t *testing.T) {
 		t.Fatalf("unread before = %d, want 1", unread)
 	}
 
-	changed, err := s.CommitKeywordPatch(ctx, "acct", id, []string{"$seen", "$flagged"}, nil)
+	changed, err := s.CommitPatch(ctx, "acct", id, []string{"$seen", "$flagged"}, nil, nil, nil)
 	if err != nil || !changed {
 		t.Fatalf("commit add: changed=%v err=%v", changed, err)
 	}
@@ -87,7 +87,7 @@ func TestCommitKeywordPatchMovesCountsAndState(t *testing.T) {
 	}
 
 	// Removal is the mirror image (FR-M.9: null removes).
-	changed, err = s.CommitKeywordPatch(ctx, "acct", id, nil, []string{"$flagged", "$seen"})
+	changed, err = s.CommitPatch(ctx, "acct", id, nil, []string{"$flagged", "$seen"}, nil, nil)
 	if err != nil || !changed {
 		t.Fatalf("commit remove: changed=%v err=%v", changed, err)
 	}
@@ -97,7 +97,7 @@ func TestCommitKeywordPatchMovesCountsAndState(t *testing.T) {
 
 	// A patch that changes nothing must not move state (no SSE storm).
 	still, _ := s.EmailStateString(ctx, "acct")
-	changed, err = s.CommitKeywordPatch(ctx, "acct", id, nil, []string{"$flagged"})
+	changed, err = s.CommitPatch(ctx, "acct", id, nil, []string{"$flagged"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestCommitMembershipPatchMoveCopyAndLastRemoval(t *testing.T) {
 	}
 
 	// Copy into Archive with the uid the server's COPYUID reported.
-	if err := s.CommitMembershipPatch(ctx, "acct", id,
+	if _, err := s.CommitPatch(ctx, "acct", id, nil, nil,
 		[]MembershipAdd{{MailboxID: archiveID, UID: 42, UIDValidity: 7}}, nil); err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -147,10 +147,10 @@ func TestCommitMembershipPatchMoveCopyAndLastRemoval(t *testing.T) {
 	}
 
 	// Remove from INBOX: the message lives on in Archive.
-	if err := s.CommitMembershipPatch(ctx, "acct", id, nil, []string{inboxID}); err != nil {
+	if _, err := s.CommitPatch(ctx, "acct", id, nil, nil, nil, []string{inboxID}); err != nil {
 		t.Fatalf("remove inbox: %v", err)
 	}
-	if live, err := s.EmailLive(ctx, "acct", id); err != nil || !live {
+	if _, live, err := s.EmailState(ctx, "acct", id); err != nil || !live {
 		t.Fatalf("email live after one removal: live=%v err=%v", live, err)
 	}
 	if _, total, _ := mailboxByName(t, s, "INBOX"); total != 0 {
@@ -160,10 +160,10 @@ func TestCommitMembershipPatchMoveCopyAndLastRemoval(t *testing.T) {
 	// Remove the last membership: tombstone, exactly as a foreign
 	// expunge would have done.
 	state, _ := s.EmailStateString(ctx, "acct")
-	if err := s.CommitMembershipPatch(ctx, "acct", id, nil, []string{archiveID}); err != nil {
+	if _, err := s.CommitPatch(ctx, "acct", id, nil, nil, nil, []string{archiveID}); err != nil {
 		t.Fatalf("remove archive: %v", err)
 	}
-	if live, err := s.EmailLive(ctx, "acct", id); err != nil || live {
+	if _, live, err := s.EmailState(ctx, "acct", id); err != nil || live {
 		t.Errorf("email still live after losing its last mailbox: live=%v err=%v", live, err)
 	}
 	cs, err := s.Changes(ctx, "acct", "Email", state)
@@ -187,11 +187,11 @@ func TestCommitMembershipRestoreClearsRaceTombstone(t *testing.T) {
 	}
 	// The sync engine can expunge-ahead of our commit; the copy we just
 	// created must bring the email back rather than join a tombstone.
-	if err := s.CommitMembershipPatch(ctx, "acct", id,
+	if _, err := s.CommitPatch(ctx, "acct", id, nil, nil,
 		[]MembershipAdd{{MailboxID: archiveID, UID: 5, UIDValidity: 7}}, nil); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-	if live, err := s.EmailLive(ctx, "acct", id); err != nil || !live {
+	if _, live, err := s.EmailState(ctx, "acct", id); err != nil || !live {
 		t.Fatalf("restored email live=%v err=%v", live, err)
 	}
 	copies, err := s.EmailCopies(ctx, "acct", id)
@@ -226,8 +226,12 @@ func TestCommitDestroyDropsEveryMembership(t *testing.T) {
 	if err := s.CommitDestroy(ctx, "acct", []string{id}); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
-	if live, err := s.EmailLive(ctx, "acct", id); err != nil || live {
+	exists, live, err := s.EmailState(ctx, "acct", id)
+	if err != nil || live {
 		t.Errorf("email live after destroy: live=%v err=%v", live, err)
+	}
+	if !exists {
+		t.Error("destroyed email lost its row: /changes could no longer replay it as a tombstone")
 	}
 	if got, err := s.EmailCopies(ctx, "acct", id); err != nil || len(got) != 0 {
 		t.Errorf("copies after destroy = %#v (err %v), want none", got, err)
@@ -254,14 +258,18 @@ func TestCommitAppendMintsIDAndMapsUID(t *testing.T) {
 	}
 	rec := mkRec(11, "<draft@example>", "Draft subject", "me@example.test",
 		[]string{`\Draft`, `\Seen`}, time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC))
-	id, err := s.CommitAppend(ctx, "acct", "INBOX", rec)
+	res, err := s.CommitAppend(ctx, "acct", "INBOX", rec)
 	if err != nil {
 		t.Fatalf("commit append: %v", err)
 	}
+	id := res.ID
 	if id == "" {
 		t.Fatal("no id minted")
 	}
-	if live, err := s.EmailLive(ctx, "acct", id); err != nil || !live {
+	if res.ThreadID == "" || res.Size != rec.Size {
+		t.Errorf("created facts = thread %q size %d, want thread and size %d", res.ThreadID, res.Size, rec.Size)
+	}
+	if _, live, err := s.EmailState(ctx, "acct", id); err != nil || !live {
 		t.Fatalf("appended email live=%v err=%v", live, err)
 	}
 	copies, err := s.EmailCopies(ctx, "acct", id)
@@ -297,7 +305,7 @@ func TestCommitMailboxRenameRewritesDescendants(t *testing.T) {
 	childID, _, _ := mailboxByName(t, s, "Archive/2026")
 	before, _ := s.MailboxStateString(ctx, "acct")
 
-	if err := s.CommitMailboxRename(ctx, "acct", archiveID, "Archive", "Old", "", '/'); err != nil {
+	if err := s.CommitMailboxRename(ctx, "acct", archiveID, "Archive", "Old", "", '/', true); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	renamed, _, _ := mailboxByName(t, s, "Old")

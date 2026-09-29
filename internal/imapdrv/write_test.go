@@ -43,19 +43,22 @@ func TestWriteCopyMoveAndExpunge(t *testing.T) {
 	if err := c.CreateMailbox(ctx, "Archive"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	pairs, err := c.CopyUIDs(ctx, "INBOX", "Archive", []uint32{uid})
+	res, err := c.CopyUIDs(ctx, "INBOX", "Archive", []uint32{uid})
 	if err != nil {
 		t.Fatalf("copy: %v", err)
 	}
-	if len(pairs) != 1 || pairs[uid] == 0 {
-		t.Errorf("copy mapping = %v, want the source uid mapped to a fresh one", pairs)
+	if len(res.DestUIDs) != 1 || res.DestUIDs[uid] == 0 {
+		t.Errorf("copy mapping = %v, want the source uid mapped to a fresh one", res.DestUIDs)
+	}
+	if c.SupportsUIDPlus() && res.DestUIDValidity == 0 {
+		t.Error("copy reported no destination uidvalidity")
 	}
 	if got := uidsAt(t, s, "Archive"); len(got) != 1 {
 		t.Errorf("Archive uids = %v, want one copy", got)
 	}
 
 	// Expunge the copy: the original must survive (UIDPLUS precision).
-	if err := c.ExpungeUIDs(ctx, "Archive", []uint32{pairs[uid]}); err != nil {
+	if err := c.ExpungeUIDs(ctx, "Archive", []uint32{res.DestUIDs[uid]}); err != nil {
 		t.Fatalf("expunge: %v", err)
 	}
 	if got := uidsAt(t, s, "Archive"); len(got) != 0 {
@@ -70,7 +73,7 @@ func TestWriteCopyMoveAndExpunge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("move: %v", err)
 	}
-	if len(moved) == 0 {
+	if len(moved.DestUIDs) == 0 {
 		t.Error("move returned no COPYUID mapping")
 	}
 	if got := uidsAt(t, s, "INBOX"); len(got) != 0 {

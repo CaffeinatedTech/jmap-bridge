@@ -88,24 +88,36 @@ func (c *Conn) StoreFlags(ctx context.Context, folder string, uids []uint32, add
 	return nil
 }
 
-// CopyUIDs copies uids from one folder to another and returns the
-// source→destination uid mapping the COPYUID response gives (RFC 4315
-// §3). A nil map with no error means the server sent no COPYUID: the
-// copy happened, but the destination uid must come from the next sync
-// pass instead (documented degradation, no UIDPLUS).
-func (c *Conn) CopyUIDs(ctx context.Context, from, to string, uids []uint32) (map[uint32]uint32, error) {
+// CopyResult is what a COPY or MOVE reported: the source→destination
+// uid pairs (empty when the server sent no COPYUID, RFC 4315 §3) and
+// the destination's UIDVALIDITY, which the local commit needs to key
+// the new uid mapping.
+type CopyResult struct {
+	DestUIDs        map[uint32]uint32
+	DestUIDValidity uint32
+}
+
+// CopyUIDs copies uids from one folder to another. An empty DestUIDs
+// with no error means the copy happened but the server sent no COPYUID
+// (no UIDPLUS): the destination uid must come from the next sync pass
+// instead — a documented degradation, not a failure.
+func (c *Conn) CopyUIDs(ctx context.Context, from, to string, uids []uint32) (CopyResult, error) {
 	if len(uids) == 0 {
-		return map[uint32]uint32{}, nil
+		return CopyResult{}, nil
 	}
 	if err := c.selectRW(ctx, from); err != nil {
-		return nil, err
+		return CopyResult{}, err
 	}
 	defer c.releaseSelection(ctx)
 	data, err := c.client.CopyUID(uidSet(uids), to, nil).Wait(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("imapdrv: copy %q → %q: %w", from, to, err)
+		return CopyResult{}, fmt.Errorf("imapdrv: copy %q → %q: %w", from, to, err)
 	}
-	return uidPairs(data), nil
+	res := CopyResult{DestUIDs: uidPairs(data)}
+	if data != nil {
+		res.DestUIDValidity = data.UIDValidity
+	}
+	return res, nil
 }
 
 // MoveUIDs moves uids from one folder to another (RFC 6851), returning
@@ -114,25 +126,29 @@ func (c *Conn) CopyUIDs(ctx context.Context, from, to string, uids []uint32) (ma
 // (COPY + STORE \Deleted + EXPUNGE), which is not atomic — the caller
 // learns about that only through the log line here, and the local commit
 // that follows is driven by the mapping, never by hope.
-func (c *Conn) MoveUIDs(ctx context.Context, from, to string, uids []uint32) (map[uint32]uint32, error) {
+func (c *Conn) MoveUIDs(ctx context.Context, from, to string, uids []uint32) (CopyResult, error) {
 	if len(uids) == 0 {
-		return map[uint32]uint32{}, nil
+		return CopyResult{}, nil
 	}
 	if err := c.selectRW(ctx, from); err != nil {
-		return nil, err
+		return CopyResult{}, err
 	}
 	defer c.releaseSelection(ctx)
 	data, err := c.client.MoveUID(ctx, uidSet(uids), to, &imapclient.MoveOptions{
 		AllowNonAtomicFallback: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("imapdrv: move %q → %q: %w", from, to, err)
+		return CopyResult{}, fmt.Errorf("imapdrv: move %q → %q: %w", from, to, err)
 	}
 	if data.ExpungedEveryDeletedMessage {
 		c.log.Warn("imapdrv: move fell back to bare EXPUNGE (no MOVE, no UIDPLUS)",
 			"from", from, "to", to)
 	}
-	return uidPairs(&data.UIDPlus), nil
+	res := CopyResult{DestUIDs: uidPairs(&data.UIDPlus)}
+	if data.UIDPlus.HasUIDs {
+		res.DestUIDValidity = data.UIDPlus.UIDValidity
+	}
+	return res, nil
 }
 
 // ExpungeUIDs permanently removes uids from folder: STORE \Deleted,
@@ -211,6 +227,13 @@ func (c *Conn) DeleteMailbox(ctx context.Context, path string) error {
 		return fmt.Errorf("imapdrv: delete %q: %w", path, err)
 	}
 	return nil
+}
+
+// Ping proves the connection is still alive (a write session probes
+// before its first command so a socket the server dropped hours ago
+// fails before a COPY can be half-applied).
+func (c *Conn) Ping(ctx context.Context) error {
+	return c.client.Noop(nil).Wait(ctx)
 }
 
 // SupportsMove reports RFC 6851 availability (the caller prefers a
