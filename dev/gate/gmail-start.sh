@@ -11,7 +11,19 @@ fi
 set -a
 source .env
 set +a
-go build -o /tmp/opencode/jmap-bridge-gmail ./cmd/jmap-bridge
+# Build from the committed tree when the working tree is dirty: the
+# gate result must describe M4, never half-landed work from another
+# milestone's session happening to share this checkout.
+SRC="$PWD"
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  # Sibling of the repo so the go.mod replace to ../go-imap resolves.
+  SRC="$PWD/../jmap-bridge-gate-src"
+  rm -rf "$SRC"
+  git worktree add --detach "$SRC" HEAD >/dev/null 2>&1 || {
+    echo "could not snapshot HEAD for a clean build" >&2; exit 1; }
+fi
+go build -C "$SRC" -o /tmp/opencode/jmap-bridge-gmail ./cmd/jmap-bridge || exit 1
+if [ "$SRC" != "$PWD" ]; then git worktree remove --force "$SRC" >/dev/null 2>&1 || true; fi
 /tmp/opencode/jmap-bridge-gmail --config dev/config-gmail.toml > /tmp/opencode/bridge-gmail.log 2>&1 &
 echo $! > /tmp/opencode/bridge-gmail.pid
 for i in $(seq 1 50); do
