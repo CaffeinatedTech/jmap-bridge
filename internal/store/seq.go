@@ -129,6 +129,27 @@ func bumpEmailState(ctx context.Context, tx *sql.Tx, account string, seq int64) 
 	return saveMeta(ctx, tx, account, m)
 }
 
+// MintID allocates a fresh object id for something the bridge does not
+// persist: EmailSubmission ids, which RFC 8621 §7 allows a server to
+// destroy as soon as the message has been relayed. The global seq
+// counter still allocates it, so such an id can never collide with a
+// stored one.
+func (s *Store) MintID(ctx context.Context) (string, error) {
+	var id string
+	err := s.tx(ctx, "", false, func(tx *sql.Tx) error {
+		seq, err := nextSeq(ctx, tx)
+		if err != nil {
+			return err
+		}
+		id = newID(time.Now(), seq)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // queryer is satisfied by both *sql.DB and *sql.Tx.
 type queryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)

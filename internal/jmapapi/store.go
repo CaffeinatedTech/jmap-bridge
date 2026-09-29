@@ -52,6 +52,11 @@ type Email struct {
 	ID       string
 	ThreadID string
 
+	// BlobID is the id of the raw RFC 5322 bytes when the bridge holds
+	// them (RFC 8621 §4.1.1); "" while they have not been cached yet —
+	// bodies are lazy (D-2), and the raw copy arrives with them.
+	BlobID string
+
 	MailboxIDs []string
 	Keywords   map[string]bool
 
@@ -181,4 +186,14 @@ type Store interface {
 	// Changes replays changes of kind ("Mailbox" or "Email") since
 	// sinceState, or returns ErrCannotCalculateChanges when it cannot.
 	Changes(ctx context.Context, account, kind, sinceState string) (ChangeSet, error)
+
+	// PutBlob stores an immutable blob for the account and returns its
+	// id (FR-M.16, RFC 8620 §6.1). The account it is filed under is the
+	// one that may read it back (FR-M.17, FR-A.11).
+	PutBlob(ctx context.Context, account, mediaType string, data []byte) (string, error)
+
+	// ReadBlob returns a blob's bytes and media type. An id that does
+	// not exist in this account fails with ErrBlobNotFound, which the
+	// download endpoint answers as a 404 (FR-M.17).
+	ReadBlob(ctx context.Context, account, id string) ([]byte, string, error)
 }

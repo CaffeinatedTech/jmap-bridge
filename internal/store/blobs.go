@@ -3,10 +3,13 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
 )
 
 // BlobStore stores immutable blobs (attachments, later uploads and
@@ -47,14 +50,16 @@ func (b *BlobStore) put(ctx context.Context, tx *sql.Tx, account, id, mediaType 
 
 // ReadBlob returns a blob's bytes and media type. The account must
 // match the one that stored it (FR-A.11: ids never cross accounts,
-// FR-M.17 rejects foreign ids).
+// FR-M.17 rejects foreign ids): an id this account does not hold fails
+// with [jmapapi.ErrBlobNotFound], which the download endpoint turns
+// into a 404.
 func (s *Store) ReadBlob(ctx context.Context, account, id string) ([]byte, string, error) {
 	var rel, mediaType string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT path, COALESCE(media_type, 'application/octet-stream') FROM blobs
 		 WHERE id = ? AND account = ?`, id, account).Scan(&rel, &mediaType)
-	if err == sql.ErrNoRows {
-		return nil, "", fmt.Errorf("store: blob %s not found", id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", fmt.Errorf("%w: %s", jmapapi.ErrBlobNotFound, id)
 	}
 	if err != nil {
 		return nil, "", err

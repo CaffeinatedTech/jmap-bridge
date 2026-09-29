@@ -452,6 +452,46 @@ func (s *Store) PutBlob(ctx context.Context, account, mediaType string, data []b
 	return id, nil
 }
 
+// LinkRawBlob records blobID as the message's raw RFC 5322 copy
+// (FR-M.4's blobId, RFC 8621 §4.1.1). Blob and message are already in
+// the store; this only says they refer to the same bytes.
+func (s *Store) LinkRawBlob(ctx context.Context, account, emailID, blobID string) error {
+	// No publish: the blob id appears lazily like a body, and no type
+	// state moves with it (the SSE layer only emits states that did).
+	return s.tx(ctx, "", false, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE email_content SET raw_blob_id = ?
+			 WHERE id = ? AND EXISTS (SELECT 1 FROM emails WHERE id = ? AND account = ?)`,
+			blobID, emailID, emailID, account)
+		if err != nil {
+			return fmt.Errorf("store: link raw blob: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("store: link raw blob: email %s not found in account %s", emailID, account)
+		}
+		return nil
+	})
+}
+
+// RawBlobID returns the blob holding the email's raw message, or ""
+// when the bridge does not hold those bytes (they are fetched on
+// demand, bodies being lazy — D-2).
+func (s *Store) RawBlobID(ctx context.Context, account, emailID string) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(c.raw_blob_id, '') FROM email_content c
+		 JOIN emails e ON e.id = c.id
+		 WHERE c.id = ? AND e.account = ? AND e.deleted IS NULL`,
+		emailID, account).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: raw blob id: %w", err)
+	}
+	return id, nil
+}
+
 // --- mailbox resolution and commits (FR-M.12) ---
 
 // MailboxPath resolves a mailbox id to its IMAP path.

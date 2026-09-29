@@ -7,6 +7,7 @@ package fixture
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -21,11 +22,48 @@ import (
 type Store struct {
 	mu       sync.RWMutex
 	accounts map[string]*accountData
+	blobs    map[string]map[string]blobRec // account → blobId → bytes
+	blobSeq  int
 }
 
 type accountData struct {
 	mailboxes []*jmapapi.Mailbox
 	emails    []*jmapapi.Email
+}
+
+type blobRec struct {
+	mediaType string
+	data      []byte
+}
+
+// PutBlob implements jmapapi.Store: an in-memory blob for FR-M.16's
+// upload endpoint, ids minted per store so two accounts never share one.
+func (s *Store) PutBlob(_ context.Context, account, mediaType string, data []byte) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.blobs == nil {
+		s.blobs = map[string]map[string]blobRec{}
+	}
+	if s.blobs[account] == nil {
+		s.blobs[account] = map[string]blobRec{}
+	}
+	s.blobSeq++
+	id := fmt.Sprintf("blob%08d", s.blobSeq)
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	s.blobs[account][id] = blobRec{mediaType: mediaType, data: cp}
+	return id, nil
+}
+
+// ReadBlob implements jmapapi.Store (FR-M.17): ids never cross accounts.
+func (s *Store) ReadBlob(_ context.Context, account, id string) ([]byte, string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec, ok := s.blobs[account][id]
+	if !ok {
+		return nil, "", fmt.Errorf("%w: %s", jmapapi.ErrBlobNotFound, id)
+	}
+	return rec.data, rec.mediaType, nil
 }
 
 // States are static: the fixture never mutates, so every type state is

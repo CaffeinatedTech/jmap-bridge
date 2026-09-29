@@ -286,7 +286,7 @@ func (s *Store) loadEmails(ctx context.Context, account string, ids []string) ([
 		rows, err := s.db.QueryContext(ctx,
 			`SELECT e.id, e.thread_id, e.keywords, e.received_at, e.size, e.has_attachment,
 			        e.preview, c.headers, c.message_ids, c.in_reply_to, c."references",
-			        c.body_structure, c.body_values, c.hydrated_at
+			        c.body_structure, c.body_values, c.hydrated_at, c.raw_blob_id
 			 FROM emails e JOIN email_content c ON c.id = e.id
 			 WHERE e.account = ? AND e.deleted IS NULL AND e.id IN (`+ph+`)`,
 			append([]any{account}, args...)...)
@@ -362,13 +362,14 @@ func scanEmail(rows *sql.Rows) (*jmapapi.Email, error) {
 		structure string
 		values    string
 		hydrated  sql.NullInt64
+		rawBlob   sql.NullString
 		received  int64
 		size      int64
 		hasAtt    int
 		preview   string
 	)
 	err := rows.Scan(&em.ID, &em.ThreadID, &kwJSON, &received, &size, &hasAtt,
-		&preview, &headers, &msgIDs, &inReply, &refs, &structure, &values, &hydrated)
+		&preview, &headers, &msgIDs, &inReply, &refs, &structure, &values, &hydrated, &rawBlob)
 	if err != nil {
 		return nil, fmt.Errorf("store: scan email: %w", err)
 	}
@@ -376,6 +377,9 @@ func scanEmail(rows *sql.Rows) (*jmapapi.Email, error) {
 	em.Size = size
 	em.HasAttachment = hasAtt != 0
 	em.Preview = preview
+	if rawBlob.Valid {
+		em.BlobID = rawBlob.String
+	}
 	if err := json.Unmarshal([]byte(kwJSON), &em.Keywords); err != nil {
 		return nil, fmt.Errorf("store: decode keywords: %w", err)
 	}

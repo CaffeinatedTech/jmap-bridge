@@ -518,6 +518,12 @@ func (e *Engine) CreateDraft(ctx context.Context, account string, spec jmapapi.D
 	if err != nil {
 		return nil, err
 	}
+	// The bytes we just appended are the message's raw copy: linking
+	// them gives Email/get its blobId and lets a later submission send
+	// exactly what the client saved (FR-M.15, RFC 8621 §4.1.1).
+	if err := e.st.LinkRawBlob(ctx, account, created.ID, blobID); err != nil {
+		e.log.Warn("sync: draft raw copy not linked", "email", created.ID, "err", err)
+	}
 	// Body values and attachment blobs are already known from the build;
 	// a failure here only costs a hydration fetch on the next read.
 	if err := e.st.PutHydrated(ctx, account, created.ID, draft.Body); err != nil {

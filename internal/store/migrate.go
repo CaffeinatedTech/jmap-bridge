@@ -143,6 +143,15 @@ CREATE TABLE tokens (               -- client-facing auth tokens
 );
 
 `,
+	// v2 (M3): the raw RFC 5322 copy of a message, when the bridge
+	// holds it. Email/get answers `blobId` from it (RFC 8621 §4.1.1) and
+	// EmailSubmission/set submits exactly these bytes, so an attachment
+	// round-trips byte-exact through send. It is filled lazily — the
+	// bytes exist once we built the message (draft create) or fetched it
+	// to send it — never downloaded just to answer a list.
+	`
+ALTER TABLE email_content ADD COLUMN raw_blob_id TEXT;
+`,
 }
 
 // migrate applies every not-yet-applied migration and refuses a database
