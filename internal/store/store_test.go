@@ -83,16 +83,23 @@ func TestSyncFoldersHierarchyAndRoles(t *testing.T) {
 	if mbs[0].Role != "inbox" || mbs[0].Name != "INBOX" {
 		t.Errorf("first mailbox = %q (%q), want INBOX/inbox", mbs[0].Name, mbs[0].Role)
 	}
-	byName := map[string]*jmapapi.Mailbox{}
+	byPath := map[string]*jmapapi.Mailbox{}
 	for _, mb := range mbs {
-		byName[mb.Name] = mb
+		byPath[mb.Path] = mb
 	}
-	child := byName["Archive/2026"]
+	child := byPath["Archive/2026"]
 	if child == nil || child.ParentID == "" {
 		t.Fatalf("Archive/2026 parent not resolved: %#v", child)
 	}
-	if child.ParentID != byName["Archive"].ID {
+	if child.ParentID != byPath["Archive"].ID {
 		t.Errorf("Archive/2026 parent = %s, want Archive id", child.ParentID)
+	}
+	// The wire name is the leaf: nesting travels in parentId, so a client
+	// matching "2026" in a tree finds it (RFC 8621 §2, FR-M.1) — the same
+	// shape Fastmail answers with.
+	if child.Name != "2026" {
+		t.Errorf("nested mailbox name = %q, want the leaf %q (path stays %q)",
+			child.Name, "2026", child.Path)
 	}
 	// A folder vanishing is a destroy, not a silent delete.
 	kept := append([]Folder(nil), testFolders()[:3]...)

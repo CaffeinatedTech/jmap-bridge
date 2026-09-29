@@ -153,8 +153,9 @@ requirements are `NFR-<n>`.
 
 - **FR-M.1 `Mailbox/get`** returns all mailboxes (or by id) with: id, name,
   parent, role, sortOrder, counts (total/unread emails and threads), `may*`
-  rights, and the type's state string. Hierarchy is preserved exactly as the
-  server exposes it.
+  rights, and the type's state string. `name` is the **leaf** (e.g. `2026` for
+  `Archive/2026`, the shape Fastmail answers); nesting travels in `parentId`,
+  the IMAP folder path never leaves the server.
 - **FR-M.2 `Mailbox/query`** supports filtering (`parentId`, `role`) and sorting
   by `sortOrder` ascending, plus `position`/`limit`/`calculateTotal`.
 - **FR-M.3 `Mailbox/changes`** returns created/updated/destroyed ids since

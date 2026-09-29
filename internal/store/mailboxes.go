@@ -317,19 +317,29 @@ func parentID(f Folder, incoming map[string]Folder, existing map[string]*mailbox
 }
 
 // Mailboxes implements [jmapapi.Store]: every live mailbox, plus the
-// Mailbox type state.
+// Mailbox type state. Each row carries both names — Path (the IMAP
+// folder path the column stores) and Name (the leaf the wire serves,
+// derived from the parent's path; a one-character hierarchy separator is
+// what IMAP defines, RFC 3501 §4.3).
 func (s *Store) Mailboxes(ctx context.Context, account string) ([]*jmapapi.Mailbox, string, error) {
 	state, err := s.MailboxStateString(ctx, account)
 	if err != nil {
 		return nil, "", err
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, parent_id, role, name, sort_order,
-		        total_emails, unread_emails, total_threads, unread_threads,
-		        may_read_items, may_add_items, may_remove_items,
-		        may_create_child, may_rename, may_delete
-		 FROM mailboxes WHERE account = ? AND deleted IS NULL
-		 ORDER BY sort_order, name`, account)
+		`SELECT c.id, c.parent_id, c.role, c.name, CASE WHEN p.name IS NULL
+		       OR length(c.name) <= length(p.name) + 1
+		       OR substr(c.name, 1, length(p.name)) <> p.name
+		     THEN c.name
+		     ELSE substr(c.name, length(p.name) + 2)
+		   END AS leaf, c.sort_order,
+		        c.total_emails, c.unread_emails, c.total_threads, c.unread_threads,
+		        c.may_read_items, c.may_add_items, c.may_remove_items,
+		        c.may_create_child, c.may_rename, c.may_delete
+		 FROM mailboxes c
+		 LEFT JOIN mailboxes p ON p.id = c.parent_id AND p.account = c.account AND p.deleted IS NULL
+		 WHERE c.account = ? AND c.deleted IS NULL
+		 ORDER BY c.sort_order, c.name`, account)
 	if err != nil {
 		return nil, "", fmt.Errorf("store: list mailboxes: %w", err)
 	}
@@ -367,12 +377,19 @@ func (s *Store) MailboxesByID(ctx context.Context, account string, ids []string)
 		args = append(args, id)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, parent_id, role, name, sort_order,
-		        total_emails, unread_emails, total_threads, unread_threads,
-		        may_read_items, may_add_items, may_remove_items,
-		        may_create_child, may_rename, may_delete
-		 FROM mailboxes WHERE account = ? AND deleted IS NULL
-		   AND id IN (`+strings.Join(ph, ",")+`)`, args...)
+		`SELECT c.id, c.parent_id, c.role, c.name, CASE WHEN p.name IS NULL
+		       OR length(c.name) <= length(p.name) + 1
+		       OR substr(c.name, 1, length(p.name)) <> p.name
+		     THEN c.name
+		     ELSE substr(c.name, length(p.name) + 2)
+		   END AS leaf, c.sort_order,
+		        c.total_emails, c.unread_emails, c.total_threads, c.unread_threads,
+		        c.may_read_items, c.may_add_items, c.may_remove_items,
+		        c.may_create_child, c.may_rename, c.may_delete
+		 FROM mailboxes c
+		 LEFT JOIN mailboxes p ON p.id = c.parent_id AND p.account = c.account AND p.deleted IS NULL
+		 WHERE c.account = ? AND c.deleted IS NULL
+		   AND c.id IN (`+strings.Join(ph, ",")+`)`, args...)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("store: get mailboxes: %w", err)
 	}
@@ -409,7 +426,7 @@ func scanMailbox(rows scanner) (*jmapapi.Mailbox, error) {
 		mb          jmapapi.Mailbox
 		parent, rol sql.NullString
 	)
-	err := rows.Scan(&mb.ID, &parent, &rol, &mb.Name, &mb.SortOrder,
+	err := rows.Scan(&mb.ID, &parent, &rol, &mb.Path, &mb.Name, &mb.SortOrder,
 		&mb.TotalEmails, &mb.UnreadEmails, &mb.TotalThreads, &mb.UnreadThreads,
 		&mb.MayRead, &mb.MayAddItems, &mb.MayRemoveItems,
 		&mb.MayCreateChild, &mb.MayRename, &mb.MayDelete)

@@ -18,9 +18,17 @@ var ErrCannotCalculateChanges = errors.New("cannot calculate changes")
 
 // Mailbox is the store-level view of a JMAP Mailbox (FR-M.1).
 type Mailbox struct {
-	ID        string
-	ParentID  string // "" for a top-level mailbox
-	Name      string
+	ID       string
+	ParentID string // "" for a top-level mailbox
+	// Name is the user-visible name the wire carries (RFC 8621 §2): the
+	// leaf, with the nesting in ParentID — which is what Fastmail and
+	// Stalwart answer, and what a client matching "reader" in a tree of
+	// agent-test/reader expects.
+	Name string
+	// Path is the IMAP folder path the backend operates on (the column
+	// mailboxes.name holds). It never travels in a response — a client
+	// that saw both would have the hierarchy twice.
+	Path      string
 	Role      string // "" when the mailbox has no SPECIAL-USE role
 	SortOrder int
 

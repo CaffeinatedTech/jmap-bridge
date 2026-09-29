@@ -303,7 +303,7 @@ func TestLiveWriteTriageRoundTrips(t *testing.T) {
 	})
 	seed := liveEmailWithSubject(t, ctx, st, "M2 gate target")
 	inbox := liveMailboxID(t, ctx, st, func(m *jmapapi.Mailbox) bool { return m.Role == "inbox" })
-	target := liveMailboxID(t, ctx, st, func(m *jmapapi.Mailbox) bool { return m.Name == tempFolder })
+	target := liveMailboxID(t, ctx, st, func(m *jmapapi.Mailbox) bool { return m.Path == tempFolder })
 	drafts := liveMailboxID(t, ctx, st, func(m *jmapapi.Mailbox) bool { return m.Role == "drafts" })
 	if inbox == nil || target == nil || drafts == nil {
 		t.Fatalf("mailboxes: inbox=%v target=%v drafts=%v", inbox, target, drafts)

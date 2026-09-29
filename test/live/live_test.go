@@ -156,7 +156,7 @@ func TestLiveSyncAndForeignFlag(t *testing.T) {
 	}
 	var testMB *jmapapi.Mailbox
 	for _, mb := range mbs {
-		if mb.Name == testFolder {
+		if mb.Path == testFolder {
 			testMB = mb
 		}
 	}

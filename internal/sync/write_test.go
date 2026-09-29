@@ -606,6 +606,12 @@ func TestMailboxSetCreateRenameDelete(t *testing.T) {
 	if parent := mailboxProp(t, got, 0, "parentId"); parent != topID {
 		t.Errorf("child parentId = %v, want %s", parent, topID)
 	}
+	// The wire name is the leaf: nesting travels in parentId, so a client
+	// matching "2026" finds it wherever its parent sits (RFC 8621 §2,
+	// FR-M.1) — the shape Fastmail answers with.
+	if name := mailboxProp(t, got, 0, "name"); name != "2026" {
+		t.Errorf("child name = %v, want the leaf 2026 (path stays server-side)", name)
+	}
 
 	// Duplicate name under the same parent → alreadyExists.
 	dup := jmap(t, acct, h, "Mailbox/set", map[string]any{

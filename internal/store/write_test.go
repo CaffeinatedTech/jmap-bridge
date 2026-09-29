@@ -40,7 +40,7 @@ func mailboxByName(t *testing.T, s *Store, name string) (id string, total, unrea
 		t.Fatal(err)
 	}
 	for _, mb := range mbs {
-		if mb.Name == name {
+		if mb.Path == name {
 			return mb.ID, mb.TotalEmails, mb.UnreadEmails
 		}
 	}
@@ -324,7 +324,7 @@ func TestCommitMailboxRenameRewritesDescendants(t *testing.T) {
 		if mb.ID == childID && mb.ParentID != archiveID {
 			t.Errorf("child parent = %s, want %s", mb.ParentID, archiveID)
 		}
-		if mb.Name == "Archive" || mb.Name == "Archive/2026" {
+		if mb.Path == "Archive" || mb.Path == "Archive/2026" {
 			t.Errorf("old path %q still present", mb.Name)
 		}
 	}

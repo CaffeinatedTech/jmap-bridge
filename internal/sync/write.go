@@ -554,7 +554,7 @@ func (e *Engine) draftFolder(ctx context.Context, account string, mailboxIDs []s
 	if len(notFound) > 0 || len(mbs) == 0 {
 		return "", false, jmapapi.ErrUnknownMailbox
 	}
-	return mbs[0].Name, mbs[0].Role == "drafts", nil
+	return mbs[0].Path, mbs[0].Role == "drafts", nil
 }
 
 // CreateMailbox runs CREATE, refreshes discovery (role detection,
@@ -688,23 +688,23 @@ func (e *Engine) DestroyMailbox(ctx context.Context, account, id string, removeE
 		if !removeEmails {
 			return jmapapi.ErrMailboxHasEmail
 		}
-		uids, err := e.st.FolderUIDs(ctx, account, mb.Name)
+		uids, err := e.st.FolderUIDs(ctx, account, mb.Path)
 		if err != nil {
 			return err
 		}
 		if len(uids) > 0 {
 			if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-				return conn.ExpungeUIDs(ctx, mb.Name, uids)
+				return conn.ExpungeUIDs(ctx, mb.Path, uids)
 			}); err != nil {
 				return err
 			}
 		}
-		if err := e.st.EmptyFolder(ctx, account, mb.Name); err != nil {
+		if err := e.st.EmptyFolder(ctx, account, mb.Path); err != nil {
 			return err
 		}
 	}
 	if err := e.adminOp(ctx, func(conn *imapdrv.Conn) error {
-		return conn.DeleteMailbox(ctx, mb.Name)
+		return conn.DeleteMailbox(ctx, mb.Path)
 	}); err != nil {
 		return err
 	}
@@ -721,11 +721,11 @@ func (e *Engine) serverRenamedChildren(ctx context.Context, account, oldPath, ne
 		return false
 	}
 	for _, mb := range all {
-		if !strings.HasPrefix(mb.Name, oldPath+string(delim)) {
+		if !strings.HasPrefix(mb.Path, oldPath+string(delim)) {
 			continue
 		}
-		suffix := strings.TrimPrefix(mb.Name, oldPath)
-		if contains(serverNames, newPath+suffix) && !contains(serverNames, mb.Name) {
+		suffix := strings.TrimPrefix(mb.Path, oldPath)
+		if contains(serverNames, newPath+suffix) && !contains(serverNames, mb.Path) {
 			return true
 		}
 	}
