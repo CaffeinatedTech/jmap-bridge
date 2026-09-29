@@ -691,13 +691,24 @@ func serverFail(err error) *methodErr {
 // --- shared helpers ---
 
 // filterProps keeps only the requested top-level properties; nil means
-// "all properties the object carries". Unknown names are ignored
-// (RFC 8620 §5.1).
+// "all properties the object carries". The id property always travels
+// even when the client did not ask for it (RFC 8620 §5.1) — a client
+// that keys its cache by the ids it just fetched cannot function without
+// it, and jmap-tui's list windows are built from exactly this shape.
+//
+// Property names the object does not carry are ignored rather than
+// rejected: the RFC asks for invalidArguments there, but the bridge
+// models a subset of each type's properties (no top-level blobId yet,
+// M3) and refusing a request for one would fail a read that could have
+// been answered.
 func filterProps(obj map[string]any, props *[]string) map[string]any {
 	if props == nil {
 		return obj
 	}
-	out := make(map[string]any, len(*props))
+	out := make(map[string]any, len(*props)+1)
+	if v, ok := obj["id"]; ok {
+		out["id"] = v
+	}
 	for _, p := range *props {
 		if v, ok := obj[p]; ok {
 			out[p] = v
