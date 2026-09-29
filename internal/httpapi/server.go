@@ -60,6 +60,11 @@ func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
 	s.mux.HandleFunc("GET /{account}/.well-known/jmap", s.handleSession)
 	s.mux.HandleFunc("POST /{account}/jmap", s.handleAPI)
 	s.mux.HandleFunc("GET /{account}/eventsource/", s.handleEventSource)
+	// Subtree pattern: the session's {accountId} expands into the
+	// path prefix, and anything after it is the client's business
+	// (RFC 8620 §6.1 only requires the template to carry accountId).
+	s.mux.HandleFunc("POST /{account}/upload/", s.handleUpload)
+	s.mux.HandleFunc("GET /{account}/download/{blobId}/{name}", s.handleDownload)
 	return s
 }
 
@@ -117,9 +122,9 @@ func (s *Server) sessionState(acct *config.Account, user string) string {
 
 // handleSession serves GET /{account}/.well-known/jmap (FR-J.1). URLs
 // are built from base_url, never the request Host header (FR-D.2), and
-// every capability advertised here is one this account can actually
-// use: submission only for an account with SMTP behind it (FR-J.5,
-// FR-M.14).
+// every endpoint advertised here exists — uploadUrl and downloadUrl
+// since M3, the submission capability only for an account with SMTP
+// behind it (FR-J.5, FR-M.14).
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	acct := s.authorize(w, r, r.PathValue("account"))
 	if acct == nil {
@@ -188,11 +193,18 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		},
 		"username": user,
 		"apiUrl":   base + "/" + acct.ID + "/jmap",
-		// The eventsource exists as of M1 (FR-J.8); upload/download
-		// still do not — advertising them would be a lie (FR-J.5).
+		// The eventsource exists as of M1 (FR-J.8), upload/download as
+		// of M3 (FR-M.16, FR-M.17); all three are RFC 8620 §2 URI
+		// templates this server expands exactly as written.
 		"eventSourceUrl": base + "/" + acct.ID +
 			"/eventsource/?types={types}&closeafter={closeafter}&ping={ping}",
-		"state": s.sessionState(acct, user),
+		// {accountId} leads both URLs: the account path prefix *is* the
+		// variable RFC 8620 §6.1/§6.2 require, so expanding the
+		// template produces this server's own route with nothing left
+		// over (D-13: one origin, account-prefixed paths).
+		"uploadUrl":   base + "/{accountId}/upload/",
+		"downloadUrl": base + "/{accountId}/download/{blobId}/{name}?type={type}",
+		"state":       s.sessionState(acct, user),
 	}
 	writeJSON(w, http.StatusOK, session, map[string]string{
 		"Cache-Control": "no-cache, no-store, must-revalidate",

@@ -34,21 +34,43 @@ token = "tok-work"
 type testServer struct {
 	*httptest.Server
 	cfg *config.Config
+	// h is the handler itself: a test that must control what the client
+	// cannot (a declared Content-Length, for instance) serves a request
+	// straight to it.
+	h http.Handler
 }
 
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
-	cfg, err := config.LoadReader(strings.NewReader(testConfig))
+	return newTestServerCfg(t, testConfig)
+}
+
+// newTestServerCfg starts a server for an arbitrary configuration, so a
+// test can pin what changes when an account gains an SMTP block
+// (FR-J.5). Tokens come from the config itself.
+func newTestServerCfg(t *testing.T, cfgText string) *testServer {
+	t.Helper()
+	cfg, err := config.LoadReader(strings.NewReader(cfgText))
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
-	tokens := auth.NewTokens(map[string]string{
-		"personal": "tok-personal",
-		"work":     "tok-work",
-	})
-	ts := httptest.NewServer(New(cfg, tokens, fixture.New(), nil, push.New(), nil))
+	tok := make(map[string]string, len(cfg.Accounts))
+	for _, a := range cfg.Accounts {
+		tok[a.ID] = a.Token
+	}
+	handler := New(cfg, auth.NewTokens(tok), fixture.New(), nil, push.New(), nil)
+	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
-	return &testServer{Server: ts, cfg: cfg}
+	return &testServer{Server: ts, cfg: cfg, h: handler}
+}
+
+// serve runs one request against the handler without a client in the
+// way (used where the HTTP client's own checks would fire first).
+func (s *testServer) serve(t *testing.T, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	s.h.ServeHTTP(rec, req)
+	return rec
 }
 
 // do performs one request with optional Basic credentials.
@@ -136,11 +158,18 @@ func TestSessionShape(t *testing.T) {
 	if got, want := sess["apiUrl"], "http://127.0.0.1:8080/personal/jmap"; got != want {
 		t.Errorf("apiUrl = %v, want %v", got, want)
 	}
-	// FR-J.5: endpoints that do not exist must not be advertised; the
-	// eventsource exists as of M1 and must carry its §2 template.
-	for _, key := range []string{"uploadUrl", "downloadUrl"} {
-		if _, present := sess[key]; present {
-			t.Errorf("session advertises %s but the endpoint does not exist", key)
+	// FR-J.5: every advertised URL is an endpoint that exists and a
+	// level-1 template the client expands exactly as RFC 8620 §6.1/§6.2
+	// require ({accountId} on upload; accountId, blobId, type and name
+	// on download).
+	up, ok := sess["uploadUrl"].(string)
+	if !ok || !strings.Contains(up, "{accountId}") {
+		t.Errorf("uploadUrl = %v, want a level-1 URI template with {accountId}", sess["uploadUrl"])
+	}
+	dl, _ := sess["downloadUrl"].(string)
+	for _, placeholder := range []string{"{accountId}", "{blobId}", "{name}", "{type}"} {
+		if !strings.Contains(dl, placeholder) {
+			t.Errorf("downloadUrl = %q, missing %s (RFC 8620 §6.2)", dl, placeholder)
 		}
 	}
 	es, present := sess["eventSourceUrl"].(string)

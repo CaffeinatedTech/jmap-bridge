@@ -144,9 +144,6 @@ func TestSessionAdvertisesEventSourceTemplate(t *testing.T) {
 			t.Errorf("eventSourceUrl %q missing %s (RFC 8620 §2)", tmpl, placeholder)
 		}
 	}
-	if _, ok := session["uploadUrl"]; ok {
-		t.Error("uploadUrl advertised before the endpoint exists (FR-J.5)")
-	}
 }
 
 func TestStateEventOnChange(t *testing.T) {
