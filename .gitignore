@@ -9,3 +9,5 @@
 .env
 .env.*
 blobs/
+dev/gate/m4gate-result.txt
+dev/gate/*.log
