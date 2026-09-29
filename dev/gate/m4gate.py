@@ -22,6 +22,15 @@ for line in open("/home/adam/projects/jmap-bridge/.env"):
     if line and not line.startswith("#") and "=" in line:
         k, v = line.split("=", 1)
         os.environ.setdefault(k.strip(), v.strip().strip('"'))
+keyfile = os.environ.get("GMAIL_KEY_FILE", "/tmp/opencode/gmail-key")
+if not os.path.exists(keyfile):
+    for line in open("/home/adam/projects/jmap-bridge/.env"):
+        if line.startswith("JMAP_BRIDGE_SECRET_KEY="):
+            import tempfile
+            fd = os.open(keyfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.write(fd, line.split("=", 1)[1].strip().encode())
+            os.close(fd)
+            break
 for line in open("/home/adam/projects/jmap-bridge/dev/config-gmail.toml"):
     if "client_id" in line:
         os.environ.setdefault("GMAIL_TOKEN_CLIENT_ID",
@@ -58,8 +67,20 @@ def jmap(methods, using=("urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail
 
 
 def fresh_token():
-    r = subprocess.run(["/tmp/opencode/gmailtoken", "/home/adam/projects/jmap-bridge/data",
-                        "/tmp/opencode/gmail-key", "/tmp/opencode/gmail-token"],
+    helper = "/tmp/opencode/gmailtoken"
+    if not os.path.exists(helper):
+        # /tmp is volatile: rebuild the helper (committed under
+        # test/live/gmailtoken) after a reboot.
+        b = subprocess.run(["go", "build", "-o", helper,
+                            "./test/live/gmailtoken"],
+                           cwd="/home/adam/projects/jmap-bridge",
+                           capture_output=True, text=True)
+        if b.returncode != 0:
+            print("helper build failed:", (b.stderr or b.stdout).strip()[:200])
+            sys.exit(2)
+    r = subprocess.run([helper, "/home/adam/projects/jmap-bridge/data",
+                        os.environ.get("GMAIL_KEY_FILE", "/tmp/opencode/gmail-key"),
+                        "/tmp/opencode/gmail-token"],
                        capture_output=True, text=True)
     if r.returncode != 0:
         # The helper's stderr names the failure without secrets.

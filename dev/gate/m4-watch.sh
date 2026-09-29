@@ -2,13 +2,14 @@
 # Cooldown watcher: probe Gmail's throttle with one tiny session per
 # cycle; when a CREATE sticks, run the M4 gate and record the result.
 RESULT="$(dirname "$0")/m4gate-result.txt"
+export GATE_DIR="$(cd "$(dirname "$0")" && pwd)"
 : > "$RESULT"
 for i in $(seq 1 36); do
   echo "$(date +%H:%M:%S) probe $i" >> /tmp/opencode/m4-watch.log
   python3 - <<'PY' >> /tmp/opencode/m4-watch.log 2>&1
-import sys, time
+import os, sys, time
 sys.argv=['x']
-exec(open('/tmp/opencode/m4gate.py').read().split('def main()')[0])
+exec(open(os.path.join(os.environ['GATE_DIR'], 'm4gate.py')).read().split('def main()')[0])
 try:
     M = imap()
     typ, data = M.create('"jmapprobe-w"')
