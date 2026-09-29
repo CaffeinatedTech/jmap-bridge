@@ -18,12 +18,16 @@ func (h *Handler) method(name string) methodFunc {
 		return h.mailboxQuery
 	case "Mailbox/changes":
 		return changesMethod("Mailbox")
+	case "Mailbox/set":
+		return h.mailboxSet
 	case "Email/get":
 		return h.emailGet
 	case "Email/query":
 		return h.emailQuery
 	case "Email/changes":
 		return changesMethod("Email")
+	case "Email/set":
+		return h.emailSet
 	case "Thread/get":
 		return h.threadGet
 	default:

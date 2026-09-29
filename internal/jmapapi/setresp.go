@@ -7,6 +7,9 @@ type SetError struct {
 	Type        string   `json:"type"`
 	Properties  []string `json:"properties,omitempty"`
 	Description *string  `json:"description,omitempty"`
+	// NotFound carries the ids an error refers to — RFC 8621 §4.6
+	// requires it on blobNotFound.
+	NotFound []string `json:"notFound,omitempty"`
 }
 
 // NewSetError builds a SetError. properties may be nil; description may
@@ -37,6 +40,20 @@ type SetResponse struct {
 	NotCreated   map[string]SetError `json:"notCreated"`
 	NotUpdated   map[string]SetError `json:"notUpdated"`
 	NotDestroyed map[string]SetError `json:"notDestroyed"`
+}
+
+// set converts a methodErr into the SetError a /set member failure
+// carries (RFC 8620 §5.3). The two shapes share a type on purpose: the
+// same code, description and properties travel through both.
+func (e *methodErr) set() SetError {
+	return SetError{Type: e.Type, Properties: e.Properties, Description: optStr(e.Description)}
+}
+
+func optStr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // NewSetResponse starts an empty set response for an account: every

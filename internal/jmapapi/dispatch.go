@@ -25,11 +25,14 @@ var capabilitiesAdvertised = []string{
 }
 
 // Account is the per-request account context: the id every method's
-// accountId argument must match, the Store that serves it, and the
-// session state echoed on API responses (RFC 8620 §3.4).
+// accountId argument must match, the Store that serves it, the Backend
+// that mutates it (nil for a cache-only account, which must then refuse
+// every write rather than pretend), and the session state echoed on API
+// responses (RFC 8620 §3.4).
 type Account struct {
 	ID           string
 	Store        Store
+	Backend      Backend
 	SessionState string
 }
 
@@ -38,11 +41,14 @@ type Account struct {
 // serverFail.
 type methodFunc func(ctx context.Context, acct *Account, args json.RawMessage) (any, *methodErr)
 
-// methodErr is a method-level error object: short error code in Type
-// (JMAP Error Codes registry, RFC 8620 §9.5.3), optional description.
+// methodErr is an error object: short error code in Type (JMAP Error
+// Codes registry, RFC 8620 §9.5.3), optional description, and — for the
+// per-object failures a /set reports inside notCreated/notUpdated/
+// notDestroyed — the offending property names (RFC 8620 §5.3).
 type methodErr struct {
-	Type        string `json:"type"`
-	Description string `json:"description,omitempty"`
+	Type        string   `json:"type"`
+	Description string   `json:"description,omitempty"`
+	Properties  []string `json:"properties,omitempty"`
 }
 
 func methodErrorf(typ, format string, args ...any) *methodErr {
