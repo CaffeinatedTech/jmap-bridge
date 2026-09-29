@@ -155,6 +155,10 @@ func (s *Store) QueryEmails(ctx context.Context, account string, q jmapapi.Email
 		ids[i] = h.id
 	}
 	position, window := paginateIDs(ids, q.Anchor, q.AnchorOffset, q.Position, q.Limit)
+	s.log.Debug("store: query",
+		"mailbox", q.Filter.InMailbox, "collapse", q.CollapseThreads,
+		"position", q.Position, "limit", q.Limit,
+		"hits", len(ids), "window", len(window))
 	return window, position, len(ids), counter, nil
 }
 
