@@ -1,10 +1,8 @@
 # Gmail live-gate rig (M4)
 
 The rig for the M4 gate against the live Gmail account: the bridge on
-loopback with the OAuth2 account (`dev/config-gmail.toml`), the gate
-script (JMAP over the bridge + an independent `imaplib` XOAUTH2 client),
-and a cooldown watcher that probes Gmail's IMAP-write quarantine and
-runs the gate unattended once writes stick again.
+loopback with the OAuth2 account (`dev/config-gmail.toml`) and the gate
+script (JMAP over the bridge + an independent `imaplib` XOAUTH2 client).
 
 Secrets live in `.env` (never committed): the OAuth2 client secret and
 `JMAP_BRIDGE_SECRET_KEY`, which unseals the stored refresh token in
@@ -15,13 +13,20 @@ Secrets live in `.env` (never committed): the OAuth2 client secret and
     bash dev/gate/gmail-start.sh        # bridge up (builds the binary first)
     python3 dev/gate/m4gate.py          # one gate pass, results on stdout
 
-To wait out Gmail's IMAP-write quarantine (reads work, writes dropped
-with `OK [THROTTLED]` for up to ~24 h after heavy IMAP usage):
+Gmail throttles IMAP writes per **account** — reads keep working, writes
+answer `OK [THROTTLED]` and are silently dropped — after sustained heavy
+usage. The restriction lifts after roughly 24 h of *decreased* usage, so
+do not probe it in a loop: retrying works against the cooldown, and every
+client on the account (the bridge, a mail sorter, a desktop client)
+counts. Stop them all, wait, then run a single pass:
 
-    setsid nohup bash dev/gate/m4-watch.sh > /dev/null 2>&1 &
+    bash dev/gate/gmail-start.sh
+    python3 dev/gate/m4gate.py
 
-The watcher probes every 15 min; when a CREATE sticks it starts the
-bridge and runs the gate, writing `dev/gate/m4gate-result.txt`.
+If the first `CREATE` does not stick, stop and wait another day; if it
+does, the gate runs to completion. (An unattended watcher was tried and
+removed 2026-09-30: its periodic probes fed the quarantine it was waiting
+out.)
 
 ## The helper binary
 
