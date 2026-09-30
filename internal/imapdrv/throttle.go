@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/kiliant/go-imap"
-	"github.com/kiliant/go-imap/imapclient"
+	"github.com/CaffeinatedTech/go-imap"
+	"github.com/CaffeinatedTech/go-imap/imapclient"
 )
 
 // Throttle handling (FR-S.12, learned in the M4 live gate): Google's

@@ -1,6 +1,7 @@
 // Package fixtureimap is the in-process IMAP server the sync and driver
-// tests run against (AGENTS.md testing rules). It wraps kiliant's
-// imapserver over its memory backend — the wire code is the same
+// tests run against (AGENTS.md testing rules). It wraps CaffeinatedTech's
+// imapserver (the hard fork of kiliant/go-imap) over its memory backend —
+// the wire code is the same
 // library's, so tests exercise a real protocol implementation — and
 // impersonates the three sync tiers by withholding QRESYNC/CONDSTORE
 // from CAPABILITY exactly as a smaller server would (PLAN §5, FR-S.2).
@@ -19,10 +20,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kiliant/go-imap"
-	"github.com/kiliant/go-imap/imapclient"
-	"github.com/kiliant/go-imap/imapserver"
-	"github.com/kiliant/go-imap/imapserver/memory"
+	"github.com/CaffeinatedTech/go-imap"
+	"github.com/CaffeinatedTech/go-imap/imapclient"
+	"github.com/CaffeinatedTech/go-imap/imapserver"
+	"github.com/CaffeinatedTech/go-imap/imapserver/memory"
 )
 
 // Tier selects which sync capabilities the fixture advertises.
@@ -133,14 +134,14 @@ type tierBackend struct {
 var _ imapserver.CapabilitySupport = (*tierBackend)(nil)
 
 // SupportsCapability implements imapserver.CapabilitySupport.
-func (b *tierBackend) SupportsCapability(name string) bool {
+func (b *tierBackend) SupportsCapability(ctx context.Context, name string, options *imapserver.CapabilitySupportOptions) bool {
 	switch strings.ToUpper(name) {
 	case "QRESYNC":
 		return b.tier == TierQResync
 	case "CONDSTORE":
 		return b.tier != TierBare
 	default:
-		return b.Backend.SupportsCapability(name)
+		return b.Backend.SupportsCapability(ctx, name, options)
 	}
 }
 

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CaffeinatedTech/go-imap"
+	"github.com/CaffeinatedTech/go-imap/imapclient"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/convert"
-	"github.com/kiliant/go-imap"
-	"github.com/kiliant/go-imap/imapclient"
 )
 
 // Anchor is a folder's cached QRESYNC resync point (FR-S.5 tier 1). A

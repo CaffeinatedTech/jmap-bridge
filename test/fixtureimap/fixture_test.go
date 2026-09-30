@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kiliant/go-imap"
-	"github.com/kiliant/go-imap/imapclient"
+	"github.com/CaffeinatedTech/go-imap"
+	"github.com/CaffeinatedTech/go-imap/imapclient"
 )
 
 // probe opens a fresh client session (a third "other" client).

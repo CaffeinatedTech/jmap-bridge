@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CaffeinatedTech/go-imap/imapclient"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	bridgesync "github.com/CaffeinatedTech/jmap-bridge/internal/sync"
-	"github.com/kiliant/go-imap/imapclient"
 )
 
 // The M2 live gate, bridge side: every JMAP mutation must be visible to

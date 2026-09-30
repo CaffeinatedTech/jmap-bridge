@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CaffeinatedTech/go-imap"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	"github.com/CaffeinatedTech/jmap-bridge/test/fixtureimap"
-	"github.com/kiliant/go-imap"
 )
 
 type testEnv struct {
