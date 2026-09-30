@@ -1,0 +1,17 @@
+BEGIN:VCARD
+VERSION:4.0
+UID:01985042-2212-7345-8000-ABCDEF012345
+FN;PREF=1:Ada King
+N:King;Ada;;;
+BDAY:1815-12-10
+EMAIL;TYPE=work;PREF=1:ada@example.com
+EMAIL;TYPE=home:ada@home.example.net
+TEL;TYPE=cell;PREF=2:+441234567890
+ORG:Analytical Engines;Computing
+TITLE:Chief Programmer
+NOTE;LANGUAGE=en-gb:Notes with a language parameter
+ADR;TYPE=home:;;1 Main St;Springfield;IL;62701;USA
+URL:https://example.com/ada
+PHOTO:data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==
+X-SOCIALPROFILE;TYPE=twitter:https://twitter.com/ada
+END:VCARD

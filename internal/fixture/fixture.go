@@ -69,8 +69,10 @@ func (s *Store) ReadBlob(_ context.Context, account, id string) ([]byte, string,
 // States are static: the fixture never mutates, so every type state is
 // the initial counter value (PLAN §4.1).
 const (
-	mailboxState = "1"
-	emailState   = "1"
+	mailboxState     = "1"
+	emailState       = "1"
+	addressBookState = "1"
+	contactCardState = "1"
 )
 
 // New returns an empty fixture store; accounts seed on first use.
@@ -180,8 +182,13 @@ func (s *Store) ThreadsByID(_ context.Context, account string, ids []string) ([]
 // anything else cannot be replayed.
 func (s *Store) Changes(_ context.Context, _, kind, sinceState string) (jmapapi.ChangeSet, error) {
 	current := emailState
-	if kind == "Mailbox" {
+	switch kind {
+	case "Mailbox":
 		current = mailboxState
+	case "AddressBook":
+		current = addressBookState
+	case "ContactCard":
+		current = contactCardState
 	}
 	if sinceState == current {
 		return jmapapi.ChangeSet{NewState: current}, nil
@@ -189,10 +196,26 @@ func (s *Store) Changes(_ context.Context, _, kind, sinceState string) (jmapapi.
 	return jmapapi.ChangeSet{}, jmapapi.ErrCannotCalculateChanges
 }
 
+// AddressBooksByID implements [jmapapi.Store]: the fixture carries no
+// contacts — sample mail only. The contacts capability is never
+// advertised for a fixture account, so dispatch refuses the methods
+// before they reach this seam; answering empty keeps the seam honest.
+func (s *Store) AddressBooksByID(_ context.Context, _ string, ids []string) ([]*jmapapi.AddressBook, string, []string, error) {
+	return nil, addressBookState, append([]string{}, ids...), nil
+}
+
+// CardsByID implements [jmapapi.Store] (see AddressBooksByID).
+func (s *Store) CardsByID(_ context.Context, _ string, ids []string) ([]*jmapapi.ContactCard, string, []string, error) {
+	return nil, contactCardState, append([]string{}, ids...), nil
+}
+
 // States implements [jmapapi.Store]: the fixture never mutates, so its
 // states are the static initial values.
 func (s *Store) States(_ context.Context, _ string) (map[string]string, error) {
-	return map[string]string{"Mailbox": mailboxState, "Email": emailState, "Thread": emailState}, nil
+	return map[string]string{
+		"Mailbox": mailboxState, "Email": emailState, "Thread": emailState,
+		"AddressBook": addressBookState, "ContactCard": contactCardState,
+	}, nil
 }
 
 // QueryEmails implements jmapapi.Store over the in-memory fixtures with

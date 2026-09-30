@@ -49,6 +49,22 @@ type Backend interface {
 	// DestroyMailbox runs DELETE. removeEmails reports the caller's
 	// onDestroyRemoveEmails argument (RFC 8621 §2.5).
 	DestroyMailbox(ctx context.Context, account, id string, removeEmails bool) error
+
+	// CreateContact PUTs a new card built from spec (DAV-first, then
+	// the cache, D-14 applied to contacts) and returns the id (= the
+	// vCard UID, RFC 9610 §3). A uid collision is ErrContactExists
+	// (FR-P.8).
+	CreateContact(ctx context.Context, account string, spec ContactSpec) (string, error)
+
+	// UpdateContact rebuilds and PUTs the card with an If-Match etag
+	// guard, retrying once after a refetch on 412, then reporting
+	// ErrOverwritten (FR-P.9). When spec.BookID names another book, the
+	// card moves: PUT to the new book, DELETE the old (FR-P.13).
+	UpdateContact(ctx context.Context, account, id string, spec ContactSpec) error
+
+	// DestroyContact DELETEs the card. An already-gone resource is
+	// success (FR-P.10); an unknown id is ErrObjectNotFound.
+	DestroyContact(ctx context.Context, account, id string) error
 }
 
 // Mutation errors the Backend reports; dispatch maps them to the

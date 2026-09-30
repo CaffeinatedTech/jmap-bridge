@@ -34,6 +34,16 @@ func (h *Handler) method(name string) methodFunc {
 		return h.identityGet
 	case "EmailSubmission/set":
 		return h.emailSubmissionSet
+	case "AddressBook/get":
+		return h.addressBookGet
+	case "AddressBook/changes":
+		return changesMethod("AddressBook")
+	case "ContactCard/get":
+		return h.contactCardGet
+	case "ContactCard/changes":
+		return changesMethod("ContactCard")
+	case "ContactCard/set":
+		return h.contactCardSet
 	default:
 		return nil
 	}

@@ -188,7 +188,7 @@ func diffStates(last, next map[string]string, types string) map[string]string {
 // client can be compared against it byte-for-byte (§7.3).
 func stateID(states map[string]string) string {
 	parts := make([]string, 0, len(states))
-	for _, typ := range []string{"Email", "Mailbox", "Thread"} {
+	for _, typ := range []string{"Email", "Mailbox", "Thread", "AddressBook", "ContactCard"} {
 		if st, ok := states[typ]; ok {
 			parts = append(parts, typ+":"+st)
 		}

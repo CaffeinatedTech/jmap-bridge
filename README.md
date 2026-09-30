@@ -77,10 +77,13 @@ rather than failing.
 | **Dovecot** (self-hosted) | password | QRESYNC | SMTP | needs a separate CardDAV server |
 | **cPanel mail** (Dovecot-based) | password | QRESYNC (detected) | SMTP | when the host offers CardDAV |
 | **Namecheap Private Email** | password | detected at runtime | SMTP | when the host offers CardDAV |
+| **Radicale** (CardDAV, self-hosted) | — | — | — | password — **M6-verified** end-to-end (sync-collection, conditional PUT/DELETE) |
 | anything else | password or OAuth2 | detected at runtime | SMTP | any RFC 6352 server |
 
 Contacts are optional: supply a CardDAV URL (or let the bridge discover it via
-`/.well-known/carddav`, RFC 6764) and the contacts capability appears.
+`/.well-known/carddav`, RFC 6764) and the contacts capability appears — only
+after the first sync succeeded, so a half-working server never advertises
+half-working data.
 
 ## Quick start
 
@@ -219,11 +222,16 @@ and OAuth2 is the durable path.
 ### Development mode
 
 ```sh
+# mail:   start the loopback Dovecot (needs sudo) — dev/dovecot.conf
+# contacts: start the loopback Radicale CardDAV — dev/radicale.conf
+bash dev/gate/radicale-start.sh
 go run ./cmd/jmap-bridge --config ./dev/config.toml
 ```
 
 `auth.mode = "none"` is accepted **only** when `listen` is a loopback address —
-the bridge refuses to start otherwise.
+the bridge refuses to start otherwise. The dev config front-ends both rig
+servers with throwaway loopback credentials; without Radicale running, the
+contacts capability simply never appears (FR-P.3), and mail is unaffected.
 
 ## How the local cache works
 

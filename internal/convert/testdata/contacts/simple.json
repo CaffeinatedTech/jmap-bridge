@@ -1,0 +1,65 @@
+{
+  "uid": "simple-ada-0001",
+  "kind": "individual",
+  "name": {
+    "components": [
+      {
+        "kind": "surname",
+        "value": "Lovelace"
+      },
+      {
+        "kind": "given",
+        "value": "Ada"
+      }
+    ],
+    "full": "Ada Lovelace",
+    "isOrdered": true
+  },
+  "emails": {
+    "0": {
+      "address": "ada@example.com",
+      "label": "work",
+      "@vcard": {
+        "params": {
+          "TYPE": [
+            "INTERNET",
+            "WORK"
+          ]
+        }
+      }
+    },
+    "1": {
+      "address": "ada@home.example.net",
+      "label": "home",
+      "pref": 1,
+      "@vcard": {
+        "params": {
+          "TYPE": [
+            "INTERNET",
+            "HOME",
+            "pref"
+          ]
+        }
+      }
+    }
+  },
+  "phones": {
+    "0": {
+      "number": "555-0100",
+      "label": "work",
+      "@vcard": {
+        "params": {
+          "TYPE": [
+            "WORK",
+            "VOICE"
+          ]
+        }
+      }
+    }
+  },
+  "notes": {
+    "0": {
+      "note": "First contact fixture"
+    }
+  }
+}

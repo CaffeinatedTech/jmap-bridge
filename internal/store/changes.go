@@ -35,6 +35,12 @@ func (s *Store) Changes(ctx context.Context, account, kind, sinceState string) (
 		table = "mailboxes"
 	case "Email":
 		current = meta.EmailState
+	case "AddressBook":
+		current = meta.AddressBookState
+		table = "addressbooks"
+	case "ContactCard":
+		current = meta.ContactCardState
+		table = "cards"
 	default:
 		return jmapapi.ChangeSet{}, jmapapi.ErrCannotCalculateChanges
 	}

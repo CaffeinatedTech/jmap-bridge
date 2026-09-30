@@ -93,9 +93,20 @@ type SMTP struct {
 }
 
 // CardDAV is the contacts backend block; empty means contacts are
-// disabled and the capability is not advertised (FR-P.3).
+// disabled and the capability is not advertised (FR-P.3). URL is the
+// configured endpoint (RFC 6764 discovery is the fallback when it names
+// only the origin); Auth "password" (default) logs in with
+// Username/Password, "oauth2" presents the account's OAuth2 access
+// token as a Bearer credential (FR-A.9).
 type CardDAV struct {
 	URL string `toml:"url"`
+	// Auth is "password" (default) or "oauth2".
+	Auth     string `toml:"auth"`
+	Username string `toml:"username"`
+	Password string `toml:"password"`
+	// PasswordFile points at a mounted file holding the password
+	// (FR-A.2).
+	PasswordFile string `toml:"password_file"`
 }
 
 // OAuth2 is the OAuth2 client configuration (FR-A.9).

@@ -1,7 +1,9 @@
-# Local development config: loopback listener, token auth, and the
-# loopback Dovecot from dev/dovecot.conf (M1 gate backend). Every
+# Local development config: loopback listener, token auth, the loopback
+# Dovecot from dev/dovecot.conf (M1 gate backend) and the loopback
+# Radicale from dev/radicale.conf (M6 contacts gate backend). Every
 # credential here is a throwaway for loopback development only — never
-# reuse it anywhere real; the IMAP password mirrors dev/dovecot.conf.
+# reuse it anywhere real; the IMAP password mirrors dev/dovecot.conf and
+# the DAV password mirrors dev/gate/radicale-start.sh.
 
 listen = "127.0.0.1:8080"
 base_url = "http://127.0.0.1:8080"
@@ -23,6 +25,13 @@ token = "dev-token-local-only"
   tls = false
   username = "jmaptest"
   password = "bridge-local-gate"
+
+  # M6 contacts gate backend: bash dev/gate/radicale-start.sh first.
+  # The loopback CardDAV login is a throwaway, same as everything here.
+  [accounts.carddav]
+  url = "http://127.0.0.1:5230"
+  username = "bridge"
+  password = "Bridge-Dav-Gate-Only"
 
 # Gmail profile (M4): OAuth2-only (D-5). Credentials come from the
 # environment or mounted files, never inline:

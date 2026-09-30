@@ -120,6 +120,21 @@ func (c *Config) normalize() {
 				a.SMTP.Password = a.IMAP.Password
 			}
 		}
+		if a.CardDAV != nil {
+			if a.CardDAV.Auth == "" {
+				a.CardDAV.Auth = "password"
+			}
+			if a.CardDAV.Username == "" && a.IMAP != nil {
+				a.CardDAV.Username = a.IMAP.Username
+			}
+			if a.CardDAV.Password == "" && a.IMAP != nil &&
+				a.CardDAV.Auth == "password" && a.IMAP.Auth == "password" {
+				// Same-host setups (Fastmail, Dovecot+Radicale boxes)
+				// share one login; an oauth2 IMAP never seeds a
+				// password (FR-A.10).
+				a.CardDAV.Password = a.IMAP.Password
+			}
+		}
 	}
 }
 
@@ -152,9 +167,9 @@ func (c *Config) validateAccount(i int, a *Account) error {
 				"required when [accounts.smtp] is configured (the sending identity and envelope sender)")
 		}
 	}
-	if a.CardDAV != nil && a.CardDAV.URL != "" {
-		if err := validateAbsoluteURL(a.CardDAV.URL, "carddav.url must be an absolute URL"); err != nil {
-			return errKey(fmt.Sprintf("accounts[%d].carddav.url", i), "%s", err)
+	if a.CardDAV != nil {
+		if err := validateCardDAV(fmt.Sprintf("accounts[%d].carddav", i), a.CardDAV); err != nil {
+			return err
 		}
 	}
 	if a.OAuth2 != nil {
@@ -169,6 +184,9 @@ func (c *Config) validateAccount(i int, a *Account) error {
 		}
 		if a.SMTP != nil && a.SMTP.Auth == "oauth2" {
 			backendAuth = "smtp.auth"
+		}
+		if a.CardDAV != nil && a.CardDAV.Auth == "oauth2" {
+			backendAuth = "carddav.auth"
 		}
 		if backendAuth != "" {
 			return errKey(fmt.Sprintf("accounts[%d].oauth2", i), "required when %s = \"oauth2\"", backendAuth)
@@ -185,6 +203,32 @@ func (c *Config) validateAccount(i int, a *Account) error {
 	if a.SMTP != nil && a.SMTP.Auth == "oauth2" && (a.SMTP.Password != "" || a.SMTP.PasswordFile != "") {
 		return errKey(fmt.Sprintf("accounts[%d].smtp.password", i),
 			"must not be set when smtp.auth = \"oauth2\" (there is no password fallback)")
+	}
+	if a.CardDAV != nil && a.CardDAV.Auth == "oauth2" && (a.CardDAV.Password != "" || a.CardDAV.PasswordFile != "") {
+		return errKey(fmt.Sprintf("accounts[%d].carddav.password", i),
+			"must not be set when carddav.auth = \"oauth2\" (there is no password fallback)")
+	}
+	return nil
+}
+
+func validateCardDAV(key string, d *CardDAV) error {
+	if d.URL == "" {
+		return errKey(key+".url", "required when [accounts.carddav] is configured")
+	}
+	if err := validateAbsoluteURL(d.URL, "url must be an absolute URL"); err != nil {
+		return errKey(key+".url", "%s", err)
+	}
+	switch d.Auth {
+	case "password":
+		if d.Username == "" {
+			return errKey(key+".username", "required when carddav.auth = \"password\" (or set accounts.imap.username to default it)")
+		}
+		if d.Password == "" {
+			return errKey(key+".password", "required when carddav.auth = \"password\"")
+		}
+	case "oauth2":
+	default:
+		return errKey(key+".auth", `must be "password" or "oauth2"`)
 	}
 	return nil
 }

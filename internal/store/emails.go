@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -633,14 +634,45 @@ func (s *Store) PurgeTombstones(ctx context.Context, retention time.Duration) er
 		if err := rows.Err(); err != nil {
 			return err
 		}
+		accountsSet := map[string]bool{}
+		for _, a := range accounts {
+			accountsSet[a] = true
+		}
+		for _, table := range []string{"cards", "addressbooks"} {
+			rows, err := tx.QueryContext(ctx,
+				`SELECT DISTINCT account FROM `+table+` WHERE deleted IS NOT NULL AND deleted <= ?`, cutoff)
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				var a string
+				if err := rows.Scan(&a); err != nil {
+					_ = rows.Close()
+					return err
+				}
+				accountsSet[a] = true
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return err
+			}
+		}
+		accounts = make([]string, 0, len(accountsSet))
+		for a := range accountsSet {
+			accounts = append(accounts, a)
+		}
+		sort.Strings(accounts)
 		for _, account := range accounts {
 			// The highest modseq among purged tombstones is the oldest
 			// change we can no longer replay.
 			var through int64
 			if err := tx.QueryRowContext(ctx,
-				`SELECT COALESCE(MAX(deleted), 0) FROM emails
-				 WHERE account = ? AND deleted IS NOT NULL AND deleted <= ?`,
-				account, cutoff).Scan(&through); err != nil {
+				`SELECT COALESCE(MAX(deleted), 0) FROM (
+				 SELECT deleted FROM emails WHERE account = ? AND deleted IS NOT NULL AND deleted <= ?
+				 UNION ALL SELECT deleted FROM cards WHERE account = ? AND deleted IS NOT NULL AND deleted <= ?
+				 UNION ALL SELECT deleted FROM addressbooks WHERE account = ? AND deleted IS NOT NULL AND deleted <= ?
+				)`,
+				account, cutoff, account, cutoff, account, cutoff).Scan(&through); err != nil {
 				return err
 			}
 			m, err := loadMeta(ctx, tx, account)
@@ -674,6 +706,19 @@ func (s *Store) PurgeTombstones(ctx context.Context, retention time.Duration) er
 			if _, err := tx.ExecContext(ctx,
 				`DELETE FROM imap_uids WHERE account = ?
 				   AND email_id NOT IN (SELECT id FROM emails)`, account); err != nil {
+				return err
+			}
+			// Contacts tombstones age out under the same retention
+			// floor (NFR-4): /changes replays at least as far back for
+			// ContactCard/AddressBook as it does for Email/Mailbox.
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM cards WHERE account = ? AND deleted IS NOT NULL AND deleted <= ?`,
+				account, cutoff); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM addressbooks WHERE account = ? AND deleted IS NOT NULL AND deleted <= ?`,
+				account, cutoff); err != nil {
 				return err
 			}
 		}
