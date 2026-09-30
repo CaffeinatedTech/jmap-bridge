@@ -238,11 +238,24 @@ Storage is a single SQLite database (WAL) plus a blob directory under `data_dir`
 Nothing is ever written by clients — the bridge is the only writer, and every
 mutation is applied to the real IMAP server *first*, then committed locally.
 
+Search is an FTS5 index over subject, sender and recipient (indexed the moment
+headers arrive) plus body text as bodies hydrate. A `text` query answers
+immediately from whatever is indexed: header matches return at once, and with
+`search.backfill = true` the unhydrated messages in the query's scope (bounded
+by `backfill_scan`) hydrate in the background, each finished body re-entering
+the index and nudging query state so clients pick up late matches via
+`Email/changes` or SSE. With `search.backfill = false` the bridge behaves
+identically except that body-only matches are absent — the search degrades to
+headers, it never errors. Interactive body reads (`Email/get`) never queue
+behind search backfill: backfill workers share the same fetch connection but
+an interactive request waits at most one in-flight download.
+
 The body cache is grow-only in v0.1: a hydrated body stays until you delete it
 from the data directory. It grows with mail you actually read (plus anything
-inside `prefetch_window`), never with the whole mailbox — plan disk for
-`data_dir` accordingly. Eviction is not implemented yet; bodies are always
-re-fetchable from IMAP, so a safe policy can be added later without data loss.
+inside `prefetch_window`, plus search-driven backfill when enabled), never
+with the whole mailbox — plan disk for `data_dir` accordingly. Eviction is not
+implemented yet; bodies are always re-fetchable from IMAP, so a safe policy
+can be added later without data loss.
 
 ## Configuration reference
 
@@ -256,8 +269,9 @@ log_level   = "info"
 mode = "token"                 # "token" (Basic account-id:token) | "none" (loopback only)
 
 [search]
-backfill     = true            # hydrate bodies in the background on text search
-concurrency  = 4               # parallel body downloads
+backfill      = true            # hydrate bodies in the background on text search
+concurrency   = 4               # parallel body downloads
+backfill_scan = 2000            # max unhydrated candidates one text search enqueues
 
 [sync]
 interval     = "5m"            # fallback poll when IDLE is unavailable

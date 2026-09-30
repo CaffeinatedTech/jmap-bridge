@@ -350,12 +350,13 @@ func (h *Handler) emailQuery(ctx context.Context, acct *Account, raw json.RawMes
 		AnchorOffset:    args.AnchorOffset,
 		CollapseThreads: args.CollapseThreads,
 	}
-	if len(args.Sort) > 0 {
-		prop := args.Sort[0].Property
-		if !supportedEmailSort(prop) {
-			return nil, methodErrorf("invalidArguments", "unsupported sort property %q for Email", prop)
+	// RFC 8620 §4.4: the sort list applies in order — the store renders
+	// every comparator, deterministically tied off by id (FR-X.3).
+	for _, s := range args.Sort {
+		if !supportedEmailSort(s.Property) {
+			return nil, methodErrorf("invalidArguments", "unsupported sort property %q for Email", s.Property)
 		}
-		q.Sort = []EmailSort{{Property: prop, Ascending: args.Sort[0].IsAscending && !args.Sort[0].IsDescending}}
+		q.Sort = append(q.Sort, EmailSort{Property: s.Property, Ascending: s.IsAscending && !s.IsDescending})
 	}
 
 	ids, position, total, counter, err := acct.Store.QueryEmails(ctx, acct.ID, q)

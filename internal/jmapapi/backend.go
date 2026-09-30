@@ -38,8 +38,10 @@ type Backend interface {
 	SubmitEmail(ctx context.Context, account string, spec SubmissionSpec) (*CreatedSubmission, error)
 
 	// CreateMailbox runs CREATE, refreshes role detection and returns
-	// the new mailbox id (FR-M.12).
-	CreateMailbox(ctx context.Context, account, name, parentID string) (string, error)
+	// the new mailbox id (FR-M.12). sortOrder is the client-requested
+	// display order (0 = none requested); the backend applies it after
+	// discovery, so a later discovery pass may re-derive it.
+	CreateMailbox(ctx context.Context, account, name, parentID string, sortOrder int) (string, error)
 
 	// RenameMailbox runs RENAME (or a reparent) keeping the id stable.
 	RenameMailbox(ctx context.Context, account, id, name, parentID string) error

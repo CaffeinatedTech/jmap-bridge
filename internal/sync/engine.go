@@ -35,6 +35,7 @@ type Config struct {
 	BatchSize      int            // backfill batch (FR-S.3)
 	PrefetchWindow time.Duration  // 0 disables prefetch (FR-S.9)
 	Concurrency    int            // hydration workers (FR-S.9 rate limit)
+	SearchBackfill bool           // hydrate text-search candidates in the background (FR-X.5)
 }
 
 // Engine runs one account's sync.
@@ -67,6 +68,10 @@ type Engine struct {
 
 	// prefetch bounding (FR-S.9)
 	prefetchSem chan struct{}
+
+	// search-driven backfill lane (FR-X.5): buffered, dropped on
+	// overflow, served by Concurrency workers started in Run.
+	backfill chan string
 
 	// idleWatching flips once the idle connection has entered IDLE on
 	// the watched folder; the live gate and tests wait on it so the
@@ -114,9 +119,13 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 		kick:        make(chan struct{}, 1),
 		flights:     map[string]*flight{},
 		prefetchSem: make(chan struct{}, cfg.Concurrency),
+		backfill:    make(chan string, 1024),
 		idleFolder:  "INBOX",
 	}
 	st.Ensure = e.Ensure
+	if cfg.SearchBackfill {
+		st.SearchBackfill = e.searchBackfill
+	}
 	return e
 }
 
@@ -134,6 +143,9 @@ func (e *Engine) Kick() {
 // exponential backoff on failure (FR-S.4) and the idle loop alongside.
 func (e *Engine) Run(ctx context.Context) {
 	go e.idleLoop(ctx)
+	if e.cfg.SearchBackfill {
+		e.backfillWorkers(ctx)
+	}
 
 	e.requestPass("")
 	failures := 0

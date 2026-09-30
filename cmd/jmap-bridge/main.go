@@ -90,9 +90,10 @@ func run(args []string) error {
 	defer stop()
 
 	st, err := store.Open(ctx, store.Options{
-		DataDir: cfg.DataDir,
-		Logger:  log,
-		Publish: hub.Publish,
+		DataDir:      cfg.DataDir,
+		Logger:       log,
+		Publish:      hub.Publish,
+		BackfillScan: cfg.Search.BackfillScan,
 	})
 	if err != nil {
 		return err
@@ -195,6 +196,7 @@ func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager) sync.
 		BatchSize:      cfg.Sync.BatchSize,
 		PrefetchWindow: cfg.Sync.PrefetchWindow.Std(),
 		Concurrency:    cfg.Search.Concurrency,
+		SearchBackfill: cfg.Search.Backfill,
 	}
 	if a.IMAP.Auth == "oauth2" && mgr != nil {
 		out.IMAP.Token = mgr.AccessToken

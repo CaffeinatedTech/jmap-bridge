@@ -47,6 +47,9 @@ func (c *Config) validate() error {
 	if c.Search.Concurrency < 1 {
 		return errKey("search.concurrency", "must be at least 1")
 	}
+	if c.Search.BackfillScan < 0 {
+		return errKey("search.backfill_scan", "must not be negative")
+	}
 	if c.Sync.BatchSize < 1 {
 		return errKey("sync.batch_size", "must be at least 1")
 	}
