@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CaffeinatedTech/go-imap"
 	"github.com/CaffeinatedTech/jmap-bridge/test/fixtureimap"
-	"github.com/kiliant/go-imap"
 )
 
 func dialFixture(t *testing.T, s *fixtureimap.Server) *Conn {

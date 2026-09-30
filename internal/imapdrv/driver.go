@@ -1,5 +1,6 @@
-// Package imapdrv is the bridge's IMAP driver: kiliant/go-imap behind
-// our own interface (D-7, amended 2026-09-29). Library types never
+// Package imapdrv is the bridge's IMAP driver: CaffeinatedTech/go-imap
+// (the hard fork of kiliant/go-imap) behind our own interface (D-7,
+// amended 2026-09-30; D-21). Library types never
 // leave this package — the sync engine sees only driver types and the
 // neutral convert types they are mapped into — so swapping or patching
 // the library cannot ripple past this seam.
@@ -18,8 +19,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kiliant/go-imap"
-	"github.com/kiliant/go-imap/imapclient"
+	"github.com/CaffeinatedTech/go-imap"
+	"github.com/CaffeinatedTech/go-imap/imapclient"
 )
 
 // Tier is the sync strategy the session can use (FR-S.2). Highest

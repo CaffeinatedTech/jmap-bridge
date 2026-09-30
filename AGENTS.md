@@ -53,8 +53,9 @@ disagree, flag it and fix the docs or the code — don't let them drift.
 ## Stack & conventions
 
 - Go (version pinned in `go.mod`). Module: `github.com/CaffeinatedTech/jmap-bridge`.
-- IMAP: `github.com/kiliant/go-imap` **only inside `internal/imapdrv`** (D-7,
-  amended 2026-09-29 — chosen for tested client QRESYNC/CONDSTORE/COMPRESS,
+- IMAP: `github.com/CaffeinatedTech/go-imap` — the hard fork of
+  `kiliant/go-imap` — **only inside `internal/imapdrv`** (D-7, amended
+  2026-09-30; D-21 — chosen for tested client QRESYNC/CONDSTORE/COMPRESS,
   zero deps, frozen v1 API). Never let its types escape that package. Its
   `imapserver` module is allowed **only inside `test/fixtureimap`** for the
   tier-impersonating fixture server.

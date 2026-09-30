@@ -4,12 +4,12 @@ go 1.27.1
 
 require (
 	github.com/BurntSushi/toml v1.6.0
+	github.com/CaffeinatedTech/go-imap v1.2.2
+	github.com/CaffeinatedTech/go-imap/imapserver v0.2.1
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-vcard v0.1.0
 	github.com/emersion/go-webdav v0.7.0
 	github.com/google/uuid v1.6.0
-	github.com/kiliant/go-imap v1.1.0
-	github.com/kiliant/go-imap/imapserver v0.1.0
 	modernc.org/sqlite v1.60.0
 )
 
@@ -24,8 +24,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
-
-// M4: the fork carries the X-GM-EXT-1 label store and the flag-form value
-// capture the Gmail profile needs (~/projects/go-imap/PATCH-NOTES.md);
-// revert to upstream when the PR merges.
-replace github.com/kiliant/go-imap => ../go-imap

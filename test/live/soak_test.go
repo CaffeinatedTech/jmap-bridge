@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CaffeinatedTech/go-imap"
+	"github.com/CaffeinatedTech/go-imap/imapclient"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	bridgesync "github.com/CaffeinatedTech/jmap-bridge/internal/sync"
-	"github.com/kiliant/go-imap"
-	"github.com/kiliant/go-imap/imapclient"
 )
 
 // The M5 soak (FR-X, NFR-1, NFR-8) runs against the local dev Dovecot:
