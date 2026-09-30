@@ -36,14 +36,165 @@ func (e *Engine) Ensure(ctx context.Context, account string, previewIDs, bodyIDs
 			firstErr = err
 		}
 	}
-	for _, id := range bodyIDs {
-		if err := e.hydrate(ctx, id); err != nil && !errors.Is(err, context.Canceled) {
+	if len(bodyIDs) > 0 {
+		if err := e.hydrateBatch(ctx, bodyIDs); err != nil && !errors.Is(err, context.Canceled) {
 			if firstErr == nil {
 				firstErr = err
 			}
 		}
 	}
 	return firstErr
+}
+
+// hydrateBatch fills a set of bodies with one IMAP round trip per
+// folder chunk instead of one per message (NFR-1's ≥ 15 msg/s floor
+// assumes it: a per-message select/fetch/unselect makes folder-size
+// server bookkeeping the bottleneck). Single-flight per id is kept:
+// ids another caller already owns are left to that owner, and ids the
+// store already shows hydrated are answered locally.
+func (e *Engine) hydrateBatch(ctx context.Context, ids []string) error {
+	type owned struct {
+		id string
+		f  *flight
+	}
+	var mine []owned
+	var waiters []*flight
+	for _, id := range ids {
+		f, owner := e.claim(id)
+		if owner {
+			mine = append(mine, owned{id, f})
+		} else {
+			// Another caller owns this fetch: wait for it, exactly as
+			// the single-id path does, so this read never answers
+			// before the body it asked for is cached (FR-S.8).
+			waiters = append(waiters, f)
+		}
+	}
+	if len(mine) == 0 {
+		return e.waitFlights(ctx, waiters)
+	}
+	fails := make(map[string]error, len(mine))
+	defer func() {
+		for _, o := range mine {
+			e.release(o.id, o.f, fails[o.id])
+		}
+	}()
+	var want []string
+	for _, o := range mine {
+		done, err := e.st.IsHydrated(context.Background(), e.cfg.Account, o.id)
+		if err == nil && done {
+			continue // done: released with a nil error below
+		}
+		want = append(want, o.id)
+	}
+	locs, err := e.st.Locations(context.Background(), e.cfg.Account, want)
+	if err != nil {
+		for _, o := range mine {
+			if !wanted(want, o.id) {
+				continue // already hydrated: stays a nil error
+			}
+			fails[o.id] = err
+		}
+		return err
+	}
+	byFolder := map[string]map[uint32]string{} // folder → uid → email id
+	for _, id := range want {
+		loc, ok := locs[id]
+		if !ok {
+			fails[id] = fmt.Errorf("%w: %s has no backend location", errNotHydrated, id)
+			continue
+		}
+		if byFolder[loc.Folder] == nil {
+			byFolder[loc.Folder] = map[uint32]string{}
+		}
+		byFolder[loc.Folder][loc.UID] = id
+	}
+	for folder, uids := range byFolder {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		e.workMu.Lock()
+		bodies, err := e.work.FetchBodies(ctx, folder, uidKeys(uids))
+		e.workMu.Unlock()
+		if err != nil {
+			for _, id := range uids {
+				fails[id] = err
+			}
+			continue
+		}
+		e.hydrateFetches.Add(int64(len(bodies)))
+		for uid, id := range uids {
+			raw, ok := bodies[uid]
+			if !ok {
+				fails[id] = fmt.Errorf("%w: %s not in fetch response", errNotHydrated, id)
+				continue
+			}
+			if err := e.storeBody(id, raw); err != nil {
+				fails[id] = err
+			}
+		}
+	}
+	return firstErrOf(fails)
+}
+
+// waitFlights blocks until each flight settles (or the caller's context
+// ends) and surfaces the first failure.
+func (e *Engine) waitFlights(ctx context.Context, flights []*flight) error {
+	var first error
+	for _, f := range flights {
+		select {
+		case <-f.done:
+			if f.err != nil && first == nil {
+				first = f.err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return first
+}
+
+func wanted(want []string, id string) bool {
+	for _, w := range want {
+		if w == id {
+			return true
+		}
+	}
+	return false
+}
+
+func uidKeys(m map[uint32]string) []uint32 {
+	out := make([]uint32, 0, len(m))
+	for uid := range m {
+		out = append(out, uid)
+	}
+	return out
+}
+
+func firstErrOf(fails map[string]error) error {
+	for _, err := range fails {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// storeBody parses one fetched message and commits it — the tail both
+// the single and the batched hydration path share.
+func (e *Engine) storeBody(id string, raw []byte) error {
+	res, soft := convert.ParseBody(raw)
+	if soft != nil {
+		e.log.Debug("sync: body parsed with warnings", "email", id, "err", soft)
+	}
+	if len(res.Values) == 0 && len(res.Attachments) == 0 {
+		return fmt.Errorf("%w: %s parsed empty", errNotHydrated, id)
+	}
+	if err := e.st.PutHydrated(context.Background(), e.cfg.Account, id, res); err != nil {
+		return err
+	}
+	e.log.Debug("sync: hydrated", "email", id)
+	return nil
 }
 
 // claim starts (or joins) the single-flight for one email id. The
@@ -87,24 +238,18 @@ func (e *Engine) hydrate(ctx context.Context, id string) error {
 }
 
 // doHydrate is the owner's fetch: get the bytes, parse them, commit
-// them (FR-S.8).
+// them (FR-S.8). Already-hydrated ids short-circuit: the search
+// backfill lane re-enqueues candidates on every text query, so without
+// this check a completed body would be re-downloaded on each repeat.
 func (e *Engine) doHydrate(id string) error {
+	if done, err := e.st.IsHydrated(context.Background(), e.cfg.Account, id); err == nil && done {
+		return nil
+	}
 	raw, err := e.fetchRawBody(id)
 	if err != nil {
 		return err
 	}
-	res, soft := convert.ParseBody(raw)
-	if soft != nil {
-		e.log.Debug("sync: body parsed with warnings", "email", id, "err", soft)
-	}
-	if len(res.Values) == 0 && len(res.Attachments) == 0 {
-		return fmt.Errorf("%w: %s parsed empty", errNotHydrated, id)
-	}
-	if err := e.st.PutHydrated(context.Background(), e.cfg.Account, id, res); err != nil {
-		return err
-	}
-	e.log.Debug("sync: hydrated", "email", id)
-	return nil
+	return e.storeBody(id, raw)
 }
 
 // fetchRawBody downloads one message's bytes over the work connection:
@@ -221,5 +366,59 @@ func (e *Engine) prefetch(ctx context.Context) {
 				e.log.Debug("sync: prefetch skipped", "email", id, "err", err)
 			}
 		}(id)
+	}
+}
+
+// searchBackfill is the store's search-driven backfill hook (FR-X.5):
+// a text query just answered with header matches and these ids are the
+// unhydrated candidates it found in scope. The ids land in the
+// backfill lane — non-blocking, bounded — and workers hydrate them
+// one fetch at a time; each finished body re-enters the search index
+// and bumps queryState, so the client's next query (or SSE nudge)
+// picks up the late matches. An overflowing lane drops ids, never
+// blocks a response: the next query re-enqueues whatever is still
+// unhydrated, which is also what makes backfill resumable across
+// restarts (FR-X.6).
+func (e *Engine) searchBackfill(account string, ids []string) {
+	if account != e.cfg.Account {
+		return
+	}
+	for _, id := range ids {
+		select {
+		case e.backfill <- id:
+		default:
+			return
+		}
+	}
+}
+
+// backfillWorkers starts the bounded hydration lane; called from Run
+// so the workers share the engine context and stop with it. Interactive
+// Email/get hydrations never enter this lane — they hydrate inline —
+// and both lanes serialise on the work connection, so backfill can
+// delay a read by at most one in-flight fetch (FR-X.6).
+func (e *Engine) backfillWorkers(ctx context.Context) {
+	for range e.cfg.Concurrency {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case id := <-e.backfill:
+					// Same jitter as prefetch: a search over a large
+					// unhydrated folder must not hammer the provider
+					// (FR-S.12).
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(time.Duration(rand.Intn(200)) * time.Millisecond): //nolint:gosec // jitter
+					}
+					if err := e.hydrate(ctx, id); err != nil &&
+						!errors.Is(err, errNotConnected) && !errors.Is(err, context.Canceled) {
+						e.log.Debug("sync: backfill hydrate failed", "email", id, "err", err)
+					}
+				}
+			}
+		}()
 	}
 }

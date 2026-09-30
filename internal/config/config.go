@@ -39,6 +39,12 @@ type Auth struct {
 type Search struct {
 	Backfill    bool `toml:"backfill"`
 	Concurrency int  `toml:"concurrency"`
+	// BackfillScan bounds how many unhydrated candidates one text
+	// query may enqueue for background hydration (FR-X.5, FR-X.6);
+	// 0 selects the documented default of 2000. Without a bound a
+	// single search over a large unhydrated mailbox would become the
+	// full mirror D-6 rejects.
+	BackfillScan int `toml:"backfill_scan"`
 }
 
 // Sync configures the synchronisation engine (FR-S; decoded from M0,
@@ -109,7 +115,7 @@ func defaults() Config {
 	return Config{
 		LogLevel: "info",
 		Auth:     Auth{Mode: "token"},
-		Search:   Search{Backfill: true, Concurrency: 4},
+		Search:   Search{Backfill: true, Concurrency: 4, BackfillScan: 2000},
 		Sync: Sync{
 			Interval:       Duration(5 * time.Minute),
 			BatchSize:      500,

@@ -36,6 +36,17 @@ type Store struct {
 	// answers: previews for previewIDs, full bodies for bodyIDs
 	// (FR-S.8 single-flight lives on that side). Nil serves from cache.
 	Ensure func(ctx context.Context, account string, previewIDs, bodyIDs []string) error
+	// SearchBackfill is the search-driven backfill hook (FR-X.5): the
+	// store hands the engine the unhydrated candidates a text query
+	// found in scope; the engine hydrates them in its bounded lane and
+	// each finished body re-enters the index with a queryState bump.
+	// Nil means search.backfill = false (FR-X.8). The call returns
+	// before any hydration work happens.
+	SearchBackfill func(account string, ids []string)
+	// BackfillScan bounds how many unhydrated candidates one text
+	// query may enqueue (0 → the documented default), so a search can
+	// never turn into a full mirror (D-6).
+	BackfillScan int
 }
 
 // Options configures Open.
@@ -45,6 +56,10 @@ type Options struct {
 	Logger  *slog.Logger
 	// Publish signals the account after a committed change.
 	Publish func(account string)
+	// BackfillScan bounds the unhydrated candidates one text query may
+	// enqueue for search-driven backfill (FR-X.6); 0 selects the
+	// documented default.
+	BackfillScan int
 }
 
 // Open opens or creates the database under opts.DataDir and runs the
@@ -67,8 +82,12 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 	// PRAGMA behaviour uniform (they are per-connection); reads and writes
 	// interleave inside WAL anyway.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, log: log, data: opts.DataDir, blobs: newBlobStore(opts.DataDir), publish: opts.Publish}
+	s := &Store{db: db, log: log, data: opts.DataDir, blobs: newBlobStore(opts.DataDir), publish: opts.Publish, BackfillScan: opts.BackfillScan}
 	if err := s.migrate(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.buildFTSIndex(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

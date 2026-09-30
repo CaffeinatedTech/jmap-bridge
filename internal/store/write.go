@@ -525,6 +525,25 @@ func (s *Store) MailboxIDByPath(ctx context.Context, account, path string) (stri
 	return id, nil
 }
 
+// SetMailboxSortOrder stamps a client-requested display order onto one
+// mailbox (FR-M.12): IMAP folders carry no order, so the cache is the
+// only place a client-requested order can live. A later discovery pass
+// may re-derive it; the bump keeps the change visible to clients.
+func (s *Store) SetMailboxSortOrder(ctx context.Context, account, mailboxID string, sortOrder int) error {
+	return s.tx(ctx, account, true, func(tx *sql.Tx) error {
+		seq, err := nextSeq(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE mailboxes SET sort_order = ?, updated_modseq = ? WHERE id = ? AND account = ?`,
+			sortOrder, seq, mailboxID, account); err != nil {
+			return fmt.Errorf("store: set sort order: %w", err)
+		}
+		return bumpMailboxState(ctx, tx, account, seq)
+	})
+}
+
 // MailboxIDByRole resolves a JMAP role (inbox, trash, drafts, …) to the
 // mailbox the server's SPECIAL-USE attributes or well-known name gave
 // it, "" when the account has no such mailbox.

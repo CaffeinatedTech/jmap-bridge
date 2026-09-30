@@ -233,6 +233,14 @@ func createMessage(ctx context.Context, tx *sql.Tx, account string, mailboxUID i
 		sentAt, rec.SubjectL, rec.FromL, rec.ToL, rec.Structure); err != nil {
 		return "", fmt.Errorf("store: insert content: %w", err)
 	}
+	// Headers are indexable from birth (FR-X.1): the body column stays
+	// empty until hydration fills it.
+	if err := ftsInsert(ctx, tx, id, rec.SubjectL, rec.FromL, rec.ToL, ""); err != nil {
+		return "", err
+	}
+	if err := bumpFTSState(ctx, tx, account, seq); err != nil {
+		return "", err
+	}
 	if err := addMembership(ctx, tx, account, mailboxUID, id, seq); err != nil {
 		return "", err
 	}
@@ -264,11 +272,15 @@ func addMembership(ctx context.Context, tx *sql.Tx, account string, mailboxUID i
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO email_mailbox(account, mailbox_uid, email_id, removed_modseq, added_modseq)
-		 VALUES (?, ?, ?, 0, ?)
+		`INSERT INTO email_mailbox(account, mailbox_uid, email_id, removed_modseq, added_modseq,
+		   received_at, thread_id, has_attachment)
+		 SELECT ?, ?, ?, 0, ?, e.received_at, e.thread_id, e.has_attachment
+		   FROM emails e WHERE e.id = ?
 		 ON CONFLICT(mailbox_uid, email_id) WHERE removed_modseq = 0
-		 DO UPDATE SET removed_modseq = 0, added_modseq = excluded.added_modseq`,
-		account, mailboxUID, emailID, seq); err != nil {
+		 DO UPDATE SET removed_modseq = 0, added_modseq = excluded.added_modseq,
+		   received_at = excluded.received_at, thread_id = excluded.thread_id,
+		   has_attachment = excluded.has_attachment`,
+		account, mailboxUID, emailID, seq, emailID); err != nil {
 		return fmt.Errorf("store: add membership: %w", err)
 	}
 	if existed {
@@ -579,6 +591,9 @@ func resetFolderLocked(ctx context.Context, tx *sql.Tx, account string, mailboxU
 			seq, seq, id, account); err != nil {
 			return err
 		}
+		if err := ftsDelete(ctx, tx, id); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM email_msgid WHERE account = ? AND email_id = ?`, account, id); err != nil {
 			return err
@@ -650,6 +665,10 @@ func (s *Store) PurgeTombstones(ctx context.Context, retention time.Duration) er
 			if _, err := tx.ExecContext(ctx,
 				`DELETE FROM email_msgid WHERE account = ?
 				   AND email_id NOT IN (SELECT id FROM emails)`, account); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM email_search WHERE email_id NOT IN (SELECT id FROM emails)`); err != nil {
 				return err
 			}
 			if _, err := tx.ExecContext(ctx,

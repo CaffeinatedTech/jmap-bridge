@@ -388,6 +388,36 @@ func (c *Conn) FetchBody(ctx context.Context, uid uint32) ([]byte, error) {
 	}
 }
 
+// FetchBodies downloads full messages for one folder in one batch:
+// one EXAMINE, then a single-UID BODY.PEEK fetch per message while the
+// folder stays selected, one Unselect at the end. The per-message
+// select/fetch/unselect round trip is what makes hydration collapse on
+// large folders — the server's select-time bookkeeping (maildir
+// directory rescan, index refresh) is per EXAMINE, not per FETCH, so
+// amortising it is the difference between a hydration rate clients can
+// feel and one they can't (NFR-1's ≥ 15 msg/s floor assumes it).
+// Responses still carry the full message with BODY.PEEK — never
+// BODY[], so reading through the bridge never sets \Seen behind the
+// client's back (FR-M.8).
+func (c *Conn) FetchBodies(ctx context.Context, folder string, uids []uint32) (map[uint32][]byte, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	if _, err := c.Examine(ctx, folder, nil); err != nil {
+		return nil, fmt.Errorf("imapdrv: examine for bodies: %w", err)
+	}
+	defer func() { _ = c.Unselect(context.Background()) }()
+	out := make(map[uint32][]byte, len(uids))
+	for _, uid := range uids {
+		raw, err := c.FetchBody(ctx, uid)
+		if err != nil {
+			return nil, fmt.Errorf("imapdrv: fetch body %d: %w", uid, err)
+		}
+		out[uid] = raw
+	}
+	return out, nil
+}
+
 // --- response mapping ---
 
 func statusFrom(st *imap.MailboxStatus) FolderStatus {

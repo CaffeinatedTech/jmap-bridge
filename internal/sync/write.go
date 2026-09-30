@@ -626,8 +626,11 @@ func (e *Engine) draftFolder(ctx context.Context, account string, mailboxIDs []s
 }
 
 // CreateMailbox runs CREATE, refreshes discovery (role detection,
-// FR-M.12) and returns the id the refresh minted.
-func (e *Engine) CreateMailbox(ctx context.Context, account, name, parentID string) (string, error) {
+// FR-M.12) and returns the id the refresh minted. sortOrder is the
+// client-requested display order (0 = none requested): the engine
+// applies it to the cache after discovery, since IMAP folders carry
+// no order — a later discovery pass may re-derive it.
+func (e *Engine) CreateMailbox(ctx context.Context, account, name, parentID string, sortOrder int) (string, error) {
 	if account != e.cfg.Account {
 		return "", fmt.Errorf("sync: create mailbox for foreign account %q", account)
 	}
@@ -658,6 +661,11 @@ func (e *Engine) CreateMailbox(ctx context.Context, account, name, parentID stri
 	}
 	if id == "" {
 		return "", fmt.Errorf("server accepted CREATE %q but does not list it", path)
+	}
+	if sortOrder != 0 {
+		if err := e.st.SetMailboxSortOrder(ctx, account, id, sortOrder); err != nil {
+			return "", err
+		}
 	}
 	return id, nil
 }

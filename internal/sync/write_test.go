@@ -625,10 +625,36 @@ func TestMailboxSetCreateRenameDelete(t *testing.T) {
 	// A property the bridge derives from the server is refused loudly.
 	derived := jmap(t, acct, h, "Mailbox/set", map[string]any{
 		"accountId": "acct",
-		"create":    map[string]any{"d": map[string]any{"name": "Nope", "sortOrder": 10}},
+		"create":    map[string]any{"d": map[string]any{"name": "Nope", "role": "inbox"}},
 	})
 	if errs := setErrors(t, derived, "notCreated"); errs["d"].Type != "invalidProperties" {
-		t.Errorf("sortOrder create = %+v, want invalidProperties", errs)
+		t.Errorf("role create = %+v, want invalidProperties", errs)
+	}
+
+	// sortOrder is honored on create (the M2 conformance gap jmap-tui's
+	// fixture seeding exposed): the cache keeps the requested order and
+	// serves it back, since IMAP folders carry none (FR-M.12).
+	ordered := jmap(t, acct, h, "Mailbox/set", map[string]any{
+		"accountId": "acct",
+		"create":    map[string]any{"e": map[string]any{"name": "Ordered", "sortOrder": 42}},
+	})
+	if errs := setErrors(t, ordered, "notCreated"); len(errs) > 0 {
+		t.Fatalf("create with sortOrder: %+v", errs)
+	}
+	gotOrdered := jmap(t, acct, h, "Mailbox/get", map[string]any{
+		"accountId": "acct", "ids": []string{createdID(t, ordered, "e")},
+	})
+	if so := mailboxProp(t, gotOrdered, 0, "sortOrder"); so != float64(42) {
+		t.Errorf("created sortOrder = %v, want 42", so)
+	}
+
+	// sortOrder is still refused on update (only create stores it).
+	updOrder := jmap(t, acct, h, "Mailbox/set", map[string]any{
+		"accountId": "acct",
+		"update":    map[string]any{topID: map[string]any{"sortOrder": 7}},
+	})
+	if errs := setErrors(t, updOrder, "notUpdated"); errs[topID].Type != "invalidProperties" {
+		t.Errorf("sortOrder update = %+v, want invalidProperties", errs)
 	}
 
 	// Rename keeps the id and follows the child's path.

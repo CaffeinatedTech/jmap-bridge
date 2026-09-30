@@ -122,6 +122,18 @@ func mergeThreads(ctx context.Context, tx *sql.Tx, account, survivor string, can
 			survivor, account, loser); err != nil {
 			return fmt.Errorf("store: merge thread keys: %w", err)
 		}
+		// Keep the membership rows' denormalised thread ids in step
+		// (schema v6) BEFORE the emails update reassigns thread_id —
+		// the subquery below finds the members by their old thread.
+		// The mailbox query collapses on these copies without joining
+		// back into emails.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE email_mailbox SET thread_id = ?
+			 WHERE removed_modseq = 0 AND email_id IN
+			   (SELECT id FROM emails WHERE account = ? AND thread_id = ? AND deleted IS NULL)`,
+			survivor, account, loser); err != nil {
+			return fmt.Errorf("store: merge thread memberships: %w", err)
+		}
 		// Live members move visibly; tombstones keep their historical
 		// thread without generating change noise.
 		if _, err := tx.ExecContext(ctx,

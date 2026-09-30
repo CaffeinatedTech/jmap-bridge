@@ -252,6 +252,9 @@ func orphanEmails(ctx context.Context, tx *sql.Tx, account string, seq int64, ca
 			seq, seq, c.id, account); err != nil {
 			return err
 		}
+		if err := ftsDelete(ctx, tx, c.id); err != nil {
+			return err
+		}
 		touched = true
 	}
 	if touched {
@@ -456,8 +459,8 @@ func recountMailbox(ctx context.Context, tx *sql.Tx, account string, mailboxUID 
 		`UPDATE mailboxes SET
 		   total_emails   = (SELECT COUNT(*) `+live+`),
 		   unread_emails  = (SELECT COUNT(*) `+live+unseen+`),
-		   total_threads  = (SELECT COUNT(DISTINCT thread_id) `+live+`),
-		   unread_threads = (SELECT COUNT(DISTINCT thread_id) `+live+unseen+`)
+		   total_threads  = (SELECT COUNT(DISTINCT e.thread_id) `+live+`),
+		   unread_threads = (SELECT COUNT(DISTINCT e.thread_id) `+live+unseen+`)
 		 WHERE rowid = ? AND account = ?`,
 		mailboxUID, mailboxUID, mailboxUID, mailboxUID, mailboxUID, account)
 	if err != nil {

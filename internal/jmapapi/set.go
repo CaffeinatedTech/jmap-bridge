@@ -330,14 +330,16 @@ type mailboxSetArgs struct {
 }
 
 // mailboxCreate is the subset of Mailbox the bridge accepts on create.
-// role, isSubscribed and sortOrder are deliberately absent: role and
-// the sort order are derived from the server on every discovery pass
-// (FR-M.12), so accepting a client value would report a change the next
-// LIST erases — they fail with invalidProperties instead (tracked for
-// the M7 conformance run).
+// name and parentId are always honored. sortOrder (RFC 8621 §2,
+// UnsignedInt) is honored on create: the bridge stores it and serves
+// it until a later discovery pass re-derives it. role and isSubscribed
+// are deliberately absent: role is derived from the server's
+// SPECIAL-USE flags and isSubscribed is unmodelled — accepting a value
+// we cannot keep would mislead the client (FR-M.12).
 type mailboxCreate struct {
-	Name     string  `json:"name"`
-	ParentID *string `json:"parentId"`
+	Name      string  `json:"name"`
+	ParentID  *string `json:"parentId"`
+	SortOrder *int    `json:"sortOrder"`
 }
 
 func (h *Handler) mailboxSet(ctx context.Context, acct *Account, raw json.RawMessage) (any, *methodErr) {
@@ -428,7 +430,7 @@ func (h *Handler) createMailbox(ctx context.Context, acct *Account, raw json.Raw
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return "", methodErrorf("invalidArguments", "%s", err)
 	}
-	if merr := rejectMailboxProps(raw); merr != nil {
+	if merr := rejectMailboxProps(raw, true); merr != nil {
 		return "", merr
 	}
 	if strings.TrimSpace(c.Name) == "" {
@@ -441,7 +443,18 @@ func (h *Handler) createMailbox(ctx context.Context, acct *Account, raw json.Raw
 	if c.ParentID != nil {
 		parent = *c.ParentID
 	}
-	id, err := acct.Backend.CreateMailbox(ctx, acct.ID, c.Name, parent)
+	sortOrder := 0
+	if c.SortOrder != nil {
+		if *c.SortOrder < 0 {
+			return "", &methodErr{
+				Type:        "invalidProperties",
+				Description: "sortOrder must not be negative",
+				Properties:  []string{"sortOrder"},
+			}
+		}
+		sortOrder = *c.SortOrder
+	}
+	id, err := acct.Backend.CreateMailbox(ctx, acct.ID, c.Name, parent, sortOrder)
 	if err != nil {
 		return "", backendMethodErr(err, "name")
 	}
@@ -450,8 +463,10 @@ func (h *Handler) createMailbox(ctx context.Context, acct *Account, raw json.Raw
 
 // rejectMailboxProps refuses the Mailbox properties the bridge derives
 // from the server instead of accepting a value it cannot keep (see
-// mailboxCreate).
-func rejectMailboxProps(raw json.RawMessage) *methodErr {
+// mailboxCreate). isCreate loosens the guard for sortOrder only: a
+// client-requested order is stored at create time and honored until a
+// later discovery pass re-derives it; on update it is still refused.
+func rejectMailboxProps(raw json.RawMessage, isCreate bool) *methodErr {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return methodErrorf("invalidArguments", "%s", err)
@@ -460,6 +475,10 @@ func rejectMailboxProps(raw json.RawMessage) *methodErr {
 	for key := range obj {
 		switch key {
 		case "name", "parentId":
+		case "sortOrder":
+			if !isCreate {
+				bad = append(bad, key)
+			}
 		default:
 			bad = append(bad, key)
 		}
@@ -481,7 +500,7 @@ func (h *Handler) parseMailboxUpdate(ctx context.Context, acct *Account, id stri
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return "", "", methodErrorf("invalidArguments", "%s", err)
 	}
-	if bad := rejectMailboxProps(raw); bad != nil {
+	if bad := rejectMailboxProps(raw, false); bad != nil {
 		return "", "", bad
 	}
 	mbs, _, notFound, err := acct.Store.MailboxesByID(ctx, acct.ID, []string{id})

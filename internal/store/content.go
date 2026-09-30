@@ -39,11 +39,11 @@ type BodyResult struct {
 // client can already see (the preview) actually changes (PLAN §5) —
 // hydration itself must not make every connected client refetch.
 func (s *Store) PutHydrated(ctx context.Context, account, emailID string, res BodyResult) error {
-	var oldPreview, structure string
+	var oldPreview, structure, subjectL, senderL, recipientL string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT e.preview, c.body_structure FROM emails e
+		`SELECT e.preview, c.body_structure, c.subject_l, c.from_l, c.to_l FROM emails e
 		 JOIN email_content c ON c.id = e.id WHERE e.id = ? AND e.account = ?`,
-		emailID, account).Scan(&oldPreview, &structure)
+		emailID, account).Scan(&oldPreview, &structure, &subjectL, &senderL, &recipientL)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("store: hydrate: email %s not found", emailID)
 	}
@@ -58,14 +58,12 @@ func (s *Store) PutHydrated(ctx context.Context, account, emailID string, res Bo
 
 	return s.tx(ctx, account, true, func(tx *sql.Tx) error {
 		var seq int64
-		var err error
-		// Blob ids come from the same counter; only allocate one when
-		// something must actually be stamped with it.
-		if previewChanged {
-			seq, err = nextSeq(ctx, tx)
-			if err != nil {
-				return err
-			}
+		// Hydration always rewrites the index row, so the counter is
+		// needed on every path; only the preview change also touches
+		// the Email state with it.
+		seq, err = nextSeq(ctx, tx)
+		if err != nil {
+			return err
 		}
 		if len(res.Attachments) > 0 {
 			structure, err = injectBlobIDs(ctx, tx, s.blobs, account, structure, res.Attachments)
@@ -85,6 +83,17 @@ func (s *Store) PutHydrated(ctx context.Context, account, emailID string, res Bo
 			 WHERE id = ?`,
 			values, structure, time.Now().UnixMicro(), emailID); err != nil {
 			return fmt.Errorf("store: write body: %w", err)
+		}
+		// Body tokens enter the index now (FR-X.5). The bump moves
+		// queryState so text-search clients pick up late matches; the
+		// Email state stays put — hydrated bodies are not a refetch
+		// event for clients holding summaries (PLAN §5).
+		if err := ftsReplace(ctx, tx, emailID, subjectL, senderL, recipientL,
+			indexBodyText(structure, res.Values)); err != nil {
+			return err
+		}
+		if err := bumpFTSState(ctx, tx, account, seq); err != nil {
+			return err
 		}
 		if previewChanged {
 			if _, err := tx.ExecContext(ctx,

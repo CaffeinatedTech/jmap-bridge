@@ -173,6 +173,42 @@ CREATE TABLE oauth_tokens (
 	`
 ALTER TABLE mailboxes ADD COLUMN implicit INTEGER NOT NULL DEFAULT 0;
 `,
+	// v5 (M5): the real search index. The v1 email_fts shape (one
+	// "people" column) was never written to — from/to filters need
+	// separate columns or a from-filter would also match recipients —
+	// and a prefix index keeps from:ada-style prefix queries off the
+	// full term scan (FR-X.1, FR-X.2). Open() backfills it once for
+	// rows ingested before this migration (fts.go).
+	`
+DROP TABLE IF EXISTS email_fts;
+CREATE VIRTUAL TABLE email_search USING fts5(
+  email_id UNINDEXED, subject, sender, recipient, body,
+  tokenize = 'unicode61 remove_diacritics 2',
+  prefix = '2 3'
+);
+`,
+	// v6 (M5): the mailbox query's hot path (browse/collapse a full
+	// mailbox in sort order) must not do 100k text-PK lookups back into
+	// emails — NFR-1's 150 ms budget measured exactly that. The three
+	// columns the ordering, collapsing and hasAttachment filter need
+	// are denormalised onto the membership row, backed by a covering
+	// index; the queries in query.go read them instead of joining.
+	// Invariant: a live membership row's copies match its email's
+	// values — membership is removed in the same transaction that
+	// tombstones the last copy, and thread merges rewrite both.
+	`
+ALTER TABLE email_mailbox ADD COLUMN received_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE email_mailbox ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE email_mailbox ADD COLUMN has_attachment INTEGER NOT NULL DEFAULT 0;
+UPDATE email_mailbox SET
+  received_at = (SELECT received_at FROM emails WHERE id = email_id),
+  thread_id = (SELECT thread_id FROM emails WHERE id = email_id),
+  has_attachment = COALESCE((SELECT has_attachment FROM emails WHERE id = email_id), 0);
+CREATE INDEX email_mailbox_box ON email_mailbox(mailbox_uid, removed_modseq, received_at, email_id);
+CREATE INDEX email_mailbox_thread ON email_mailbox(mailbox_uid, removed_modseq, thread_id, received_at, email_id);
+CREATE INDEX email_content_unhydrated ON email_content(hydrated_at);
+ALTER TABLE email_content ADD COLUMN fts_rowid INTEGER;
+`,
 }
 
 // migrate applies every not-yet-applied migration and refuses a database
