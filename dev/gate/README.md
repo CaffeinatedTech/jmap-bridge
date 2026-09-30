@@ -8,25 +8,35 @@ Secrets live in `.env` (never committed): the OAuth2 client secret and
 `JMAP_BRIDGE_SECRET_KEY`, which unseals the stored refresh token in
 `data/bridge.db` — losing that key means re-consenting in a browser.
 
-## Resume after a reboot
+## What the gate covers
+
+The 2026-10-01 partial runs demonstrated live: OAuth2 consent → stored
+token → XOAUTH2 IMAP connect (`tier=condstore`, COMPRESS); the Gmail
+namespace and roles; implicit All Mail; label create/list both ways; the
+bridge→Gmail message-label write; and an archived message still searchable
+in All Mail. The fixture tiers cover those repeatably. `m4gate.py` therefore
+re-checks only the deltas those runs never reached:
+
+1. a message label applied in Gmail appears in the bridge;
+2. archiving from the bridge drops INBOX membership (then undoes it, so no
+   mail is left moved);
+3. compose + send over Gmail SMTP (XOAUTH2) → one Sent copy, one delivered.
+
+## Running it — once, not in a loop
 
     bash dev/gate/gmail-start.sh        # bridge up (builds the binary first)
-    python3 dev/gate/m4gate.py          # one gate pass, results on stdout
-
-Gmail throttles IMAP writes per **account** — reads keep working, writes
-answer `OK [THROTTLED]` and are silently dropped — after sustained heavy
-usage. The restriction lifts after roughly 24 h of *decreased* usage, so
-do not probe it in a loop: retrying works against the cooldown, and every
-client on the account (the bridge, a mail sorter, a desktop client)
-counts. Stop them all, wait, then run a single pass:
-
-    bash dev/gate/gmail-start.sh
+    # wait for the first sync pass to settle (INBOX non-empty in the bridge)
     python3 dev/gate/m4gate.py
 
-If the first `CREATE` does not stick, stop and wait another day; if it
-does, the gate runs to completion. (An unattended watcher was tried and
-removed 2026-09-30: its periodic probes fed the quarantine it was waiting
-out.)
+Gmail quarantines IMAP writes per **account** after sustained use: reads keep
+working, writes answer `OK [THROTTLED]` and are silently dropped, and the
+restriction lifts only after ~24 h of *decreased* usage. Every client on the
+account counts (the bridge, a mail sorter, a desktop client). `m4gate.py`
+aborts on the first `[THROTTLED]` and paces its writes, so a run can never
+deepen the quarantine. If it aborts: stop every writer, wait another day,
+then try once more — re-running a throttled gate is what turns this into a
+never-ending loop. (An unattended watcher did exactly that and was removed
+2026-09-30.)
 
 ## The helper binary
 

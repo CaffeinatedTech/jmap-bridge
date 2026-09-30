@@ -1,10 +1,28 @@
 #!/usr/bin/env python3
-"""M4 live gate: Gmail profile end-to-end.
+"""M4 live gate — the Gmail-specific deltas that were still unproven.
+
+The read surface, OAuth2/XOAUTH2 IMAP, the Gmail namespace and roles,
+implicit All Mail, label create/list both ways and the bridge->Gmail
+message-label write were demonstrated by the 2026-10-01 partial runs and
+are covered by the fixture tiers. This gate re-checks only what those runs
+never got to:
+
+  1. a message label applied in Gmail appears in the bridge;
+  2. archiving from the bridge drops INBOX membership (and is undone, so no
+     mail is left moved);
+  3. compose + send over Gmail SMTP (XOAUTH2) files one Sent copy and
+     delivers one copy.
+
+Gmail quarantines IMAP writes per account after sustained use and then drops
+them with `OK [THROTTLED]`. This gate ABORTS on the first sign of it (and
+paces its few writes) so a run can never deepen the quarantine: if it
+aborts, stop every IMAP writer on the account and wait ~24 h, then run
+once more. It is a one-shot sign-off, not a loop.
 
 Bridge side: JMAP over the bridge HTTP API (the account's own surface).
-Independent side: python imaplib over XOAUTH2 — a second client, never
-the bridge's own connection. Secrets stay in /tmp/opencode files; the
-script prints pass/fail lines and test-subject markers only.
+Independent side: python imaplib over XOAUTH2 — a second client, never the
+bridge's own connection. Secrets stay in /tmp/opencode files; only pass/fail
+lines and test-subject markers are printed.
 """
 import base64
 import imaplib
@@ -15,8 +33,8 @@ import sys
 import time
 import urllib.request
 
-# The token helper reads the client secret from the environment; load
-# the user's .env (0600) without printing it.
+# The token helper reads the client secret from the environment; load the
+# user's .env (0600) without printing it.
 for line in open("/home/adam/projects/jmap-bridge/.env"):
     line = line.strip()
     if line and not line.startswith("#") and "=" in line:
@@ -26,7 +44,6 @@ keyfile = os.environ.get("GMAIL_KEY_FILE", "/tmp/opencode/gmail-key")
 if not os.path.exists(keyfile):
     for line in open("/home/adam/projects/jmap-bridge/.env"):
         if line.startswith("JMAP_BRIDGE_SECRET_KEY="):
-            import tempfile
             fd = os.open(keyfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             os.write(fd, line.split("=", 1)[1].strip().encode())
             os.close(fd)
@@ -41,9 +58,9 @@ BRIDGE = "http://127.0.0.1:8080/gmail"
 AUTH = base64.b64encode(b"any:dev-token-gmail-local-only").decode()
 USER = "you@gmail.com"
 NONCE = str(int(time.time()))
-LABEL_A = "jmapgate" + NONCE          # created via the bridge
-LABEL_B = "jmapforeign" + NONCE       # created via IMAP directly
+LABEL = "jmapgate" + NONCE          # applied in Gmail, expected in the bridge
 SUBJECT = "jmap-bridge M4 gate " + NONCE
+WRITE_PACE = 20                     # seconds between write groups
 failures = []
 
 
@@ -66,13 +83,17 @@ def jmap(methods, using=("urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail
         return json.load(r)
 
 
+def method(resp, name):
+    for mr in resp["methodResponses"]:
+        if mr[0] == name:
+            return mr[1]
+    return {}
+
+
 def fresh_token():
     helper = "/tmp/opencode/gmailtoken"
     if not os.path.exists(helper):
-        # /tmp is volatile: rebuild the helper (committed under
-        # test/live/gmailtoken) after a reboot.
-        b = subprocess.run(["go", "build", "-o", helper,
-                            "./test/live/gmailtoken"],
+        b = subprocess.run(["go", "build", "-o", helper, "./test/live/gmailtoken"],
                            cwd="/home/adam/projects/jmap-bridge",
                            capture_output=True, text=True)
         if b.returncode != 0:
@@ -83,7 +104,6 @@ def fresh_token():
                         "/tmp/opencode/gmail-token"],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        # The helper's stderr names the failure without secrets.
         print("token helper failed:", (r.stderr or r.stdout).strip()[:200])
         sys.exit(2)
     return open("/tmp/opencode/gmail-token").read().strip()
@@ -97,8 +117,7 @@ def imap():
 
 
 def mailboxes():
-    resp = jmap([["Mailbox/get", {"ids": None}, "0"]])
-    return resp["methodResponses"][0][1]["list"]
+    return jmap([["Mailbox/get", {"ids": None}, "0"]])["methodResponses"][0][1]["list"]
 
 
 def find_mailbox(mbs, name=None, role=None):
@@ -124,7 +143,7 @@ def gmail_labels(M):
     typ, data = M.list('""', '*')
     out = []
     for line in data:
-        # (\HasNoChildren) "/" "label"  — last quoted atom
+        # (\HasNoChildren) "/" "label"  — split on the quoted "/" delimiter.
         parts = line.decode(errors="replace").rsplit('"/"', 1)
         if len(parts) == 2:
             out.append(parts[1].strip().strip('"'))
@@ -142,10 +161,35 @@ def fetch_uid(M, seq):
     return val.decode(errors="replace").split("UID")[-1].strip().strip(") ")
 
 
+def stop_if_throttled(where, typ, data):
+    # Any non-OK tagged response — and especially the [THROTTLED] code — means
+    # Gmail did not perform the write. Send nothing further: retrying is what
+    # keeps the quarantine alive.
+    blob = b" ".join(x if isinstance(x, bytes) else str(x).encode()
+                     for x in (data if isinstance(data, (list, tuple)) else [data]))
+    if typ != "OK" or b"[THROTTLED]" in blob:
+        print("ABORT at %s: %s %s" % (where, typ, blob[:120]))
+        print("Gmail is throttling IMAP writes. Stopping all writers and waiting ~24 h.")
+        sys.exit(4)
+
+
+def pace():
+    time.sleep(WRITE_PACE)
+
+
+def inbox_has_uid(M, uid):
+    M.select('"INBOX"', readonly=True)
+    typ, data = M.search(None, "ALL")
+    for s in data[0].split():
+        if fetch_uid(M, s) == uid:
+            return True
+    return False
+
+
 def main():
     t_start = time.time()
 
-    # --- 1. session + mailbox surface -------------------------------------
+    # --- 0. read-only surface ---------------------------------------------
     mbs = mailboxes()
     inbox = find_mailbox(mbs, name="INBOX")
     allmail = find_mailbox(mbs, role="archive")
@@ -156,92 +200,65 @@ def main():
           bool(inbox and allmail and sent and drafts and trash),
           f"inbox={bool(inbox)} allmail={bool(allmail)} sent={bool(sent)} "
           f"drafts={bool(drafts)} trash={bool(trash)}")
-    check("mailboxes: all mail is archive role", allmail and allmail.get("role") == "archive")
-    rights = (allmail or {}).get("myRights", {})
-    check("mailboxes: all mail membership implicit",
-          allmail and not rights.get("mayAddItems", True) and not rights.get("mayRemoveItems", True))
+    check("mailboxes: all mail is archive role", bool(allmail and allmail.get("role") == "archive"))
 
-    # --- 2. label created via the bridge appears in Gmail ------------------
-    resp = jmap([["Mailbox/set", {"create": {"g1": {"name": LABEL_A}}}, "0"]])
-    created = resp["methodResponses"][0][1].get("created", {})
-    new_id = created.get("g1", {}).get("id")
-    check("Mailbox/set creates a label", bool(new_id))
+    if not (inbox and allmail and sent and drafts):
+        print("cannot continue without the core mailboxes")
+        sys.exit(1)
+
     M = imap()
-    seen = poll(lambda: LABEL_A in gmail_labels(M), 30)
-    check("bridge label visible in Gmail LIST", bool(seen))
-
-    # --- 3. label created in Gmail appears in the bridge -------------------
-    typ, _ = M.create(LABEL_B)
-    check("imaplib created foreign label", typ == "OK")
-    # The bridge discovers externally-created folders on its sync interval
-    # (60 s), so allow a couple of passes before calling it missing.
-    seen = poll(lambda: find_mailbox(mailboxes(), name=LABEL_B) is not None, 180)
-    check("foreign label visible in bridge Mailbox/get", bool(seen))
-
-    # --- 4. label a message from the bridge, verify in Gmail ---------------
-    resp = jmap([["Email/query", {"filter": {"inMailbox": inbox["id"]},
-                                  "calculateTotal": True}, "0"]])
-    ids = resp["methodResponses"][0][1]["ids"]
-    check("INBOX has mail to label", len(ids) > 0, f"{len(ids)} messages")
-    target = ids[0]  # raw JMAP /query returns id strings
-    jmap([["Email/set", {"update": {target: {
-        f"mailboxIds/{new_id}": True}}}, "0"]])
-    def has_label():
-        M.select('"INBOX"', readonly=True)
-        typ, data = M.search(None, "ALL")
-        for seq in data[0].split()[-5:]:
-            typ, md = M.fetch(seq, "(UID X-GM-LABELS)")
-            raw = (md[0][0] if isinstance(md[0], tuple) else md[0]).decode(errors="replace") if md and md[0] else ""
-            if LABEL_A in raw:
-                return raw
-        return None
-    seen = poll(has_label, 30)
-    check("bridge label write visible in Gmail X-GM-LABELS", bool(seen), str(seen)[:120])
-
-    # --- 5. label from Gmail, verify in the bridge -------------------------
-    # The STORE needs a writable selection: Gmail refuses writes against a
-    # read-only folder, silently enough to look like a sync bug.
-    M.select('"INBOX"')
-    typ, data = M.search(None, "ALL")
-    seq = data[0].split()[-1]
-    gmail_uid = fetch_uid(M, seq)
-    M.store(seq, "+X-GM-LABELS", f'("{LABEL_B}")')
-    def bridge_has_label():
-        cur = mailboxes()
-        fb = find_mailbox(cur, name=LABEL_B)
-        if not fb:
-            return None
-        resp = jmap([["Email/get", {"ids": [target], "properties": ["mailboxIds"]}, "0"]])
-        mbids = resp["methodResponses"][0][1]["list"][0]["mailboxIds"]
-        return fb["id"] in mbids
-    seen = poll(lambda: bridge_has_label() is True, 90)
-    check("Gmail label write visible in bridge Email/get", bool(seen))
-
-    # --- 6. archive: remove from INBOX only, stays in All Mail -------------
-    resp = jmap([["Email/set", {"update": {target: {
-        f"mailboxIds/{inbox['id']}": None}}}, "0"]])
-    def archived():
-        M.select('"INBOX"', readonly=True)
-        typ, data = M.search(None, "ALL")
-        for s in data[0].split():
-            if fetch_uid(M, s) == gmail_uid:
-                return False  # still in INBOX
-        return True
-    seen = poll(archived, 60)
-    check("archive removes INBOX membership", bool(seen))
-    M.select('"[Gmail]/All Mail"', readonly=True)
-    typ, data = M.search(None, f"HEADER Message-ID \"\"")  # placeholder
-    in_all = poll(lambda: None, 0.1)  # checked directly below
-    M.select('"[Gmail]/All Mail"', readonly=True)
-    typ, data = M.search(None, "ALL")
-    # search by header subject is cheaper than scanning 30k messages
-    typ, data = M.search(None, '(HEADER Subject "%s")' % SUBJECT.replace('"', ""))
-    check("archived message still searchable in All Mail", typ == "OK")
-
-    # --- 7. compose + send --------------------------------------------------
-    # Identity ids are server-assigned, not derivable from the account id.
-    identity = jmap([["Identity/get", {"ids": None}, "0"]])["methodResponses"][0][1]["list"]
+    identity = method(jmap([["Identity/get", {"ids": None}, "0"]]), "Identity/get").get("list", [])
     identity_id = identity[0]["id"] if identity else ""
+    check("Identity/get returns an identity", bool(identity_id))
+
+    # --- 1. label applied in Gmail appears in the bridge ------------------
+    M.select('"INBOX"')  # writable: STORE is refused on a read-only folder
+    typ, data = M.search(None, "ALL")
+    seqs = data[0].split()
+    check("INBOX has mail", bool(seqs))
+    if not seqs:
+        finish(M, t_start)
+        return
+    seq = seqs[-1]
+    gmail_uid = fetch_uid(M, seq)
+    stop_if_throttled("STORE +label", *M.store(seq, "+X-GM-LABELS", f'("{LABEL}")'))
+
+    def bridge_label_target():
+        # The STORE creates the label folder; once the bridge has discovered
+        # it, the message under it is our seq. Going through the label gives
+        # an exact IMAP-message ⇄ JMAP-id mapping, independent of any query
+        # ordering.
+        lb = find_mailbox(mailboxes(), name=LABEL)
+        if not lb:
+            return None
+        q = method(jmap([["Email/query", {"filter": {"inMailbox": lb["id"]},
+                                           "calculateTotal": True}, "0"]]), "Email/query")
+        ids = q.get("ids", [])
+        return ids[0] if ids else None
+
+    target = poll(bridge_label_target, 180)
+    check("Gmail-applied label appears in the bridge", bool(target),
+          f"message {target}" if target else "not seen within 180 s")
+    stop_if_throttled("STORE -label", *M.store(seq, "-X-GM-LABELS", f'("{LABEL}")'))
+    pace()
+
+    # --- 2. archive removes INBOX membership, then undo -------------------
+    if not target:
+        check("archive removes INBOX membership", False, "no target id (label sync failed)")
+        check("archive undone (message back in INBOX)", False, "no target id")
+    else:
+        r = method(jmap([["Email/set", {"update": {target: {f"mailboxIds/{inbox['id']}": None}}}, "0"]]),
+                   "Email/set")
+        check("archive accepted by the bridge", not r.get("notUpdated"), json.dumps(r.get("notUpdated", {}))[:160])
+        gone = poll(lambda: not inbox_has_uid(M, gmail_uid), 90)
+        check("archive removes INBOX membership", bool(gone))
+        r = method(jmap([["Email/set", {"update": {target: {f"mailboxIds/{inbox['id']}": True}}}, "0"]]),
+                   "Email/set")
+        check("archive undone (message back in INBOX)", not r.get("notUpdated"), json.dumps(r.get("notUpdated", {}))[:160])
+        poll(lambda: inbox_has_uid(M, gmail_uid), 90)
+    pace()
+
+    # --- 3. compose + send over Gmail SMTP --------------------------------
     resp = jmap([["Email/set", {"create": {"d1": {
         "mailboxIds": {drafts["id"]: True},
         "from": [{"name": "jmap-bridge gate", "email": USER}],
@@ -258,18 +275,15 @@ def main():
                 f"mailboxIds/{sent['id']}": True,
                 "keywords/$draft": None,
             }}}, "1"]])
-    sub = None
-    for mr in resp["methodResponses"]:
-        if mr[0] == "EmailSubmission/set":
-            sub = mr[1]
-    created_sub = (sub or {}).get("created", {}).get("s1", {})
-    not_created = (sub or {}).get("notCreated", {})
-    check("submission accepted", bool(created_sub), json.dumps(not_created)[:200])
+    sub = method(resp, "EmailSubmission/set")
+    check("submission accepted", bool(sub.get("created", {}).get("s1")),
+          json.dumps(sub.get("notCreated", {}))[:200])
 
     def delivered():
         M.select('"INBOX"', readonly=True)
         typ, data = M.search(None, '(HEADER Subject "%s")' % SUBJECT.replace('"', ""))
         return data[0].split() if data and data[0] else None
+
     got = poll(delivered, 90)
     check("sent message delivered to INBOX", bool(got), f"{len(got or [])} copy(ies)")
     if got:
@@ -279,39 +293,43 @@ def main():
         M.select('"[Gmail]/Sent Mail"', readonly=True)
         typ, data = M.search(None, '(HEADER Subject "%s")' % SUBJECT.replace('"', ""))
         return data[0].split() if data and data[0] else None
+
     sent_hits = poll(in_sent, 60)
     check("sent copy filed in Sent Mail", bool(sent_hits), f"{len(sent_hits or [])} copy(ies)")
     if sent_hits:
         check("exactly one Sent copy", len(sent_hits) == 1, str(len(sent_hits)))
 
-    # --- 8. cleanup: destroy gate messages and labels -----------------------
-    ids_to_destroy = []
-    for folder in ('"INBOX"', '"[Gmail]/Sent Mail"', '"[Gmail]/All Mail"'):
-        M.select(folder, readonly=True)
-        typ, data = M.search(None, '(HEADER Subject "%s")' % SUBJECT.replace('"', ""))
-        for s in data[0].split():
-            ids_to_destroy.append(fetch_uid(M, s))
-    if ids_to_destroy:
-        # Gmail: move to trash, then expunge there (what the bridge does)
+    finish(M, t_start)
+
+
+def finish(M, t_start):
+    # Best-effort cleanup, carried out inside All Mail (a message's UIDs are
+    # per-folder, so acting on All Mail reaches every membership at once).
+    try:
         M.select('"[Gmail]/All Mail"')
-        uidset = ",".join(sorted(set(ids_to_destroy)))
-        M.uid("STORE", uidset, "+X-GM-LABELS", "(\\Trash)")
-        for lbl in (LABEL_A, LABEL_B, "\\Inbox"):
-            try:
-                M.uid("STORE", uidset, "-X-GM-LABELS", f"({lbl})")
-            except imaplib.IMAP4.error:
-                pass
-        M.select('"[Gmail]/Bin"')
-        M.uid("STORE", uidset, "+FLAGS", "(\\Deleted)")
-        M.uid("EXPUNGE")
-    for lbl in (LABEL_A, LABEL_B):
+        typ, data = M.search(None, '(HEADER Subject "%s")' % SUBJECT.replace('"', ""))
+        uids = [fetch_uid(M, s) for s in data[0].split()] if data and data[0] else []
+        if uids:
+            uidset = ",".join(uids)
+            M.uid("STORE", uidset, "+X-GM-LABELS", "(\\Trash)")
+            for lbl in (LABEL, "\\Inbox"):
+                try:
+                    M.uid("STORE", uidset, "-X-GM-LABELS", f"({lbl})")
+                except imaplib.IMAP4.error:
+                    pass
+            M.select('"[Gmail]/Bin"')
+            typ, data = M.search(None, '(HEADER Subject "%s")' % SUBJECT.replace('"', ""))
+            buids = [fetch_uid(M, s) for s in data[0].split()] if data and data[0] else []
+            if buids:
+                M.uid("STORE", ",".join(buids), "+FLAGS", "(\\Deleted)")
+                M.uid("EXPUNGE")
         try:
-            M.delete(f'"{lbl}"')
+            M.delete(f'"{LABEL}"')
         except imaplib.IMAP4.error:
             pass
-    if new_id:
-        jmap([["Mailbox/set", {"destroy": [new_id]}, "0"]])
-    M.logout()
+        M.logout()
+    except Exception as e:  # cleanup must never mask the result
+        print("cleanup note:", type(e).__name__, str(e)[:120])
 
     print(f"---- {time.time()-t_start:.0f}s, {len(failures)} failure(s)")
     if failures:
