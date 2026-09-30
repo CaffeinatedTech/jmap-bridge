@@ -125,10 +125,21 @@ def gmail_labels(M):
     out = []
     for line in data:
         # (\HasNoChildren) "/" "label"  — last quoted atom
-        parts = line.decode(errors="replace").rsplit('" /"', 1)
+        parts = line.decode(errors="replace").rsplit('"/"', 1)
         if len(parts) == 2:
             out.append(parts[1].strip().strip('"'))
     return out
+
+
+def fetch_uid(M, seq):
+    # imaplib hands back a FETCH "(UID)" value as an int on current Python
+    # and as a bytes blob on older builds; normalise to a string.
+    typ, md = M.fetch(seq, "(UID)")
+    item = md[0]
+    val = item[1] if isinstance(item, tuple) else item
+    if isinstance(val, int):
+        return str(val)
+    return val.decode(errors="replace").split("UID")[-1].strip().strip(") ")
 
 
 def main():
@@ -162,7 +173,9 @@ def main():
     # --- 3. label created in Gmail appears in the bridge -------------------
     typ, _ = M.create(LABEL_B)
     check("imaplib created foreign label", typ == "OK")
-    seen = poll(lambda: find_mailbox(mailboxes(), name=LABEL_B) is not None, 60)
+    # The bridge discovers externally-created folders on its sync interval
+    # (60 s), so allow a couple of passes before calling it missing.
+    seen = poll(lambda: find_mailbox(mailboxes(), name=LABEL_B) is not None, 180)
     check("foreign label visible in bridge Mailbox/get", bool(seen))
 
     # --- 4. label a message from the bridge, verify in Gmail ---------------
@@ -186,11 +199,12 @@ def main():
     check("bridge label write visible in Gmail X-GM-LABELS", bool(seen), str(seen)[:120])
 
     # --- 5. label from Gmail, verify in the bridge -------------------------
-    M.select('"INBOX"', readonly=True)
+    # The STORE needs a writable selection: Gmail refuses writes against a
+    # read-only folder, silently enough to look like a sync bug.
+    M.select('"INBOX"')
     typ, data = M.search(None, "ALL")
     seq = data[0].split()[-1]
-    typ, md = M.fetch(seq, "(UID)")
-    gmail_uid = md[0][1].decode().split(": ")[1].strip(") ")
+    gmail_uid = fetch_uid(M, seq)
     M.store(seq, "+X-GM-LABELS", f'("{LABEL_B}")')
     def bridge_has_label():
         cur = mailboxes()
@@ -210,8 +224,7 @@ def main():
         M.select('"INBOX"', readonly=True)
         typ, data = M.search(None, "ALL")
         for s in data[0].split():
-            typ, md = M.fetch(s, "(UID)")
-            if md[0][1].decode().split(": ")[1].strip(") ") == gmail_uid:
+            if fetch_uid(M, s) == gmail_uid:
                 return False  # still in INBOX
         return True
     seen = poll(archived, 60)
@@ -226,6 +239,9 @@ def main():
     check("archived message still searchable in All Mail", typ == "OK")
 
     # --- 7. compose + send --------------------------------------------------
+    # Identity ids are server-assigned, not derivable from the account id.
+    identity = jmap([["Identity/get", {"ids": None}, "0"]])["methodResponses"][0][1]["list"]
+    identity_id = identity[0]["id"] if identity else ""
     resp = jmap([["Email/set", {"create": {"d1": {
         "mailboxIds": {drafts["id"]: True},
         "from": [{"name": "jmap-bridge gate", "email": USER}],
@@ -236,7 +252,7 @@ def main():
         "bodyValues": {"1": {"value": "M4 live gate message — safe to ignore.\n"}},
     }}}, "0"],
         ["EmailSubmission/set", {"create": {"s1": {
-            "identityId": "identity-gmail", "emailId": "#d1"}},
+            "identityId": identity_id, "emailId": "#d1"}},
             "onSuccessUpdateEmail": {"#s1": {
                 f"mailboxIds/{drafts['id']}": None,
                 f"mailboxIds/{sent['id']}": True,
@@ -274,8 +290,7 @@ def main():
         M.select(folder, readonly=True)
         typ, data = M.search(None, '(HEADER Subject "%s")' % SUBJECT.replace('"', ""))
         for s in data[0].split():
-            typ, md = M.fetch(s, "(UID)")
-            ids_to_destroy.append(md[0][1].decode().split(": ")[1].strip(") "))
+            ids_to_destroy.append(fetch_uid(M, s))
     if ids_to_destroy:
         # Gmail: move to trash, then expunge there (what the bridge does)
         M.select('"[Gmail]/All Mail"')
