@@ -1,0 +1,88 @@
+{
+  "uid": "01985042-2212-7345-8000-ABCDEF012345",
+  "kind": "individual",
+  "name": {
+    "components": [
+      {
+        "kind": "surname",
+        "value": "King"
+      },
+      {
+        "kind": "given",
+        "value": "Ada"
+      }
+    ],
+    "full": "Ada King",
+    "isOrdered": true
+  },
+  "emails": {
+    "0": {
+      "address": "ada@example.com",
+      "label": "work",
+      "pref": 1
+    },
+    "1": {
+      "address": "ada@home.example.net",
+      "label": "home"
+    }
+  },
+  "phones": {
+    "0": {
+      "number": "+441234567890",
+      "label": "cell",
+      "pref": 2
+    }
+  },
+  "organizations": {
+    "0": {
+      "name": "Analytical Engines",
+      "units": [
+        "Computing"
+      ]
+    }
+  },
+  "titles": {
+    "0": {
+      "name": "Chief Programmer"
+    }
+  },
+  "notes": {
+    "0": {
+      "note": "Notes with a language parameter",
+      "@vcard": {
+        "params": {
+          "LANGUAGE": [
+            "en-gb"
+          ]
+        }
+      }
+    }
+  },
+  "addresses": {
+    "0": {
+      "label": "home",
+      "street": [
+        "1 Main St"
+      ],
+      "city": "Springfield",
+      "region": "IL",
+      "postalCode": "62701",
+      "country": "USA"
+    }
+  },
+  "links": {
+    "0": {
+      "uri": "https://example.com/ada"
+    }
+  },
+  "birthday": "1815-12-10",
+  "photo": {
+    "type": "image/png",
+    "size": 16
+  },
+  "@vcard-ext": {
+    "X-SOCIALPROFILE": [
+      "\"https://twitter.com/ada\"\n{\"p\":{\"TYPE\":[\"twitter\"]}}"
+    ]
+  }
+}

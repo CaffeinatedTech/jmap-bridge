@@ -115,6 +115,31 @@ type Thread struct {
 	EmailIDs []string
 }
 
+// AddressBook is the store-level view of a JMAP AddressBook (RFC 9610
+// §2.1, FR-P.4). The may-* flags come from the CardDAV collection's
+// privileges (FR-P.1).
+type AddressBook struct {
+	ID          string
+	Name        string
+	Description string
+	SortOrder   int
+
+	MayRead   bool
+	MayWrite  bool
+	MayShare  bool
+	MayDelete bool
+}
+
+// ContactCard is the store-level view of one card (RFC 9610 §2.2,
+// FR-P.6). Content is the canonical JSContact JSON *without* id and
+// addressBookIds — the API layer adds those, so the stored JSON and the
+// wire JSON can never disagree about membership.
+type ContactCard struct {
+	ID             string
+	AddressBookIDs []string
+	Content        json.RawMessage
+}
+
 // EmailFilter is the parsed subset of Email/query FilterCondition the
 // bridge honours in v0.1 (FR-M.5).
 type EmailFilter struct {
@@ -185,6 +210,16 @@ type Store interface {
 	// ThreadsByID returns the named threads; unknown ids land in
 	// notFound.
 	ThreadsByID(ctx context.Context, account string, ids []string) ([]*Thread, string, []string, error)
+
+	// AddressBooksByID returns the named address books, plus the
+	// AddressBook type state; unknown ids land in notFound. A nil ids
+	// slice means "all" (FR-P.4).
+	AddressBooksByID(ctx context.Context, account string, ids []string) ([]*AddressBook, string, []string, error)
+
+	// CardsByID returns the named contact cards, plus the ContactCard
+	// type state; unknown ids land in notFound. A nil ids slice means
+	// "all" (FR-P.6).
+	CardsByID(ctx context.Context, account string, ids []string) ([]*ContactCard, string, []string, error)
 
 	// States returns the current state string for each pushable type
 	// (Mailbox, Email, Thread; contacts join in M6) — the payload of a

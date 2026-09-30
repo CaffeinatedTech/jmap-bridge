@@ -404,3 +404,138 @@ func TestOAuth2GoogleMinimal(t *testing.T) {
 		t.Fatal("provider lost")
 	}
 }
+
+func TestCardDAVBlock(t *testing.T) {
+	// A valid block decodes and gets the documented defaults.
+	dir := t.TempDir()
+	pwFile := dir + "/davpass"
+	if err := os.WriteFile(pwFile, []byte("file-pass\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadReader(strings.NewReader(`
+listen = "127.0.0.1:8080"
+base_url = "http://127.0.0.1:8080"
+data_dir = "/tmp/x"
+
+[[accounts]]
+id = "personal"
+address = "me@example.test"
+token = "tok"
+
+  [accounts.imap]
+  host = "127.0.0.1"
+  port = 1143
+  tls = false
+  username = "u"
+  password = "imap-pw"
+
+  [accounts.carddav]
+  url = "http://127.0.0.1:5230"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := cfg.Account("personal").CardDAV
+	if d.Auth != "password" {
+		t.Errorf("auth default = %q", d.Auth)
+	}
+	if d.Username != "u" {
+		t.Errorf("username default = %q, want the imap login", d.Username)
+	}
+	if d.Password != "imap-pw" {
+		t.Error("password did not default from the same-host imap block")
+	}
+
+	// Validation refusals name the key and never echo the secret.
+	wantErrKey(t, withCardDAV(`url = ""`), "accounts[0].carddav.url")
+	wantErrKey(t, withCardDAV(`url = "not-a-url"`), "accounts[0].carddav.url")
+	// Without the IMAP block to default from, the login is required.
+	wantErrKey(t, withCardDAVStandalone(`url = "https://carddav.example.net"`), "accounts[0].carddav.username")
+	wantErrKey(t, withCardDAVStandalone(`
+url = "https://carddav.example.net"
+username = "u"`), "accounts[0].carddav.password")
+	wantErrKey(t, withCardDAV(`
+url = "https://carddav.example.net"
+auth = "bearer"`), "accounts[0].carddav.auth")
+	// With a real oauth2 block behind it, the leftover password is the
+	// misconfiguration named (FR-A.10).
+	wantErrKey(t, withCardDAV(`
+url = "https://carddav.example.net"
+auth = "oauth2"
+password = "no-fallback"
+
+  [accounts.oauth2]
+  provider = "google"
+  client_id = "cid"
+  client_secret = "secret"`), "accounts[0].carddav.password")
+	wantErrKey(t, withCardDAV(`
+url = "https://carddav.example.net"
+auth = "oauth2"`), "accounts[0].oauth2")
+
+	// password_file resolves through the standard precedence (FR-A.2).
+	t.Setenv("JMAP_BRIDGE_PERSONAL_CARDDAV_PASSWORD_FILE", pwFile)
+	cfg, err = LoadReader(strings.NewReader(`
+listen = "127.0.0.1:8080"
+base_url = "http://127.0.0.1:8080"
+data_dir = "/tmp/x"
+
+[[accounts]]
+id = "personal"
+address = "me@example.test"
+token = "tok"
+
+  [accounts.imap]
+  host = "127.0.0.1"
+  port = 1143
+  tls = false
+  username = "u"
+  password = "imap-pw"
+
+  [accounts.carddav]
+  url = "http://127.0.0.1:5230"
+  password = "inline-ignored"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pw := cfg.Account("personal").CardDAV.Password; pw != "file-pass" {
+		t.Errorf("env-file precedence failed (got %q)", pw)
+	}
+}
+
+func withCardDAVStandalone(body string) string {
+	return `
+listen = "127.0.0.1:8080"
+base_url = "http://127.0.0.1:8080"
+data_dir = "/tmp/x"
+
+[[accounts]]
+id = "personal"
+address = "me@example.test"
+token = "tok"
+
+  [accounts.carddav]
+` + body + "\n"
+}
+
+func withCardDAV(body string) string {
+	return `
+listen = "127.0.0.1:8080"
+base_url = "http://127.0.0.1:8080"
+data_dir = "/tmp/x"
+
+[[accounts]]
+id = "personal"
+address = "me@example.test"
+token = "tok"
+
+  [accounts.imap]
+  host = "127.0.0.1"
+  port = 1143
+  tls = false
+  username = "u"
+  password = "imap-pw"
+
+  [accounts.carddav]
+` + body + "\n"
+}

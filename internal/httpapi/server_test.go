@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +32,9 @@ address = "me@work.example.test"
 token = "tok-work"
 `
 
+// contactsURN spelled out to keep the test self-contained.
+const contactsURN = "urn:ietf:params:jmap:contacts"
+
 type testServer struct {
 	*httptest.Server
 	cfg *config.Config
@@ -58,7 +62,7 @@ func newTestServerCfg(t *testing.T, cfgText string) *testServer {
 	for _, a := range cfg.Accounts {
 		tok[a.ID] = a.Token
 	}
-	handler := New(cfg, auth.NewTokens(tok), fixture.New(), nil, push.New(), nil, nil, nil)
+	handler := New(cfg, auth.NewTokens(tok), fixture.New(), nil, push.New(), nil, nil, nil, nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	return &testServer{Server: ts, cfg: cfg, h: handler}
@@ -101,6 +105,22 @@ func decodeJSON(t *testing.T, resp *http.Response) map[string]any {
 		t.Fatalf("decode response: %v", err)
 	}
 	return v
+}
+
+// get issues an authenticated GET against the test server.
+func (s *testServer) get(t *testing.T, user, pass, path string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, s.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.SetBasicAuth(user, pass)
+	resp, err := s.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp
 }
 
 // postAPI sends a JMAP batch as the given user.
@@ -660,7 +680,7 @@ address = "me@example.test"
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
-	ts := httptest.NewServer(New(cfg, auth.NewTokens(nil), fixture.New(), nil, push.New(), nil, nil, nil))
+	ts := httptest.NewServer(New(cfg, auth.NewTokens(nil), fixture.New(), nil, push.New(), nil, nil, nil, nil))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/personal/.well-known/jmap")
@@ -706,5 +726,87 @@ func TestBatchedMethodsProcessedInOrder(t *testing.T) {
 	}
 	if entries[1][2] != "b" {
 		t.Errorf("error call id = %v", entries[1][2])
+	}
+}
+
+// M6 contacts capability gating (FR-P.3): the URN appears — in the
+// session, the primaryAccounts map and the dispatch capability list —
+// only when CardDAV is configured *and* the readiness callback says the
+// first sync succeeded. Never on configuration alone.
+const carddavConfig = `
+listen = "127.0.0.1:8080"
+base_url = "http://127.0.0.1:8080"
+data_dir = "/tmp/jmap-bridge-test"
+
+[[accounts]]
+id = "personal"
+address = "me@example.test"
+token = "tok-personal"
+
+  [accounts.imap]
+  host = "127.0.0.1"
+  port = 1143
+  tls = false
+  username = "u"
+  password = "p"
+
+  [accounts.carddav]
+  url = "http://127.0.0.1:5230"
+  username = "u"
+  password = "p"
+`
+
+func TestSessionContactsGating(t *testing.T) {
+	cfg, err := config.LoadReader(strings.NewReader(carddavConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := map[string]string{"personal": cfg.Accounts[0].Token}
+	ready := false
+	handler := New(cfg, auth.NewTokens(tok), fixture.New(), nil,
+		push.New(), nil, nil, nil, func(string) bool { return ready })
+	srv := &testServer{Server: httptest.NewServer(handler), cfg: cfg, h: handler}
+
+	// Before the gate opens: no contacts anywhere (FR-P.3).
+	resp := srv.get(t, "any", "tok-personal", "/personal/.well-known/jmap")
+	doc := decodeJSON(t, resp)
+	caps := doc["capabilities"].(map[string]any)
+	if _, ok := caps[contactsURN]; ok {
+		t.Fatal("contacts advertised before first sync (FR-P.3)")
+	}
+	primary := doc["primaryAccounts"].(map[string]any)
+	if _, ok := primary[contactsURN]; ok {
+		t.Fatal("contacts primary before first sync")
+	}
+	stateNotReady, _ := doc["state"].(string)
+
+	// The API refuses the URN as a request-level problem, never as
+	// half-working data.
+	r := srv.postAPI(t, "any", "tok-personal", `{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail","`+contactsURN+`"],"methodCalls":[["AddressBook/get",{"accountId":"personal"},"c1"]]}`)
+	body := decodeJSON(t, r)
+	if !strings.Contains(fmt.Sprintf("%v", body), "unknownCapability") {
+		t.Fatalf("non-ready contacts call: %v", body)
+	}
+
+	// Gate opens: capability, primary account, working methods, and a
+	// session state that moved (RFC 8620 §2 — the state is a hash over
+	// the session, so a capability change must show in it).
+	ready = true
+	resp = srv.get(t, "any", "tok-personal", "/personal/.well-known/jmap")
+	doc = decodeJSON(t, resp)
+	caps = doc["capabilities"].(map[string]any)
+	if _, ok := caps[contactsURN]; !ok {
+		t.Fatal("contacts missing after gate opened")
+	}
+	if state, _ := doc["state"].(string); state == stateNotReady {
+		t.Fatal("sessionState unchanged across a capability change")
+	}
+	r = srv.postAPI(t, "any", "tok-personal", `{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail","`+contactsURN+`"],"methodCalls":[["AddressBook/get",{"accountId":"personal"},"c1"]]}`)
+	if r.StatusCode != 200 {
+		t.Fatalf("ready contacts call: HTTP %d", r.StatusCode)
+	}
+	body = decodeJSON(t, r)
+	if !strings.Contains(fmt.Sprintf("%v", body), "AddressBook/get") {
+		t.Fatalf("ready call did not answer the method: %v", body)
 	}
 }

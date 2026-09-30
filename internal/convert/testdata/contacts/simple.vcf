@@ -1,0 +1,10 @@
+BEGIN:VCARD
+VERSION:3.0
+UID:simple-ada-0001
+FN:Ada Lovelace
+N:Lovelace;Ada;;;
+EMAIL;TYPE=INTERNET,WORK:ada@example.com
+EMAIL;TYPE=INTERNET,HOME,pref:ada@home.example.net
+TEL;TYPE=WORK,VOICE:555-0100
+NOTE:First contact fixture
+END:VCARD

@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/CaffeinatedTech/jmap-bridge/internal/dav"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/submit"
@@ -31,6 +32,7 @@ type Config struct {
 	Account        string
 	IMAP           imapdrv.Config
 	SMTP           *submit.Config // nil: the account has no submission server (FR-J.5)
+	CardDAV        *dav.Config    // nil: contacts are off and the capability is never advertised (FR-P.3)
 	Interval       time.Duration  // poll fallback for non-idled folders
 	BatchSize      int            // backfill batch (FR-S.3)
 	PrefetchWindow time.Duration  // 0 disables prefetch (FR-S.9)
@@ -91,6 +93,16 @@ type Engine struct {
 	// callback uses it when credentials just landed, so the next pass
 	// does not wait out a five-minute timer.
 	kick chan struct{}
+
+	// CardDAV session (M6, PLAN §8): nil until opened, then reused.
+	// The contacts loop owns it; writes borrow it under davMu.
+	davMu   sync.Mutex
+	davSess *dav.Session
+	// contactsKick nudges the contacts loop (shared Kick).
+	contactsKick chan struct{}
+	// contactsReady gates the urn:ietf:params:jmap:contacts capability:
+	// CardDAV configured AND the first full sync succeeded (FR-P.3).
+	contactsReady atomic.Bool
 }
 
 // errNotConnected means the work connection is down; the run loop
@@ -111,16 +123,17 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 		cfg.Interval = 5 * time.Minute
 	}
 	e := &Engine{
-		cfg:         cfg,
-		st:          st,
-		log:         log,
-		wr:          newWriter(cfg.IMAP, log),
-		wake:        make(chan string, 8),
-		kick:        make(chan struct{}, 1),
-		flights:     map[string]*flight{},
-		prefetchSem: make(chan struct{}, cfg.Concurrency),
-		backfill:    make(chan string, 1024),
-		idleFolder:  "INBOX",
+		cfg:          cfg,
+		st:           st,
+		log:          log,
+		wr:           newWriter(cfg.IMAP, log),
+		wake:         make(chan string, 8),
+		kick:         make(chan struct{}, 1),
+		flights:      map[string]*flight{},
+		prefetchSem:  make(chan struct{}, cfg.Concurrency),
+		backfill:     make(chan string, 1024),
+		idleFolder:   "INBOX",
+		contactsKick: make(chan struct{}, 1),
 	}
 	st.Ensure = e.Ensure
 	if cfg.SearchBackfill {
@@ -137,6 +150,12 @@ func (e *Engine) Kick() {
 	case e.kick <- struct{}{}:
 	default:
 	}
+	if e.cfg.CardDAV != nil {
+		select {
+		case e.contactsKick <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // Run drives the engine until ctx ends: connect, pass, repeat, with
@@ -145,6 +164,9 @@ func (e *Engine) Run(ctx context.Context) {
 	go e.idleLoop(ctx)
 	if e.cfg.SearchBackfill {
 		e.backfillWorkers(ctx)
+	}
+	if e.cfg.CardDAV != nil {
+		go e.contactsLoop(ctx)
 	}
 
 	e.requestPass("")

@@ -71,6 +71,13 @@ func (c *Config) resolveSecrets() error {
 			}
 			a.SMTP.Password = pw
 		}
+		if a.CardDAV != nil {
+			pw, err := resolveSecret(a.ID, "carddav.password", fmt.Sprintf("accounts[%d].carddav.password", i), a.CardDAV.Password, a.CardDAV.PasswordFile)
+			if err != nil {
+				return err
+			}
+			a.CardDAV.Password = pw
+		}
 		if a.OAuth2 != nil {
 			sec, err := resolveSecret(a.ID, "oauth2.client_secret", fmt.Sprintf("accounts[%d].oauth2.client_secret", i), a.OAuth2.ClientSecret, a.OAuth2.ClientSecretFile)
 			if err != nil {

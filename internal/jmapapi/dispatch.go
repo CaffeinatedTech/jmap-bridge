@@ -24,6 +24,7 @@ var capabilitiesAdvertised = []string{
 	"urn:ietf:params:jmap:core",
 	"urn:ietf:params:jmap:mail",
 	"urn:ietf:params:jmap:submission",
+	ContactURN,
 }
 
 // Account is the per-request account context: the id every method's

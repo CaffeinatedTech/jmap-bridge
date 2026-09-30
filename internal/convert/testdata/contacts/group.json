@@ -1,0 +1,17 @@
+{
+  "uid": "grp-0001",
+  "kind": "group",
+  "name": {
+    "components": null,
+    "full": "Bridge Test Group",
+    "isOrdered": true
+  },
+  "members": {
+    "0": {
+      "@vcard-uid": "01985042-2212-7345-8000-ABCDEF012345"
+    },
+    "1": {
+      "@vcard-uid": "11111111-2222-3333-4444-555555555555"
+    }
+  }
+}

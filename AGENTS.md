@@ -95,6 +95,9 @@ never assumed done.
 
 - Protocol/sync behaviour ships with tests against an in-process fixture server
   (`test/fixtureimap`, `test/fixturecarddav`) — no real-network unit tests, ever.
+  The fixture CardDAV server must impersonate the M6 shapes too: sync tier,
+  getctag-only (no RFC 6578), and bare (PROPFIND/GET/PUT/DELETE only), with
+  conditional-write enforcement in every tier.
 - The fixture IMAP server must be able to *impersonate the tiers*: QRESYNC-capable,
   CONDSTORE-only (Gmail-shaped), and bare (baseline) — tier selection and
   fallbacks are the highest-risk code in the repo.
@@ -106,11 +109,14 @@ never assumed done.
 ## Cross-client gate (jmap-tui)
 
 Run the bridge natively and point jmap-tui's suite at it — this is how every
-PLAN §12 gate is demonstrated, no Docker involved:
+PLAN §12 gate is demonstrated, no Docker involved. M6's contacts gates need the
+loopback Radicale rig up first (`bash dev/gate/radicale-start.sh`; it seeds
+nothing — a book at `/bridge/addresses.vcf/` must exist, MKCOL once).
 
 ```sh
 # jmap-bridge repo: fixture account on loopback
 go build -o /tmp/jmap-bridge ./cmd/jmap-bridge
+bash dev/gate/radicale-start.sh          # M6 contacts gate backend
 /tmp/jmap-bridge --config ./dev/config.toml &
 
 # jmap-tui repo: the M0 gate test (later milestones: TestLiveN… suites)

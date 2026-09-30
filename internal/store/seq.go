@@ -23,9 +23,11 @@ const (
 // keep type states monotonic even after tombstone retention expires
 // (FR-J.7), and the replay floor for /changes (NFR-4).
 type accountMeta struct {
-	EmailState    int64 `json:"emailState"`
-	MailboxState  int64 `json:"mailboxState"`
-	PurgedThrough int64 `json:"purgedThrough"`
+	EmailState       int64 `json:"emailState"`
+	MailboxState     int64 `json:"mailboxState"`
+	AddressBookState int64 `json:"addressBookState"`
+	ContactCardState int64 `json:"contactCardState"`
+	PurgedThrough    int64 `json:"purgedThrough"`
 }
 
 // nextSeq allocates the next sequence number inside tx. The counter is
@@ -129,6 +131,30 @@ func bumpEmailState(ctx context.Context, tx *sql.Tx, account string, seq int64) 
 	return saveMeta(ctx, tx, account, m)
 }
 
+// bumpAddressBookState raises the AddressBook state floor to seq.
+func bumpAddressBookState(ctx context.Context, tx *sql.Tx, account string, seq int64) error {
+	m, err := loadMeta(ctx, tx, account)
+	if err != nil {
+		return err
+	}
+	if seq > m.AddressBookState {
+		m.AddressBookState = seq
+	}
+	return saveMeta(ctx, tx, account, m)
+}
+
+// bumpContactCardState raises the ContactCard state floor to seq.
+func bumpContactCardState(ctx context.Context, tx *sql.Tx, account string, seq int64) error {
+	m, err := loadMeta(ctx, tx, account)
+	if err != nil {
+		return err
+	}
+	if seq > m.ContactCardState {
+		m.ContactCardState = seq
+	}
+	return saveMeta(ctx, tx, account, m)
+}
+
 // MintID allocates a fresh object id for something the bridge does not
 // persist: EmailSubmission ids, which RFC 8621 §7 allows a server to
 // destroy as soon as the message has been relayed. The global seq
@@ -180,7 +206,18 @@ func (s *Store) States(ctx context.Context, account string) (map[string]string, 
 		return nil, err
 	}
 	// Thread state IS the Email state (PLAN §4.1 companions).
-	return map[string]string{"Mailbox": mailbox, "Email": email, "Thread": email}, nil
+	books, err := s.AddressBookStateString(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	cards, err := s.ContactCardStateString(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		"Mailbox": mailbox, "Email": email, "Thread": email,
+		"AddressBook": books, "ContactCard": cards,
+	}, nil
 }
 
 // MailboxStateString returns the Mailbox type state.

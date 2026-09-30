@@ -43,6 +43,10 @@ type Server struct {
 	oauth map[string]*oauth.Manager
 	// kick nudges an account's sync engine after credentials land.
 	kick func(account string)
+	// contactsReady reports whether an account's first CardDAV sync has
+	// succeeded — the second half of the contacts capability gate
+	// (FR-P.3: configured *and* working, never advertised on hope).
+	contactsReady func(account string) bool
 }
 
 // New wires a Server: routing, auth, dispatch and push. store serves
@@ -54,18 +58,20 @@ type Server struct {
 func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
 	backends map[string]jmapapi.Backend, hub *push.Hub, log *slog.Logger,
 	oauth map[string]*oauth.Manager, kick func(account string),
+	contactsReady func(account string) bool,
 ) *Server {
 	s := &Server{
-		cfg:      cfg,
-		tokens:   tokens,
-		store:    store,
-		backends: backends,
-		hub:      hub,
-		jmap:     jmapapi.NewHandler(store),
-		log:      log,
-		mux:      http.NewServeMux(),
-		oauth:    oauth,
-		kick:     kick,
+		cfg:           cfg,
+		tokens:        tokens,
+		store:         store,
+		backends:      backends,
+		hub:           hub,
+		jmap:          jmapapi.NewHandler(store),
+		log:           log,
+		mux:           http.NewServeMux(),
+		oauth:         oauth,
+		kick:          kick,
+		contactsReady: contactsReady,
 	}
 	if s.log == nil {
 		// Tests build Servers without logging; the error paths must not
@@ -138,7 +144,7 @@ func (s *Server) sessionState(acct *config.Account, user string) string {
 		acct.Name,
 		acct.Address,
 		user,
-		strings.Join(jmapapi.Capabilities(), ","),
+		strings.Join(s.accountCapabilities(acct), ","),
 	} {
 		_, _ = io.WriteString(h, part)
 		_, _ = h.Write([]byte{0})
@@ -196,6 +202,20 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		capabilities[jmapapi.SubmissionURN] = map[string]any{}
 		accountCapabilities[jmapapi.SubmissionURN] = map[string]any{"maxDelayedSend": 0}
 	}
+	// FR-P.3: the contacts capability appears only when CardDAV is
+	// configured *and* the first sync succeeded; until then the
+	// primaryAccounts entry and every contacts method are absent, and
+	// clients degrade exactly as they do for an unknown server.
+	if s.canContacts(acct) {
+		capabilities[jmapapi.ContactURN] = map[string]any{}
+		accountCapabilities[jmapapi.ContactURN] = map[string]any{
+			"maxAddressBooks":      100,
+			"maxContactsPerBook":   0, // 0 = no server-imposed limit (RFC 9610 §1.5)
+			"maxCardsInSet":        512,
+			"mayCreateAddressBook": false, // AddressBook/set is out of v0.1 scope (FR-P.10)
+			"mayDeleteAddressBook": false,
+		}
+	}
 	capabilities["urn:ietf:params:jmap:core"] = map[string]any{
 		"maxSizeUpload":         maxSizeUpload,
 		"maxConcurrentUpload":   4,
@@ -214,11 +234,9 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 				"accountCapabilities": accountCapabilities,
 			},
 		},
-		"primaryAccounts": map[string]any{
-			"urn:ietf:params:jmap:mail": acct.ID,
-		},
-		"username": user,
-		"apiUrl":   base + "/" + acct.ID + "/jmap",
+		"primaryAccounts": primaryAccounts(s, acct),
+		"username":        user,
+		"apiUrl":          base + "/" + acct.ID + "/jmap",
 		// The eventsource exists as of M1 (FR-J.8), upload/download as
 		// of M3 (FR-M.16, FR-M.17); all three are RFC 8620 §2 URI
 		// templates this server expands exactly as written.
@@ -280,7 +298,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		ID:           acct.ID,
 		Store:        s.store,
 		Backend:      s.backends[acct.ID],
-		Capabilities: capabilitiesFor(acct),
+		Capabilities: s.accountCapabilities(acct),
 		Identity:     identityFor(acct),
 		SessionState: s.sessionState(acct, user),
 	}
@@ -297,14 +315,40 @@ func canSend(acct *config.Account) bool {
 	return acct.SMTP != nil && acct.IMAP != nil
 }
 
-// capabilitiesFor is what this account offers (FR-J.5): core and mail
-// always, submission only once it can actually send. The session
-// advertises this set and dispatch accepts `using` entries from it, so
-// the two can never drift apart.
-func capabilitiesFor(acct *config.Account) []string {
+// canContacts applies the FR-P.3 gate: CardDAV configured and the first
+// sync succeeded. nil readiness (a server built without engines) means
+// "never" — the honest default.
+func (s *Server) canContacts(acct *config.Account) bool {
+	return acct != nil && acct.CardDAV != nil && acct.CardDAV.URL != "" &&
+		s.contactsReady != nil && s.contactsReady(acct.ID)
+}
+
+// primaryAccounts names the account for every capability it offers
+// (FR-J.5): mail always, submission with SMTP, contacts once the gate
+// passes.
+func primaryAccounts(s *Server, acct *config.Account) map[string]any {
+	out := map[string]any{"urn:ietf:params:jmap:mail": acct.ID}
+	if canSend(acct) {
+		out[jmapapi.SubmissionURN] = acct.ID
+	}
+	if s.canContacts(acct) {
+		out[jmapapi.ContactURN] = acct.ID
+	}
+	return out
+}
+
+// accountCapabilities is what this account offers (FR-J.5): core and
+// mail always, submission only once it can actually send, contacts only
+// once the FR-P.3 gate passes. The session advertises this set and
+// dispatch accepts `using` entries from it, so the two can never drift
+// apart.
+func (s *Server) accountCapabilities(acct *config.Account) []string {
 	caps := []string{"urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"}
 	if canSend(acct) {
 		caps = append(caps, jmapapi.SubmissionURN)
+	}
+	if s.canContacts(acct) {
+		caps = append(caps, jmapapi.ContactURN)
 	}
 	return caps
 }

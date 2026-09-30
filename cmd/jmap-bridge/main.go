@@ -20,6 +20,7 @@ import (
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/auth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/config"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/dav"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/httpapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
@@ -140,8 +141,9 @@ func run(args []string) error {
 	go purgeLoop(ctx, st, log)
 
 	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           httpapi.New(cfg, tokens, st, backends, hub, log, managers, kick(engines, log)),
+		Addr: cfg.Listen,
+		Handler: httpapi.New(cfg, tokens, st, backends, hub, log, managers,
+			kick(engines, log), contactsReady(engines)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -200,6 +202,22 @@ func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager) sync.
 	}
 	if a.IMAP.Auth == "oauth2" && mgr != nil {
 		out.IMAP.Token = mgr.AccessToken
+	}
+	if a.CardDAV != nil && a.CardDAV.URL != "" {
+		davCfg := dav.Config{
+			URL:      a.CardDAV.URL,
+			Username: a.CardDAV.Username,
+			Password: a.CardDAV.Password,
+		}
+		if a.CardDAV.Auth == "oauth2" && mgr != nil {
+			// FR-A.9: the Google profile carries the carddav scope; the
+			// same manager already refreshed for IMAP/SMTP answers DAV
+			// too.
+			davCfg.Token = func(ctx context.Context) (string, error) {
+				return mgr.AccessToken(ctx, false)
+			}
+		}
+		out.CardDAV = &davCfg
 	}
 	if a.SMTP != nil {
 		out.SMTP = &submit.Config{
@@ -267,6 +285,17 @@ func kick(engines map[string]*sync.Engine, log *slog.Logger) func(account string
 		}
 		eng.Kick()
 		log.Info("oauth: engine kicked", "account", account)
+	}
+}
+
+// contactsReady builds the FR-P.3 capability gate for the session: an
+// account is ready only when its engine reports the first CardDAV sync
+// succeeded. Accounts without an engine (no IMAP, or no CardDAV block)
+// read as not-ready forever.
+func contactsReady(engines map[string]*sync.Engine) func(account string) bool {
+	return func(account string) bool {
+		eng, ok := engines[account]
+		return ok && eng.ContactsReady()
 	}
 }
 

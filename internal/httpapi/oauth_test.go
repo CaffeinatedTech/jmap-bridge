@@ -71,7 +71,7 @@ func oauthTestServer(t *testing.T, tokenServer *httptest.Server) (*Server, *memT
 	var kicked []string
 	s := New(cfg, nil, nil, nil, push.New(), nil,
 		map[string]*oauth.Manager{"personal": mgr},
-		func(account string) { kicked = append(kicked, account) })
+		func(account string) { kicked = append(kicked, account) }, nil)
 	return s, ts, &kicked
 }
 
