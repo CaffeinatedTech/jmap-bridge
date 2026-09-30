@@ -650,6 +650,13 @@ Normative for v0.1 (verify status before relying on a draft):
   `Identity/set`, `EmailSubmission/get|query`, `Thread/changes`.
 - Microsoft 365 OAuth2 profile (basic auth dies December 2026).
 - WebSocket push (RFC 8620 §7.6) alongside SSE.
+- **Backfill steering**: order the sync pass by user intent rather than Go's map
+  order (`engine.go` `doPass`) — INBOX first, then the folder a client is actively
+  browsing (promote on `Email/query`/`Mailbox/get`, or the IDE'd folder), then the
+  rest — so a cold mailbox is usable immediately instead of after every label
+  folder has backfilled. Observed 2026-10-01 on the M4 gate run: a 13-message
+  INBOX backfilled ~13 min in, behind a 6 795-message label folder, leaving the
+  inbox empty in the cache the whole time.
 - Sieve/vacation, Quota, MDN — only on demonstrated demand.
 
 ---
