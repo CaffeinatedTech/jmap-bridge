@@ -145,7 +145,7 @@ func leafName(path string) string {
 // copy the patch is not removing: Gmail answers OK but silently declines
 // to remove the selected folder's own label (removing \Inbox archives
 // only when issued from another copy, All Mail preferred).
-func (e *Engine) changeMembershipGmail(ctx context.Context, copies []store.Copy, addSet []string, remSet []string) ([]store.MembershipAdd, error) {
+func (e *Engine) changeMembershipGmail(ctx context.Context, emailID string, copies []store.Copy, addSet []string, remSet []string) ([]store.MembershipAdd, error) {
 	addLabels, _, err := e.labelsFor(ctx, addSet, false)
 	if err != nil {
 		return nil, err
@@ -160,7 +160,7 @@ func (e *Engine) changeMembershipGmail(ctx context.Context, copies []store.Copy,
 		return nil, nil
 	}
 
-	src := e.gmailLabelSource(ctx, copies, remSet)
+	src := e.gmailLabelSource(ctx, emailID, copies, remSet)
 	if src == nil {
 		return nil, fmt.Errorf("%w: no folder holds a known uid for this message", jmapapi.ErrNoLocation)
 	}
@@ -209,10 +209,11 @@ func (e *Engine) changeMembershipGmail(ctx context.Context, copies []store.Copy,
 // folder's own label but declines to carry it out (removing \Inbox
 // archives only when issued from another copy). The implicit All Mail
 // copy is the best source: every message lives there and it is never in
-// a removable set. When only removed copies have a known uid — e.g. a
-// draft being filed into Sent before All Mail has synced it — the first
-// known copy is used, which is the only command that can work.
-func (e *Engine) gmailLabelSource(ctx context.Context, copies []store.Copy, remSet []string) *store.Copy {
+// a removable set. When no cached copy is usable — a fresh message the
+// All Mail pass has not linked yet — All Mail is located by Message-ID.
+// Only a message with no other copy at all falls back to a removed one,
+// the single command that can still work (filing a draft into Sent).
+func (e *Engine) gmailLabelSource(ctx context.Context, emailID string, copies []store.Copy, remSet []string) *store.Copy {
 	allID, err := e.st.ImplicitMailboxID(ctx, e.cfg.Account)
 	if err != nil {
 		allID = ""
@@ -239,7 +240,40 @@ func (e *Engine) gmailLabelSource(ctx context.Context, copies []store.Copy, remS
 	if preferred != nil {
 		return preferred
 	}
+	if allID != "" {
+		if c := e.gmailAllMailCopy(ctx, emailID, allID); c != nil {
+			return c
+		}
+	}
 	return fallback
+}
+
+// gmailAllMailCopy addresses an email in All Mail by searching for its
+// Message-ID. Gmail's All Mail holds every message and its per-folder uid
+// differs from every cached copy's, so the search is the only way to name
+// a message the cache has seen only through a folder being removed.
+func (e *Engine) gmailAllMailCopy(ctx context.Context, emailID, allID string) *store.Copy {
+	msgid, err := e.st.EmailMessageID(ctx, e.cfg.Account, emailID)
+	if err != nil || msgid == "" {
+		return nil
+	}
+	path, err := e.st.MailboxPath(ctx, e.cfg.Account, allID)
+	if err != nil {
+		return nil
+	}
+	var uid uint32
+	if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
+		var e2 error
+		uid, e2 = conn.FindUID(ctx, path, "Message-ID", msgid)
+		return e2
+	}); err != nil {
+		e.log.Debug("sync: all-mail uid lookup failed", "email", emailID, "err", err)
+		return nil
+	}
+	if uid == 0 {
+		return nil
+	}
+	return &store.Copy{MailboxID: allID, Folder: path, UID: uid}
 }
 
 // gmailDraftCopy returns the drafts-folder copy of an email, or nil. Gmail

@@ -229,6 +229,56 @@ func selectedBefore(lines []string, cmd string) string {
 	return sel
 }
 
+// Archiving a message the All Mail pass has not linked yet must still
+// drop INBOX membership: with no cached copy outside the removed set,
+// the write locates the message in All Mail by Message-ID and issues the
+// removal from there (Gmail no-ops a removal of the selected folder's
+// own label).
+func TestGmailArchiveSearchesAllMailWhenUncached(t *testing.T) {
+	st := gmStore(t)
+	const inboxUID, allUID = 203000, 331743
+	id := gmSeedPerFolder(t, st, map[string]uint32{"INBOX": inboxUID})
+	inboxID, _, _ := gmMailboxIDs(t, st)
+	ctx := context.Background()
+
+	e, fake := gmEngine(t, st, func(tag, line string) []string {
+		switch {
+		case strings.Contains(line, "CAPABILITY"):
+			return []string{"* CAPABILITY IMAP4rev1 X-GM-EXT-1 UIDPLUS"}
+		case strings.Contains(line, "UID SEARCH"):
+			return []string{"* SEARCH 331743", tag + " OK search done"}
+		case strings.Contains(line, " EXAMINE ") || strings.Contains(line, " SELECT "):
+			return []string{
+				"* 1 EXISTS",
+				"* OK [UIDVALIDITY 7] uv",
+				"* OK [UIDNEXT 9] un",
+				tag + " OK [READ-WRITE] selected",
+			}
+		case strings.Contains(line, "UNSELECT"):
+			return []string{tag + " OK"}
+		}
+		return nil
+	})
+	if err := e.ApplyEmailPatch(ctx, "acct", id, jmapapi.EmailPatch{
+		MailboxRemove: []string{inboxID},
+	}); err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	line := fake.LineMatching("UID STORE")
+	if !strings.Contains(line, fmt.Sprintf(`UID STORE %d -X-GM-LABELS.SILENT (\Inbox)`, allUID)) {
+		t.Fatalf("archive STORE = %q, want the \\Inbox removal on the searched All Mail uid", line)
+	}
+	if strings.Contains(line, fmt.Sprintf("%d", inboxUID)) {
+		t.Fatalf("archive STORE = %q, used the removed INBOX uid instead of searching", line)
+	}
+	if sel := selectedBefore(fake.Lines(), "-X-GM-LABELS"); !strings.Contains(sel, "All Mail") {
+		t.Fatalf("archive selected %q, want [Gmail]/All Mail", sel)
+	}
+	if _, live, err := st.EmailState(ctx, "acct", id); err != nil || live {
+		t.Fatalf("email after archive: live=%v err=%v, want tombstoned (INBOX was its only membership)", live, err)
+	}
+}
+
 // Filing a draft into Sent must still work before All Mail has synced the
 // draft: the only copy with a known uid is the Drafts folder the patch
 // removes, so the label write falls back to it — folder and uid stay

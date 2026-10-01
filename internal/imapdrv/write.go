@@ -186,6 +186,26 @@ func (c *Conn) StoreGmLabels(ctx context.Context, folder string, uids []uint32, 
 	return nil
 }
 
+// FindUID returns the newest uid in folder whose header field contains
+// value (UID SEARCH HEADER), or 0 when none matches. It is the Gmail write
+// path's way to address a message through a folder the cache holds no uid
+// mapping for — Gmail's All Mail, whose per-folder uid differs from every
+// cached one.
+func (c *Conn) FindUID(ctx context.Context, folder, field, value string) (uint32, error) {
+	if _, err := c.Examine(ctx, folder, nil); err != nil {
+		return 0, err
+	}
+	defer c.releaseSelection(ctx)
+	uids, err := c.client.SearchUID(imap.SearchHeaderField{Field: field, Value: value}, nil).AllUID(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("imapdrv: uid search %s %q in %q: %w", field, value, folder, err)
+	}
+	if len(uids) == 0 {
+		return 0, nil
+	}
+	return uint32(uids[len(uids)-1]), nil
+}
+
 // ExpungeUIDs permanently removes uids from folder: STORE \Deleted,
 // then UID EXPUNGE where UIDPLUS is advertised (FR-M.10). Without
 // UIDPLUS the only portable option is a bare EXPUNGE, which also removes
