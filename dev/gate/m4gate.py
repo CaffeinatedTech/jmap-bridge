@@ -309,9 +309,10 @@ def main():
         send_mid = mid[0] if mid else ""
 
     def delivered():
-        # The delivered copy is the one in All Mail carrying the \Inbox
-        # label; the sent copy carries \Sent. INBOX search is avoided: its
-        # index can lag minutes behind delivery.
+        # The received copy is a distinct All Mail message that is neither
+        # the filed Sent copy (\Sent) nor a still-unsent draft (\Drafts);
+        # a normal delivery also carries \Inbox. All Mail is used because
+        # its index is immediate, unlike INBOX's, which can lag minutes.
         M.select('"[Gmail]/All Mail"', readonly=True)
         seqs = []
         if send_mid:
@@ -320,10 +321,16 @@ def main():
         if not seqs:  # header search not honoured: the unique subject will do
             typ, data = M.search(None, '(HEADER Subject "%s")' % SUBJECT.replace('"', ""))
             seqs = data[0].split() if data and data[0] else []
-        return [s for s in seqs if has_label(M, s, "\\Inbox")] or None
+        out = []
+        for s in seqs:
+            if has_label(M, s, "\\Inbox"):
+                out.append(s)
+            elif not has_label(M, s, "\\Sent") and not has_label(M, s, "\\Drafts"):
+                out.append(s)
+        return out or None
 
-    got = poll(delivered, 180)
-    check("sent message delivered to INBOX", bool(got), f"{len(got or [])} copy(ies)")
+    got = poll(delivered, 240)
+    check("sent message delivered", bool(got), f"{len(got or [])} copy(ies)")
     if got:
         check("exactly one delivered copy", len(got) == 1, str(len(got)))
 

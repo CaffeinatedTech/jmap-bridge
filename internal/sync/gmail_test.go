@@ -28,6 +28,7 @@ var gmUIDValidity = map[string]uint32{
 	"[Gmail]/All Mail":  1,
 	"[Gmail]/Trash":     11,
 	"[Gmail]/Sent Mail": 4,
+	"[Gmail]/Drafts":    13,
 }
 
 // gmFolders seeds the Gmail-shaped mailbox set: INBOX, the implicit All
@@ -38,6 +39,7 @@ func gmFolders() []store.Folder {
 		{Name: "[Gmail]/All Mail", Delim: '/', Role: "archive", Implicit: true, UIDValidity: gmUIDValidity["[Gmail]/All Mail"]},
 		{Name: "[Gmail]/Trash", Delim: '/', Role: "trash", UIDValidity: gmUIDValidity["[Gmail]/Trash"]},
 		{Name: "[Gmail]/Sent Mail", Delim: '/', Role: "sent", UIDValidity: gmUIDValidity["[Gmail]/Sent Mail"]},
+		{Name: "[Gmail]/Drafts", Delim: '/', Role: "drafts", UIDValidity: gmUIDValidity["[Gmail]/Drafts"]},
 	}
 }
 
@@ -222,6 +224,62 @@ func selectedBefore(lines []string, cmd string) string {
 		}
 	}
 	return sel
+}
+
+// Filing a draft into Sent must still work before All Mail has synced the
+// draft: the only copy with a known uid is the Drafts folder the patch
+// removes, so the label write falls back to it — folder and uid stay
+// paired — rather than refusing the patch outright.
+func TestGmailFilesDraftFromRemovedFolder(t *testing.T) {
+	st := gmStore(t)
+	const draftUID = 42
+	id := gmSeedPerFolder(t, st, map[string]uint32{"[Gmail]/Drafts": draftUID})
+	mbs, _, err := st.Mailboxes(context.Background(), "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var draftsID, sentID string
+	for _, mb := range mbs {
+		switch mb.Role {
+		case "drafts":
+			draftsID = mb.ID
+		case "sent":
+			sentID = mb.ID
+		}
+	}
+	e, fake := gmEngine(t, st, func(tag, line string) []string {
+		switch {
+		case strings.Contains(line, "CAPABILITY"):
+			return []string{"* CAPABILITY IMAP4rev1 X-GM-EXT-1 UIDPLUS"}
+		case strings.Contains(line, " SELECT "):
+			return []string{
+				"* 1 EXISTS",
+				"* OK [UIDVALIDITY 13] uv",
+				"* OK [UIDNEXT 9] un",
+				tag + " OK [READ-WRITE] selected",
+			}
+		case strings.Contains(line, "UNSELECT"):
+			return []string{tag + " OK"}
+		}
+		return nil
+	})
+	if err := e.ApplyEmailPatch(context.Background(), "acct", id, jmapapi.EmailPatch{
+		MailboxAdd:    []string{sentID},
+		MailboxRemove: []string{draftsID},
+	}); err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	add := fake.LineMatching("+X-GM-LABELS")
+	if !strings.Contains(add, fmt.Sprintf(`UID STORE %d +X-GM-LABELS.SILENT (\Sent)`, draftUID)) {
+		t.Fatalf("add line = %q, want the \\Sent add on the draft's own uid", add)
+	}
+	rem := fake.LineMatching("-X-GM-LABELS")
+	if !strings.Contains(rem, fmt.Sprintf(`UID STORE %d -X-GM-LABELS.SILENT (\Drafts)`, draftUID)) {
+		t.Fatalf("remove line = %q, want the \\Drafts removal on the draft's own uid", rem)
+	}
+	if sel := selectedBefore(fake.Lines(), "+X-GM-LABELS"); !strings.Contains(sel, "Drafts") {
+		t.Fatalf("filing selected %q, want [Gmail]/Drafts", sel)
+	}
 }
 
 // A membership removal targeting All Mail is refused: the Gmail server
