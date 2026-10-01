@@ -166,6 +166,9 @@ func (e *Engine) changeMembershipGmail(ctx context.Context, emailID string, copi
 	}
 
 	if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
+		e.log.Debug("sync: gmail label write",
+			"email", emailID, "folder", src.Folder, "uid", src.UID,
+			"add", addLabels, "remove", removeLabels)
 		if err := conn.StoreGmLabels(ctx, src.Folder, []uint32{src.UID}, addLabels, removeLabels); err != nil {
 			return err
 		}
