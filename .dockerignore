@@ -1,0 +1,33 @@
+# Keep the build context to what the compiler needs. Secrets, runtime
+# data and repo plumbing never enter the image build (AGENTS.md).
+.git
+.github
+.gitignore
+.idea
+.vscode
+
+# Local data volume and databases
+data/
+blobs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.db-wal
+*.db-shm
+
+# Local configs and secrets (dev/dovecot.conf, dev/config.toml, gate creds)
+dev/
+.env
+.env.*
+
+# Built binaries
+/jmap-bridge
+/jmap-bridge-*
+
+# Docs and test scaffolding (not compiled into the binary)
+*.md
+test/
+
+# Editor/OS noise
+.DS_Store

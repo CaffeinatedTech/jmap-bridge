@@ -142,8 +142,10 @@ func run(args []string) error {
 
 	srv := &http.Server{
 		Addr: cfg.Listen,
-		Handler: httpapi.New(cfg, tokens, st, backends, hub, log, managers,
-			kick(engines, log), contactsReady(engines)),
+		Handler: withHealth(
+			httpapi.New(cfg, tokens, st, backends, hub, log, managers,
+				kick(engines, log), contactsReady(engines)),
+			readiness(engines, cfg.Accounts)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -296,6 +298,51 @@ func contactsReady(engines map[string]*sync.Engine) func(account string) bool {
 	return func(account string) bool {
 		eng, ok := engines[account]
 		return ok && eng.ContactsReady()
+	}
+}
+
+// withHealth mounts the FR-D.4 probe endpoints ahead of the JMAP
+// surface. They are deliberately unauthenticated (a kubelet probe
+// carries no client token) and deliberately terse: /readyz says only
+// whether every account has synced, never which account or why, so an
+// internet-facing bridge does not hand an anonymous GET its account ids.
+func withHealth(next http.Handler, ready func() bool) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "ok\n")
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if ready != nil && !ready() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprint(w, "not ready\n")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "ready\n")
+	})
+	mux.Handle("/", next)
+	return mux
+}
+
+// readiness builds the FR-D.4 /readyz gate: true only once every account
+// with an IMAP engine has completed a sync pass and none is in
+// authentication failure. A cache-only account (no [imap] block) has
+// nothing to sync and does not hold readiness back.
+func readiness(engines map[string]*sync.Engine, accounts []config.Account) func() bool {
+	return func() bool {
+		for i := range accounts {
+			eng, ok := engines[accounts[i].ID]
+			if !ok {
+				continue
+			}
+			if !eng.Ready() || eng.AuthFailed() {
+				return false
+			}
+		}
+		return true
 	}
 }
 

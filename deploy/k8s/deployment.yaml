@@ -1,0 +1,99 @@
+# One replica, always. The cache is a single SQLite writer (PLAN §10):
+# two pods on one volume would corrupt it, and two pods on two volumes
+# would each serve a different cache. Recreate (not RollingUpdate) so the
+# old pod releases the ReadWriteOnce volume before the new one mounts it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jmap-bridge
+  labels:
+    app.kubernetes.io/name: jmap-bridge
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jmap-bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jmap-bridge
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532          # make the PVC writable by the nonroot uid
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: jmap-bridge
+          # Pin a release tag or digest in production, e.g.
+          # ghcr.io/caffeinatedtech/jmap-bridge:v0.1.0@sha256:…
+          image: ghcr.io/caffeinatedtech/jmap-bridge:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/config/config.toml"]
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            # Supplies JMAP_BRIDGE_* secrets (token, passwords, client
+            # secret, JMAP_BRIDGE_SECRET_KEY). optional: true lets the
+            # pod start before the Secret exists; config validation still
+            # fails closed if a required secret is absent.
+            - secretRef:
+                name: jmap-bridge-secrets
+                optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          # Liveness is about the process; readiness additionally waits for
+          # the first sync pass (FR-D.4). Startup gates liveness only, so a
+          # slow first backfill never gets the pod restarted.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: jmap-bridge-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: jmap-bridge-data
+        - name: tmp
+          emptyDir: {}

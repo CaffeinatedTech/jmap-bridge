@@ -1,0 +1,20 @@
+# Apply the whole stack with:
+#   kubectl create secret generic jmap-bridge-secrets -n jmap-bridge ...   # see secret.example.yaml
+#   kubectl apply -k deploy/k8s
+#
+# secret.example.yaml is deliberately NOT listed: create the real Secret
+# out of band so no credential is ever committed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: jmap-bridge
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+# Bump the release tag without editing the Deployment:
+# images:
+#   - name: ghcr.io/caffeinatedtech/jmap-bridge
+#     newTag: v0.1.0
