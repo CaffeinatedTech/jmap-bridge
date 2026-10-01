@@ -125,9 +125,10 @@ docker run -d --name jmap-bridge \
 The image runs as a non-root user (FR-D.1); `--user` maps it to your
 uid so `./data` stays writable and owned by you.
 
-Published images arrive at milestone M7 (PLAN §12); until then build from source
-(`go build -o jmap-bridge ./cmd/jmap-bridge`) and run the binary with
-`--config ./config.toml` instead of the container.
+Images are published to GHCR on `v*` tags (multi-arch amd64/arm64 —
+`deploy/README.md` covers building and publishing). Until the first tag exists,
+build from source (`go build -o jmap-bridge ./cmd/jmap-bridge`) and run the
+binary with `--config ./config.toml` instead of the container.
 
 Then point a client at it:
 
@@ -191,29 +192,91 @@ server {
 
 ### Kubernetes
 
-`Deployment` + `PVC` (SQLite + blobs) + `Service` + `Ingress` (TLS). Two ways in:
+A ready-made kustomize stack lives in [`deploy/k8s/`](deploy/k8s/): `Deployment`
++ `PVC` (SQLite + blobs) + `Service` + `Ingress` (TLS) + `ConfigMap`, with the
+Secret created out of band. See [`deploy/README.md`](deploy/README.md) for the
+image, GHCR and `kubectl apply -k` walkthrough.
+
+Two ways in:
 
 - **Direct:** Ingress with a real certificate and hostname → clients use
   `https://jmap.example.com/{account}`. This is also the OAuth callback target.
-- **Dev/tunnel:** `kubectl port-forward svc/jmap-bridge 8080:8080` → clients use
+- **Dev/tunnel:** `kubectl port-forward svc/jmap-bridge 8080:80` → clients use
   `http://127.0.0.1:8080/{account}` (loopback, so cleartext is allowed).
 
-Health endpoints for probes: `GET /healthz` (liveness), `GET /readyz` (all
-configured accounts have completed at least one sync pass).
+The Deployment is a single replica on a `ReadWriteOnce` volume by design: the
+cache is one SQLite writer (PLAN §10), so it must not be scaled horizontally.
+
+Health endpoints for probes: `GET /healthz` (process liveness) and `GET /readyz`
+(200 only once every account with an IMAP backend has completed a sync pass;
+503 again if an account hits an authentication failure, e.g. a dead Gmail
+refresh token).
 
 ### Google OAuth setup (Gmail accounts)
 
-1. Create a project in Google Cloud Console → **OAuth consent screen** (External,
-   add yourself as a test user, or publish).
-2. **Credentials → OAuth client ID → Web application**, with authorized redirect
-   URI `https://jmap.example.com/oauth/{account}/callback`.
-3. **Enable APIs**: Gmail API and **CardDAV API** (contacts). CalDAV API is only
-   relevant once calendar support lands (roadmap, PLAN §15).
-4. Scopes the bridge requests: `https://mail.google.com/` (IMAP *and* SMTP) and
-   `https://www.googleapis.com/auth/carddav` (contacts).
-5. Put `client_id`/`client_secret` in the account's `[accounts.oauth2]` block, start
-   the bridge, open `https://jmap.example.com/oauth/{account}/start` in a browser,
-   consent, done. Refresh tokens are stored encrypted at rest.
+Every self-hoster creates their **own** Google Cloud project and OAuth client —
+the bridge ships no shared client, and Google's OAuth verification is per-project.
+Do this once; the settings in step 2 are what make it set-and-forget.
+
+1. **Create a project and enable APIs.** In the Google Cloud Console create a
+   project, then enable the **Gmail API** and the **CardDAV API** (contacts).
+   CalDAV is only relevant once calendar support lands (roadmap, PLAN §15).
+
+2. **Configure the OAuth consent screen.**
+   - **User type:** *External* for personal `@gmail.com` accounts. Choose
+     *Internal* instead if every account is on one Google Workspace domain —
+     Internal skips verification, shows no warning screen, and is not subject to
+     the 7-day limit below.
+   - **Publishing status: set it to "In production", not "Testing".** This is the
+     one setting people get wrong, and it decides whether the bridge is
+     set-and-forget. An *External* consent screen left in **Testing** is issued
+     refresh tokens that **expire after 7 days**. That is Google's rule, not the
+     bridge's, and refreshing the access token does not extend it (see below).
+   - **Scopes:** `https://mail.google.com/` (used for IMAP *and* SMTP) and
+     `https://www.googleapis.com/auth/carddav` (contacts).
+
+3. **Create the OAuth client:** Credentials → Create credentials → **OAuth client
+   ID → Web application**, with authorized redirect URI
+   `https://jmap.example.com/oauth/{account}/callback`.
+
+4. **Configure the bridge** with the client ID/secret (environment or mounted file
+   preferred over inline config), start it, open
+   `https://jmap.example.com/oauth/{account}/start` in a browser, and approve.
+   Refresh tokens are stored encrypted at rest.
+
+#### The warnings you will see when consenting
+
+Because your app is unverified, Google shows its "unverified app" interstitial on
+every consent even in production. This is expected, and it is your own app:
+
+- A screen reading **"Google hasn't verified this app"**. Click **Advanced**, then
+  **Go to \<your app name\> (unsafe)**. The "(unsafe)" label just means Google has
+  not reviewed the app; it does not mean the credentials are at risk.
+- The scope list will say the app wants to **"Read, compose, send, and permanently
+  delete all of your email"** — that is exactly what `https://mail.google.com/`
+  grants, and the bridge needs all of it (faithful IMAP+SMTP proxying).
+- An unverified app that requests Gmail's restricted scope is capped at **100
+  users**. Personal self-hosting is one user; you will not hit it. Completing
+  Google's verification process removes both the warning and the cap, but it is
+  not required to run the bridge.
+
+#### The 7-day trap (Testing vs. In production)
+
+If you leave the External consent screen in **Testing**, the account will stop
+syncing a week after you consented. There is no bridge-side fix:
+
+- The refresh token is issued with a **fixed 7-day expiry** while the status is
+  Testing. It is not an idle timeout — using it does **not** reset the clock.
+- Google does **not** return a new refresh token when the bridge refreshes the
+  access token, so "refresh early" cannot roll the expiry forward either.
+- The remedy is the setting, not the bridge: switch publishing status to
+  **In production** and consent once more (the warnings above apply). Internal
+  user type avoids the limit entirely.
+
+When a refresh token does lapse, the bridge marks the account auth-failed, `/readyz`
+returns false, and the log names the account and says consent is needed — reopen
+`/oauth/{account}/start` to re-consent. The same applies to the other ways Google
+kills a token: password change, six months unused, admin policy, or manual revoke.
 
 App passwords are deliberately **not** supported for Gmail: Google has withdrawn
 basic authentication for third-party mail clients (Workspace enforced 2025-03-14)
@@ -340,9 +403,11 @@ token   = "…"
 ```
 
 Then consent once: open `https://your-host/oauth/gmail/start` in a browser,
-approve, and the bridge stores the refresh token and starts syncing. The
-refresh token is re-used forever after; if Google revokes it, the bridge
-logs that consent is needed again and the same URL restarts the flow.
+approve, and the bridge stores the refresh token and starts syncing. With the
+consent screen **In production** (see "Google OAuth setup" above) the refresh
+token is durable and re-used indefinitely; if it is left in **Testing** it dies
+after 7 days. Either way, when Google revokes or expires a token the bridge logs
+that consent is needed again and the same URL restarts the flow.
 Labels appear as mailboxes, archiving removes Inbox membership only, and
 Gmail's thread grouping drives the client's threads.
 

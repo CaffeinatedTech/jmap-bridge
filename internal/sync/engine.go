@@ -22,6 +22,7 @@ import (
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/dav"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/oauth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/submit"
 )
@@ -103,6 +104,16 @@ type Engine struct {
 	// contactsReady gates the urn:ietf:params:jmap:contacts capability:
 	// CardDAV configured AND the first full sync succeeded (FR-P.3).
 	contactsReady atomic.Bool
+
+	// ready flips true once the first sync pass succeeds (FR-D.4). It
+	// never flips back: a later transient failure is not a readiness
+	// regression, it is a liveness problem.
+	ready atomic.Bool
+	// authFailed tracks whether the latest connect/pass failure was an
+	// authentication refusal (bad password, dead refresh token), so
+	// /readyz reports not-ready while an account needs re-consent
+	// (FR-D.4, FR-A.7).
+	authFailed atomic.Bool
 }
 
 // errNotConnected means the work connection is down; the run loop
@@ -183,12 +194,16 @@ func (e *Engine) Run(ctx context.Context) {
 		if !e.isWorkConnected() {
 			if err := e.connect(ctx); err != nil {
 				e.log.Warn("sync: connect failed", "account", e.cfg.Account, "err", err)
+				if isAuthFailure(err) {
+					e.authFailed.Store(true)
+				}
 				failures++
 				if !e.sleepOrKick(ctx, backoff(failures)) {
 					return
 				}
 				continue
 			}
+			e.authFailed.Store(false)
 		}
 
 		var hint string
@@ -202,6 +217,9 @@ func (e *Engine) Run(ctx context.Context) {
 		}
 		if err := e.doPass(ctx, hint); err != nil {
 			e.log.Warn("sync: pass failed", "account", e.cfg.Account, "err", err)
+			if isAuthFailure(err) {
+				e.authFailed.Store(true)
+			}
 			e.disconnect()
 			// A [THROTTLED] pass is the provider saying "back off": the
 			// standard failure ladder would knock again in seconds.
@@ -224,6 +242,8 @@ func (e *Engine) Run(ctx context.Context) {
 			continue
 		}
 		failures = 0
+		e.ready.Store(true)
+		e.authFailed.Store(false)
 	}
 }
 
@@ -383,6 +403,27 @@ func (e *Engine) doPass(ctx context.Context, hint string) error {
 // IDLE on the watched folder — the state the FR-S.7 latency budget
 // assumes, and what the live gate waits for before measuring.
 func (e *Engine) IdleWatching() bool { return e.idleWatching.Load() }
+
+// Ready reports whether this engine has completed at least one sync pass
+// (FR-D.4). It is consulted by /readyz; a later transient failure does
+// not clear it.
+func (e *Engine) Ready() bool { return e.ready.Load() }
+
+// AuthFailed reports whether the most recent connect/pass failure was an
+// authentication refusal — credentials missing, rejected, or a refresh
+// token that needs consent again (FR-D.4). It clears on the next
+// successful connect or pass.
+func (e *Engine) AuthFailed() bool { return e.authFailed.Load() }
+
+// isAuthFailure classifies a connect/pass error as an authentication
+// refusal rather than a transient transport problem, which is what lets
+// /readyz distinguish "server unreachable, wait" from "a human must
+// re-consent" (FR-D.4).
+func isAuthFailure(err error) bool {
+	return imapdrv.IsAuthError(err) ||
+		errors.Is(err, oauth.ErrReauthNeeded) ||
+		errors.Is(err, oauth.ErrNoCredentials)
+}
 
 // setCurrentIdleFolder records which folder the idle connection should
 // watch; discovery calls this (FR-S.4).

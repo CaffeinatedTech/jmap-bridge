@@ -1,0 +1,17 @@
+# SQLite (WAL) + the blob store live together under data_dir (PLAN §11).
+# ReadWriteOnce is correct: the bridge is the only writer, and it must run
+# as a single replica (see Deployment). Back up by copying this volume
+# while the pod is stopped (FR-D.9).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jmap-bridge-data
+  labels:
+    app.kubernetes.io/name: jmap-bridge
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName: ""   # uncomment to pin a class

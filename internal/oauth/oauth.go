@@ -99,6 +99,13 @@ type TokenStore interface {
 // from transport errors because retrying cannot help.
 var ErrReauthNeeded = errors.New("oauth: provider rejected the refresh token, consent required again")
 
+// ErrNoCredentials reports that no refresh token is stored for the
+// account yet — the first-run state before consent, indistinguishable in
+// effect from a dead token: the operator must visit the start URL. It is
+// a sentinel so the sync engine can mark the account auth-failed for
+// /readyz rather than treating it as a transient transport error (FR-D.4).
+var ErrNoCredentials = errors.New("oauth: no stored credentials for account")
+
 // Manager is one account's OAuth2 client.
 type Manager struct {
 	account  string
@@ -264,7 +271,7 @@ func (m *Manager) AccessToken(ctx context.Context, force bool) (string, error) {
 		return "", err
 	}
 	if refresh == "" {
-		return "", fmt.Errorf("oauth: account %q has no stored credentials; visit %s",
+		return "", fmt.Errorf("%w %q; visit %s", ErrNoCredentials,
 			m.account, strings.TrimSuffix(m.redirect, "/callback")+"/start")
 	}
 	toks, err := m.refresh(ctx, refresh)

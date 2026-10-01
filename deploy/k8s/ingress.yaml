@@ -1,0 +1,35 @@
+# TLS is terminated here (or at an upstream load balancer). The host must
+# match base_url in the ConfigMap and the redirect URI registered on the
+# Google OAuth client (FR-D.3, FR-D.11).
+#
+# The annotations are for ingress-nginx. For another controller, keep the
+# TLS/host part and drop them: the equivalents are Caddy's defaults and
+# nginx's `proxy_buffering off` (README §Deployment).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jmap-bridge
+  labels:
+    app.kubernetes.io/name: jmap-bridge
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"        # SSE must stream (FR-D.8)
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"        # upload cap (NFR-5)
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - jmap.example.com
+      secretName: jmap-bridge-tls
+  rules:
+    - host: jmap.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jmap-bridge
+                port:
+                  name: http

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: jmap-bridge
+  labels:
+    app.kubernetes.io/name: jmap-bridge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: jmap-bridge
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -1,0 +1,68 @@
+# Non-secret configuration. Secrets (client tokens, IMAP/SMTP passwords,
+# the OAuth client secret, JMAP_BRIDGE_SECRET_KEY) come from the
+# jmap-bridge-secrets Secret via JMAP_BRIDGE_* env vars (FR-D.7, FR-D.10),
+# so they never live in this ConfigMap or in git.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jmap-bridge-config
+  labels:
+    app.kubernetes.io/name: jmap-bridge
+data:
+  config.toml: |
+    # Behind the Ingress: bind all interfaces, derive every URL from the
+    # public origin (FR-D.2). The reverse proxy terminates TLS.
+    listen   = "0.0.0.0:8080"
+    base_url = "https://jmap.example.com"
+    data_dir = "/data"
+    log_level = "info"
+
+    [auth]
+    mode = "token"
+
+    [search]
+    backfill = true
+
+    [sync]
+    interval = "5m"
+
+    [[accounts]]
+    id      = "personal"
+    name    = "Personal"
+    address = "me@example.com"
+    # token omitted on purpose: supply JMAP_BRIDGE_PERSONAL_TOKEN from the
+    # Secret (or token_file). Validation fails at startup if it is missing.
+
+      [accounts.imap]
+      host     = "imap.example.com"
+      port     = 993
+      username = "me@example.com"
+      # password omitted: JMAP_BRIDGE_PERSONAL_IMAP_PASSWORD
+
+      [accounts.smtp]
+      host = "smtp.example.com"
+      port = 465
+      # password defaults to the IMAP password when omitted
+
+    # Gmail account (OAuth2). Uncomment and set base_url, then register
+    # https://jmap.example.com/oauth/gmail/callback on your Google OAuth
+    # client (README "Google OAuth setup"). The client secret comes from
+    # JMAP_BRIDGE_GMAIL_OAUTH2_CLIENT_SECRET; the refresh token is written
+    # to the PVC, encrypted when JMAP_BRIDGE_SECRET_KEY is set.
+    #
+    # [[accounts]]
+    # id      = "gmail"
+    # name    = "Gmail"
+    # address = "me@gmail.com"
+    #   [accounts.imap]
+    #   host     = "imap.gmail.com"
+    #   port     = 993
+    #   auth     = "oauth2"
+    #   username = "me@gmail.com"
+    #   [accounts.smtp]
+    #   host = "smtp.gmail.com"
+    #   port = 465
+    #   auth = "oauth2"
+    #   [accounts.oauth2]
+    #   provider  = "google"
+    #   client_id = "…apps.googleusercontent.com"
