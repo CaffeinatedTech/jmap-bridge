@@ -274,11 +274,28 @@ func TestGmailFilesDraftFromRemovedFolder(t *testing.T) {
 		t.Fatalf("add line = %q, want the \\Sent add on the draft's own uid", add)
 	}
 	rem := fake.LineMatching("-X-GM-LABELS")
-	if !strings.Contains(rem, fmt.Sprintf(`UID STORE %d -X-GM-LABELS.SILENT (\Drafts)`, draftUID)) {
-		t.Fatalf("remove line = %q, want the \\Drafts removal on the draft's own uid", rem)
+	if !strings.Contains(rem, fmt.Sprintf(`UID STORE %d -X-GM-LABELS.SILENT (\Draft)`, draftUID)) {
+		t.Fatalf("remove line = %q, want the \\Draft removal on the draft's own uid", rem)
 	}
 	if sel := selectedBefore(fake.Lines(), "+X-GM-LABELS"); !strings.Contains(sel, "Drafts") {
 		t.Fatalf("filing selected %q, want [Gmail]/Drafts", sel)
+	}
+	// The Sent membership commits locally even though its uid is not yet
+	// known: otherwise losing the Drafts copy would tombstone the email
+	// and Email/get would answer notFound right after a successful send.
+	exists, live, err := st.EmailState(context.Background(), "acct", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || !live {
+		t.Fatalf("email after filing: exists=%v live=%v, want live in Sent", exists, live)
+	}
+	copies, err := st.EmailCopies(context.Background(), "acct", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copies) != 1 || copies[0].MailboxID != sentID {
+		t.Fatalf("memberships after filing = %#v, want only Sent", copies)
 	}
 }
 
@@ -395,7 +412,7 @@ func TestGmLabelFor(t *testing.T) {
 	cases := []struct{ role, path, want string }{
 		{"inbox", "INBOX", `\Inbox`},
 		{"sent", "[Gmail]/Sent Mail", `\Sent`},
-		{"drafts", "[Gmail]/Drafts", `\Drafts`},
+		{"drafts", "[Gmail]/Drafts", `\Draft`},
 		{"trash", "[Gmail]/Trash", `\Trash`},
 		{"junk", "[Gmail]/Spam", `\Spam`},
 		{"", "receipts", "receipts"},

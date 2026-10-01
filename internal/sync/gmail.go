@@ -105,7 +105,10 @@ func gmLabelFor(role, path string) string {
 	case "sent":
 		return `\Sent`
 	case "drafts":
-		return `\Drafts`
+		// Gmail's X-GM-LABELS spells the draft label in flag form
+		// ("\Draft"), even though SPECIAL-USE advertises "\Drafts"; a
+		// write using the latter is accepted and silently ignored.
+		return `\Draft`
 	case "trash":
 		return `\Trash`
 	case "junk":
@@ -142,11 +145,11 @@ func leafName(path string) string {
 // to remove the selected folder's own label (removing \Inbox archives
 // only when issued from another copy, All Mail preferred).
 func (e *Engine) changeMembershipGmail(ctx context.Context, copies []store.Copy, addSet []string, remSet []string) ([]store.MembershipAdd, error) {
-	addLabels, skipAdds, err := e.labelsFor(ctx, addSet, false)
+	addLabels, _, err := e.labelsFor(ctx, addSet, false)
 	if err != nil {
 		return nil, err
 	}
-	removeLabels, skipRemoves, err := e.labelsFor(ctx, remSet, true)
+	removeLabels, _, err := e.labelsFor(ctx, remSet, true)
 	if err != nil {
 		return nil, err
 	}
@@ -176,32 +179,26 @@ func (e *Engine) changeMembershipGmail(ctx context.Context, copies []store.Copy,
 		return nil, err
 	}
 
-	// The uid is unchanged: Gmail labels do not renumber messages, so a
-	// copy whose label the patch keeps can be addressed by the same
-	// folder+uid pair afterwards.
+	// Every add is a membership the server now holds — a label write
+	// accepted it, or it is implicit — so it commits locally at once.
+	// That is what keeps a draft moved into Sent from being tombstoned
+	// when its Drafts membership goes away. A destination already cached
+	// (the implicit All Mail) supplies its own uid; otherwise the uid is
+	// unknown — Gmail assigns one on the label write — so the membership
+	// commits without a mapping and the next sync pass fills it in.
 	adds := make([]store.MembershipAdd, 0, len(addSet))
 	for _, id := range addSet {
-		if skipAdds[id] {
-			// Implicit mailbox: the server already holds the message
-			// there by definition; the membership commit below reports
-			// exactly that truth (PLAN §7.1 Gmail amendment). Only the
-			// implicit copy's own uid may be recorded — any other
-			// folder's uid would be a folder/uid mismatch, so an
-			// uncached All Mail copy commits membership without a uid
-			// and lets the next sync pass map it.
-			var uid, uv uint32
-			for i := range copies {
-				if copies[i].MailboxID == id {
-					uid, uv = copies[i].UID, copies[i].UIDValidity
-					break
-				}
+		var uid, uv uint32
+		for i := range copies {
+			if copies[i].MailboxID == id {
+				uid, uv = copies[i].UID, copies[i].UIDValidity
+				break
 			}
-			adds = append(adds, store.MembershipAdd{
-				MailboxID: id, UID: uid, UIDValidity: uv,
-			})
 		}
+		adds = append(adds, store.MembershipAdd{
+			MailboxID: id, UID: uid, UIDValidity: uv,
+		})
 	}
-	_ = skipRemoves
 	return adds, nil
 }
 
