@@ -161,6 +161,17 @@ def fetch_uid(M, seq):
     return val.decode(errors="replace").split("UID")[-1].strip().strip(") ")
 
 
+def fetch_msgid(M, seq):
+    # X-GM-MSGID is Gmail's account-global message id: unlike a uid it is
+    # the same in every folder the message lives in, so it survives the
+    # new uid a message gets when it re-enters a folder.
+    typ, md = M.fetch(seq, "(X-GM-MSGID)")
+    item = md[0]
+    val = item[1] if isinstance(item, tuple) else item
+    s = val.decode(errors="replace") if isinstance(val, bytes) else str(val)
+    return s.split("X-GM-MSGID")[-1].strip().strip(") ")
+
+
 def stop_if_throttled(where, typ, data):
     # Any non-OK tagged response — and especially the [THROTTLED] code — means
     # Gmail did not perform the write. Send nothing further: retrying is what
@@ -177,13 +188,21 @@ def pace():
     time.sleep(WRITE_PACE)
 
 
-def inbox_has_uid(M, uid):
+def has_label(M, seq, label):
+    typ, md = M.fetch(seq, "(X-GM-LABELS)")
+    raw = b""
+    for item in md or []:
+        raw += item if isinstance(item, bytes) else str(item).encode()
+    return label.encode() in raw
+
+
+def inbox_has_msgid(M, msgid):
+    # Membership by X-GM-MSGID, not by the INBOX uid: a message that
+    # leaves and re-enters INBOX (archive, then undo) gets a fresh uid,
+    # so the uid captured before the archive would always read as gone.
     M.select('"INBOX"', readonly=True)
-    typ, data = M.search(None, "ALL")
-    for s in data[0].split():
-        if fetch_uid(M, s) == uid:
-            return True
-    return False
+    typ, data = M.search(None, "X-GM-MSGID", msgid)
+    return bool(data and data[0])
 
 
 def main():
@@ -220,7 +239,7 @@ def main():
         finish(M, t_start)
         return
     seq = seqs[-1]
-    gmail_uid = fetch_uid(M, seq)
+    gmail_msgid = fetch_msgid(M, seq)
     stop_if_throttled("STORE +label", *M.store(seq, "+X-GM-LABELS", f'("{LABEL}")'))
 
     def bridge_label_target():
@@ -250,12 +269,13 @@ def main():
         r = method(jmap([["Email/set", {"update": {target: {f"mailboxIds/{inbox['id']}": None}}}, "0"]]),
                    "Email/set")
         check("archive accepted by the bridge", not r.get("notUpdated"), json.dumps(r.get("notUpdated", {}))[:160])
-        gone = poll(lambda: not inbox_has_uid(M, gmail_uid), 90)
+        gone = poll(lambda: not inbox_has_msgid(M, gmail_msgid), 90)
         check("archive removes INBOX membership", bool(gone))
         r = method(jmap([["Email/set", {"update": {target: {f"mailboxIds/{inbox['id']}": True}}}, "0"]]),
                    "Email/set")
-        check("archive undone (message back in INBOX)", not r.get("notUpdated"), json.dumps(r.get("notUpdated", {}))[:160])
-        poll(lambda: inbox_has_uid(M, gmail_uid), 90)
+        check("archive undone accepted by the bridge", not r.get("notUpdated"), json.dumps(r.get("notUpdated", {}))[:160])
+        back = poll(lambda: inbox_has_msgid(M, gmail_msgid), 90)
+        check("archive undone (message back in INBOX)", bool(back))
     pace()
 
     # --- 3. compose + send over Gmail SMTP --------------------------------
@@ -279,12 +299,30 @@ def main():
     check("submission accepted", bool(sub.get("created", {}).get("s1")),
           json.dumps(sub.get("notCreated", {}))[:200])
 
-    def delivered():
-        M.select('"INBOX"', readonly=True)
-        typ, data = M.search(None, '(HEADER Subject "%s")' % SUBJECT.replace('"', ""))
-        return data[0].split() if data and data[0] else None
+    # The sent message's Message-ID, so delivery can be proven on All Mail
+    # (where both copies land at once) instead of the lagging INBOX index.
+    send_id = method(resp, "Email/set").get("created", {}).get("d1", {}).get("id", "")
+    send_mid = ""
+    if send_id:
+        mid = method(jmap([["Email/get", {"ids": [send_id], "properties": ["messageId"]}, "0"]]),
+                     "Email/get").get("list", [{}])[0].get("messageId") or []
+        send_mid = mid[0] if mid else ""
 
-    got = poll(delivered, 90)
+    def delivered():
+        # The delivered copy is the one in All Mail carrying the \Inbox
+        # label; the sent copy carries \Sent. INBOX search is avoided: its
+        # index can lag minutes behind delivery.
+        M.select('"[Gmail]/All Mail"', readonly=True)
+        seqs = []
+        if send_mid:
+            typ, data = M.search(None, '(HEADER Message-ID "%s")' % send_mid)
+            seqs = data[0].split() if data and data[0] else []
+        if not seqs:  # header search not honoured: the unique subject will do
+            typ, data = M.search(None, '(HEADER Subject "%s")' % SUBJECT.replace('"', ""))
+            seqs = data[0].split() if data and data[0] else []
+        return [s for s in seqs if has_label(M, s, "\\Inbox")] or None
+
+    got = poll(delivered, 180)
     check("sent message delivered to INBOX", bool(got), f"{len(got or [])} copy(ies)")
     if got:
         check("exactly one delivered copy", len(got) == 1, str(len(got)))
@@ -321,8 +359,11 @@ def finish(M, t_start):
             typ, data = M.search(None, '(HEADER Subject "%s")' % SUBJECT.replace('"', ""))
             buids = [fetch_uid(M, s) for s in data[0].split()] if data and data[0] else []
             if buids:
-                M.uid("STORE", ",".join(buids), "+FLAGS", "(\\Deleted)")
-                M.uid("EXPUNGE")
+                buset = ",".join(buids)
+                M.uid("STORE", buset, "+FLAGS", "(\\Deleted)")
+                # UID EXPUNGE needs a uid set; a bare EXPUNGE also removes
+                # any other \Deleted message another client flagged.
+                M.uid("EXPUNGE", buset)
         try:
             M.delete(f'"{LABEL}"')
         except imaplib.IMAP4.error:
