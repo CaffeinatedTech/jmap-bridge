@@ -8,6 +8,7 @@ import (
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/keyword"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 )
 
@@ -239,6 +240,55 @@ func (e *Engine) gmailLabelSource(ctx context.Context, copies []store.Copy, remS
 		return preferred
 	}
 	return fallback
+}
+
+// gmailDraftCopy returns the drafts-folder copy of an email, or nil. Gmail
+// silently drops an SMTP submission whose Message-ID already exists in
+// the mailbox, and the bridge APPENDed the message as this draft, so the
+// send path removes it before submitting.
+func (e *Engine) gmailDraftCopy(ctx context.Context, account, emailID string) (*store.Copy, error) {
+	draftID, err := e.st.MailboxIDByRole(ctx, account, "drafts")
+	if err != nil {
+		return nil, err
+	}
+	if draftID == "" {
+		return nil, nil
+	}
+	copies, err := e.st.EmailCopies(ctx, account, emailID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range copies {
+		if copies[i].MailboxID == draftID && copies[i].UID != 0 {
+			return &copies[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// restoreGmailDraft re-APPENDs the draft the send path expunged when the
+// send then failed, so an error never loses the client's draft. The cache
+// reconciles the fresh uid on the next sync pass.
+func (e *Engine) restoreGmailDraft(ctx context.Context, account, emailID string, c *store.Copy, raw []byte) {
+	if c == nil {
+		return
+	}
+	kw, err := e.st.EmailKeywords(ctx, account, emailID)
+	if err != nil {
+		e.log.Warn("sync: draft not restored", "email", emailID, "err", err)
+		return
+	}
+	flags := keyword.ToIMAP(kw)
+	if !contains(flags, `\Draft`) {
+		flags = append(flags, `\Draft`)
+	}
+	if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
+		_, _, err := conn.AppendMessage(ctx, c.Folder, raw, flags, nil)
+		return err
+	}); err != nil {
+		e.log.Warn("sync: draft not restored",
+			"email", emailID, "folder", c.Folder, "err", err)
+	}
 }
 
 // labelsFor resolves mailbox ids to Gmail labels. forRemoval marks the

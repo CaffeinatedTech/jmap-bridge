@@ -11,6 +11,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/convert"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/submit"
 )
 
@@ -58,9 +59,32 @@ func (e *Engine) SubmitEmail(ctx context.Context, account string, spec jmapapi.S
 		return nil, err
 	}
 
+	// Gmail silently declines to relay an SMTP submission whose
+	// Message-ID already exists in the mailbox (it answers 250 and files
+	// the message as a draft-like Sent item), and the bridge APPENDed
+	// this very message as the draft. Removing that upstream draft first
+	// makes the submission a genuinely new message, which Gmail relays
+	// and auto-saves to Sent. A failed send restores the draft, so an
+	// error never costs the client its draft.
+	var draft *store.Copy
+	if e.wr.gmail() {
+		draft, err = e.gmailDraftCopy(ctx, account, spec.EmailID)
+		if err != nil {
+			return nil, err
+		}
+		if draft != nil {
+			if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
+				return conn.ExpungeUIDs(ctx, draft.Folder, []uint32{draft.UID})
+			}); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	// Bcc travels to the envelope but never on the wire (RFC 8621 §7.5):
 	// the stored copy keeps its Bcc header, the delivered one does not.
 	if err := submit.Send(ctx, *e.cfg.SMTP, env, convert.StripBcc(raw)); err != nil {
+		e.restoreGmailDraft(ctx, account, spec.EmailID, draft, raw)
 		var rejected *submit.RejectedError
 		if errors.As(err, &rejected) {
 			return nil, &jmapapi.SMTPError{Reply: rejected.Reply}
@@ -69,8 +93,10 @@ func (e *Engine) SubmitEmail(ctx context.Context, account string, spec jmapapi.S
 	}
 
 	// The message exists out there; every failure below is logged, never
-	// reported as a failed create.
-	if !spec.FilesItself() {
+	// reported as a failed create. Gmail's own SMTP already files the
+	// sent copy in Sent, so only servers without that behaviour get the
+	// bridge's APPEND.
+	if !spec.FilesItself() && !e.wr.gmail() {
 		if err := e.fileSentCopy(ctx, account, spec.EmailID, raw); err != nil {
 			e.log.Warn("sync: sent copy not filed",
 				"email", spec.EmailID, "err", err)

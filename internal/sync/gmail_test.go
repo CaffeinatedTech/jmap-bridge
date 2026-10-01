@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/submit"
+	"github.com/CaffeinatedTech/jmap-bridge/test/fixturesmtp"
 	"github.com/CaffeinatedTech/jmap-bridge/test/wireimap"
 )
 
@@ -424,5 +427,77 @@ func TestGmLabelFor(t *testing.T) {
 		if got := gmLabelFor(tc.role, tc.path); got != tc.want {
 			t.Errorf("gmLabelFor(%q,%q) = %q, want %q", tc.role, tc.path, got, tc.want)
 		}
+	}
+}
+
+// Gmail silently declines to relay an SMTP submission whose Message-ID
+// already exists in the mailbox — and the bridge APPENDed this very
+// message as the draft, so a compose-and-send would never leave the
+// account. The send path must expunge that upstream draft first.
+func TestGmailSendExpungesDraftBeforeSMTP(t *testing.T) {
+	st := gmStore(t)
+	const draftUID = 7204
+	id := gmSeedPerFolder(t, st, map[string]uint32{"[Gmail]/Drafts": draftUID})
+	ctx := context.Background()
+	raw := []byte("From: me@example.test\r\nTo: you@example.test\r\nSubject: hi\r\n" +
+		"Message-ID: <gm-send@example>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain\r\n\r\nbody\r\n")
+	blobID, err := st.PutBlob(ctx, "acct", "message/rfc822", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.LinkRawBlob(ctx, "acct", id, blobID); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := fixturesmtp.Start(t, fixturesmtp.Options{Username: "u", Password: "p"})
+	fake := wireimap.Start(t, "CAPABILITY IMAP4rev1", func(tag, line string) []string {
+		switch {
+		case strings.Contains(line, "CAPABILITY"):
+			return []string{"* CAPABILITY IMAP4rev1 X-GM-EXT-1 UIDPLUS"}
+		case strings.Contains(line, " SELECT "):
+			return []string{
+				"* 1 EXISTS",
+				"* OK [UIDVALIDITY 13] uv",
+				"* OK [UIDNEXT 9] un",
+				tag + " OK [READ-WRITE] selected",
+			}
+		case strings.Contains(line, "UNSELECT"):
+			return []string{tag + " OK"}
+		}
+		return nil
+	})
+	cfg := Config{
+		Account: "acct",
+		IMAP: imapdrv.Config{
+			Host: fake.Host(), Port: fake.Port(), Username: "u", Password: "p",
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		SMTP: &submit.Config{
+			Host: sink.Host(), Port: sink.Port(), TLS: "none",
+			Auth: "password", Username: "u", Password: "p",
+		},
+	}
+	e := New(cfg, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	e.wr.noteGmail(true)
+
+	if _, err := e.SubmitEmail(ctx, "acct", jmapapi.SubmissionSpec{
+		EmailID:    id,
+		IdentityID: "I1",
+		From:       "me@example.test",
+		Envelope:   &jmapapi.SubmissionEnvelope{RcptTo: []string{"you@example.test"}},
+	}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	expunge := fake.LineMatching("UID EXPUNGE")
+	if expunge == "" || !strings.Contains(expunge, fmt.Sprint(draftUID)) {
+		t.Fatalf("draft not expunged before SMTP: %q (Gmail would silently drop the send)", expunge)
+	}
+	msgs := sink.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("SMTP sink holds %d messages, want 1", len(msgs))
+	}
+	if !bytes.Equal(msgs[0].Data, raw) {
+		t.Errorf("delivered bytes differ from the draft")
 	}
 }
