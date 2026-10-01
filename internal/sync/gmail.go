@@ -137,10 +137,10 @@ func leafName(path string) string {
 // every add and every remove, addressed through one copy whose folder and
 // uid are used together. Gmail UIDs are per-folder — every label is its
 // own IMAP mailbox with its own uid sequence and uidvalidity — so the uid
-// is only valid in the folder it was read from. The source must also be
-// a copy the patch is not removing: Gmail answers OK but silently
-// declines to remove the selected folder's own label (removing \Inbox
-// archives only when issued from another copy, All Mail preferred).
+// is only valid in the folder it was read from. The write also prefers a
+// copy the patch is not removing: Gmail answers OK but silently declines
+// to remove the selected folder's own label (removing \Inbox archives
+// only when issued from another copy, All Mail preferred).
 func (e *Engine) changeMembershipGmail(ctx context.Context, copies []store.Copy, addSet []string, remSet []string) ([]store.MembershipAdd, error) {
 	addLabels, skipAdds, err := e.labelsFor(ctx, addSet, false)
 	if err != nil {
@@ -158,7 +158,7 @@ func (e *Engine) changeMembershipGmail(ctx context.Context, copies []store.Copy,
 
 	src := e.gmailLabelSource(ctx, copies, remSet)
 	if src == nil {
-		return nil, fmt.Errorf("%w: no folder outside the removed set holds a known uid for this message", jmapapi.ErrNoLocation)
+		return nil, fmt.Errorf("%w: no folder holds a known uid for this message", jmapapi.ErrNoLocation)
 	}
 
 	if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
@@ -206,31 +206,42 @@ func (e *Engine) changeMembershipGmail(ctx context.Context, copies []store.Copy,
 }
 
 // gmailLabelSource chooses the copy whose folder and uid a Gmail label
-// write is issued from. It must not be a folder the patch removes (Gmail
-// accepts the command but declines to remove the selected folder's own
-// label), and its uid is only meaningful paired with its own folder. The
-// implicit All Mail copy is preferred: every message lives there and it
-// is never in a removable set. Returns nil when only removed copies have
-// a known uid.
+// write is issued from. It prefers a folder the patch is not removing,
+// because Gmail accepts a command that would remove the selected
+// folder's own label but declines to carry it out (removing \Inbox
+// archives only when issued from another copy). The implicit All Mail
+// copy is the best source: every message lives there and it is never in
+// a removable set. When only removed copies have a known uid — e.g. a
+// draft being filed into Sent before All Mail has synced it — the first
+// known copy is used, which is the only command that can work.
 func (e *Engine) gmailLabelSource(ctx context.Context, copies []store.Copy, remSet []string) *store.Copy {
 	allID, err := e.st.ImplicitMailboxID(ctx, e.cfg.Account)
 	if err != nil {
 		allID = ""
 	}
-	var outside *store.Copy
+	var preferred, fallback *store.Copy
 	for i := range copies {
 		c := &copies[i]
-		if c.UID == 0 || contains(remSet, c.MailboxID) {
+		if c.UID == 0 {
+			continue
+		}
+		if fallback == nil {
+			fallback = c
+		}
+		if contains(remSet, c.MailboxID) {
 			continue
 		}
 		if allID != "" && c.MailboxID == allID {
 			return c
 		}
-		if outside == nil {
-			outside = c
+		if preferred == nil {
+			preferred = c
 		}
 	}
-	return outside
+	if preferred != nil {
+		return preferred
+	}
+	return fallback
 }
 
 // labelsFor resolves mailbox ids to Gmail labels. forRemoval marks the
