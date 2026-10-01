@@ -57,6 +57,11 @@ for line in open("/home/adam/projects/jmap-bridge/dev/config-gmail.toml"):
 BRIDGE = "http://127.0.0.1:8080/gmail"
 AUTH = base64.b64encode(b"any:dev-token-gmail-local-only").decode()
 USER = "cyaegha@gmail.com"
+# The send test goes to a plus-alias of the same account: Gmail dedupes a
+# self-send (From == To) against the draft that already carries the same
+# Message-ID and does not deliver a separate INBOX copy, but a distinct
+# recipient on the same mailbox does deliver one.
+RCPT = "cyaegha+jmapbridgegate@gmail.com"
 NONCE = str(int(time.time()))
 LABEL = "jmapgate" + NONCE          # applied in Gmail, expected in the bridge
 SUBJECT = "jmap-bridge M4 gate " + NONCE
@@ -282,7 +287,7 @@ def main():
     resp = jmap([["Email/set", {"create": {"d1": {
         "mailboxIds": {drafts["id"]: True},
         "from": [{"name": "jmap-bridge gate", "email": USER}],
-        "to": [{"name": "jmap-bridge gate", "email": USER}],
+        "to": [{"name": "jmap-bridge gate", "email": RCPT}],
         "subject": SUBJECT,
         "keywords": {"$draft": True, "$seen": True},
         "textBody": [{"partId": "1", "type": "text/plain"}],
@@ -301,12 +306,17 @@ def main():
 
     # The sent message's Message-ID, so delivery can be proven on All Mail
     # (where both copies land at once) instead of the lagging INBOX index.
+    # Email/get may not find it: filing the draft into Sent removes its
+    # Drafts membership locally, and the Sent mapping arrives on the next
+    # sync pass — the unique subject is the fallback.
     send_id = method(resp, "Email/set").get("created", {}).get("d1", {}).get("id", "")
     send_mid = ""
     if send_id:
-        mid = method(jmap([["Email/get", {"ids": [send_id], "properties": ["messageId"]}, "0"]]),
-                     "Email/get").get("list", [{}])[0].get("messageId") or []
-        send_mid = mid[0] if mid else ""
+        lg = method(jmap([["Email/get", {"ids": [send_id], "properties": ["messageId"]}, "0"]]),
+                    "Email/get").get("list") or []
+        if lg:
+            mids = lg[0].get("messageId") or []
+            send_mid = mids[0] if mids else ""
 
     def delivered():
         # The received copy is a distinct All Mail message that is neither
@@ -325,7 +335,8 @@ def main():
         for s in seqs:
             if has_label(M, s, "\\Inbox"):
                 out.append(s)
-            elif not has_label(M, s, "\\Sent") and not has_label(M, s, "\\Drafts"):
+            elif (not has_label(M, s, "\\Sent") and not has_label(M, s, "\\Drafts")
+                  and not has_label(M, s, "\\Draft")):
                 out.append(s)
         return out or None
 
