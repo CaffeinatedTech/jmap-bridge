@@ -278,7 +278,7 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 			return err
 		}
 	}
-	adds, err := e.changeMembershipFor(ctx, copies, addSet, addPaths, remSet)
+	adds, err := e.changeMembershipFor(ctx, emailID, copies, addSet, addPaths, remSet)
 	if err != nil {
 		return err
 	}
@@ -339,9 +339,9 @@ func (e *Engine) storeFlagsFor(ctx context.Context, copies []store.Copy, kwAdd, 
 // changeMembershipFor picks the membership strategy the server model
 // needs: label writes on Gmail (FR-S.10), COPY/MOVE/EXPUNGE everywhere
 // else.
-func (e *Engine) changeMembershipFor(ctx context.Context, copies []store.Copy, addSet []string, addPaths map[string]string, remSet []string) ([]store.MembershipAdd, error) {
+func (e *Engine) changeMembershipFor(ctx context.Context, emailID string, copies []store.Copy, addSet []string, addPaths map[string]string, remSet []string) ([]store.MembershipAdd, error) {
 	if e.wr.gmail() {
-		return e.changeMembershipGmail(ctx, copies, addSet, remSet)
+		return e.changeMembershipGmail(ctx, emailID, copies, addSet, remSet)
 	}
 	return e.changeMembership(ctx, copies, addSet, addPaths, remSet)
 }

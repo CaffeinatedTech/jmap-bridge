@@ -843,6 +843,24 @@ func liveEmailBySharedUID(ctx context.Context, tx *sql.Tx, account string, uidVa
 	return id
 }
 
+// EmailMessageID returns one Message-ID stored for an email, including
+// its angle brackets, or "" when the cache holds none. It is what the
+// Gmail write path searches All Mail with when no cached copy supplies a
+// usable uid.
+func (s *Store) EmailMessageID(ctx context.Context, account, emailID string) (string, error) {
+	var msgid string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT msgid FROM email_msgid WHERE account = ? AND email_id = ? LIMIT 1`,
+		account, emailID).Scan(&msgid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: email message-id: %w", err)
+	}
+	return msgid, nil
+}
+
 // liveEmailByMsgID finds a live email by any of the message's own
 // Message-IDs (cross-folder dedupe, FR-S.6 re-backfill).
 func liveEmailByMsgID(ctx context.Context, tx *sql.Tx, account string, msgIDs []string) string {
