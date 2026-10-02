@@ -13,12 +13,14 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/auth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/config"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/oauth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/push"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/ratelimit"
 )
 
 // Request size caps (NFR-5, locked as D-16). maxSizeRequest mirrors the
@@ -47,6 +49,23 @@ type Server struct {
 	// succeeded — the second half of the contacts capability gate
 	// (FR-P.3: configured *and* working, never advertised on hope).
 	contactsReady func(account string) bool
+
+	// limit is the in-process failed-auth lockout (NFR-5, A2); nil when
+	// rate limiting is disabled.
+	limit *ratelimit.Limiter
+	// reqSem/uploadSem bound concurrent work; nil means unbounded.
+	reqSem    chan struct{}
+	uploadSem chan struct{}
+	// maxReq/maxUpload are what the session advertises; enforcement uses
+	// the same numbers so capability and behaviour cannot drift.
+	maxReq, maxUpload int
+
+	// SSE connection caps (A4). sseMu guards the live counters.
+	sseMu         sync.Mutex
+	ssePerAcct    map[string]int
+	sseTotal      int
+	maxSSEPerAcct int
+	maxSSETotal   int
 }
 
 // New wires a Server: routing, auth, dispatch and push. store serves
@@ -78,6 +97,7 @@ func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
 		// segfault for it.
 		s.log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	s.applyRateLimits(cfg.Rate)
 	s.mux.HandleFunc("GET /{account}/.well-known/jmap", s.handleSession)
 	s.mux.HandleFunc("POST /{account}/jmap", s.handleAPI)
 	s.mux.HandleFunc("GET /{account}/eventsource/", s.handleEventSource)
@@ -100,11 +120,128 @@ func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
 // token: the operator reaches it from a browser before any client is
 // configured, and the flow's own state is the credential (FR-A.6).
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Defence-in-depth response headers (NFR-5). The pages carry no
+	// scripts or styles, so a deny-all CSP costs nothing and stops a
+	// download or content-sniffing quirk from turning into script on
+	// this origin.
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Content-Security-Policy",
+		"default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/oauth/") {
 		s.handleOAuth(w, r)
 		return
 	}
+	// EventSource streams are long-lived and governed by their own caps;
+	// every other request takes a slot so the advertised
+	// maxConcurrentRequests is real (golden rule 4, A4).
+	if !isEventSource(r) {
+		if !s.acquire(s.reqSem) {
+			s.tooManyRequests(w, "maxConcurrentRequests")
+			return
+		}
+		defer s.release(s.reqSem)
+	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// applyRateLimits builds the failed-auth limiter and concurrency gates
+// from configuration (NFR-5). Disabled leaves them nil (unbounded),
+// which is an explicit operator choice.
+func (s *Server) applyRateLimits(rate config.Rate) {
+	s.maxReq, s.maxUpload = 8, 4
+	if rate.MaxConcurrentRequests > 0 {
+		s.maxReq = rate.MaxConcurrentRequests
+	}
+	if rate.MaxConcurrentUploads > 0 {
+		s.maxUpload = rate.MaxConcurrentUploads
+	}
+	if !rate.Enabled {
+		return
+	}
+	s.limit = ratelimit.New(ratelimit.Config{
+		AuthFailures:   rate.AuthFailures,
+		AuthWindow:     rate.AuthWindow.Std(),
+		AuthBlock:      rate.AuthBlock.Std(),
+		ClientIPHeader: rate.ClientIPHeader,
+		TrustedProxies: rate.TrustedProxies,
+	})
+	s.reqSem = make(chan struct{}, s.maxReq)
+	s.uploadSem = make(chan struct{}, s.maxUpload)
+	s.maxSSEPerAcct = rate.MaxEventsourcePerAccount
+	s.maxSSETotal = rate.MaxEventsourceTotal
+	s.ssePerAcct = map[string]int{}
+}
+
+// isEventSource reports whether r targets the SSE endpoint, which is
+// exempt from the request concurrency gate.
+func isEventSource(r *http.Request) bool {
+	return r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/eventsource/")
+}
+
+// acquire takes a slot from sem without blocking; nil is unbounded.
+func (s *Server) acquire(sem chan struct{}) bool {
+	if sem == nil {
+		return true
+	}
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// release returns a slot taken by acquire.
+func (s *Server) release(sem chan struct{}) {
+	if sem != nil {
+		<-sem
+	}
+}
+
+// acquireSSE reserves an EventSource slot for account, refusing when the
+// per-account or total cap is reached (A4).
+func (s *Server) acquireSSE(account string) bool {
+	s.sseMu.Lock()
+	defer s.sseMu.Unlock()
+	if s.maxSSETotal > 0 && s.sseTotal >= s.maxSSETotal {
+		return false
+	}
+	if s.maxSSEPerAcct > 0 && s.ssePerAcct[account] >= s.maxSSEPerAcct {
+		return false
+	}
+	s.ssePerAcct[account]++
+	s.sseTotal++
+	return true
+}
+
+// releaseSSE frees an EventSource slot.
+func (s *Server) releaseSSE(account string) {
+	s.sseMu.Lock()
+	defer s.sseMu.Unlock()
+	if s.ssePerAcct[account] > 0 {
+		s.ssePerAcct[account]--
+		if s.ssePerAcct[account] == 0 {
+			delete(s.ssePerAcct, account)
+		}
+	}
+	if s.sseTotal > 0 {
+		s.sseTotal--
+	}
+}
+
+// tooManyRequests answers a refused request with Retry-After and the
+// registered JMAP limit problem type (RFC 8620 §3.6.1).
+func (s *Server) tooManyRequests(w http.ResponseWriter, limit string) {
+	w.Header().Set("Retry-After", "60")
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{
+		"type":   "urn:ietf:params:jmap:error:limit",
+		"status": http.StatusTooManyRequests,
+		"limit":  limit,
+		"detail": "too many requests",
+	}, nil)
 }
 
 // authorize resolves the path account and checks the request
@@ -119,10 +256,29 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, accountID str
 		return acct // nil → caller 404s: no credentials are in play to hide behind
 	}
 	user, pass, ok := r.BasicAuth()
-	if acct == nil || !ok || user == "" || !s.tokens.Verify(accountID, pass) {
+	// Verify runs unconditionally: an unknown account must cost the same
+	// constant-time compare as a known one, or the response time leaks
+	// which account ids exist (FR-A.11, FR-A.12).
+	verified := s.tokens.Verify(accountID, pass)
+
+	key := ""
+	if s.limit != nil {
+		key = "auth:" + s.limit.ClientIP(r) + ":" + accountID
+		if s.limit.Blocked(key) {
+			s.tooManyRequests(w, "authFailures")
+			return nil
+		}
+	}
+	if acct == nil || !ok || user == "" || !verified {
+		if s.limit != nil {
+			s.limit.Fail(key)
+		}
 		w.Header().Set("WWW-Authenticate", `Basic realm="jmap-bridge"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return nil
+	}
+	if s.limit != nil {
+		s.limit.Succeed(key)
 	}
 	return acct
 }
@@ -222,9 +378,9 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	capabilities["urn:ietf:params:jmap:core"] = map[string]any{
 		"maxSizeUpload":         maxSizeUpload,
-		"maxConcurrentUpload":   4,
+		"maxConcurrentUpload":   s.maxUpload,
 		"maxSizeRequest":        maxSizeRequest,
-		"maxConcurrentRequests": 8,
+		"maxConcurrentRequests": s.maxReq,
 		"maxCallsInRequest":     256,
 		"maxObjectsInGet":       512,
 		"maxObjectsInSet":       512,

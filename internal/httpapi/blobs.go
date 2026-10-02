@@ -29,6 +29,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Uploads are heavier than a normal request, so they take their own
+	// (smaller) concurrency budget, matching maxConcurrentUpload.
+	if !s.acquire(s.uploadSem) {
+		s.tooManyRequests(w, "maxConcurrentUpload")
+		return
+	}
+	defer s.release(s.uploadSem)
 	if r.ContentLength > maxSizeUpload {
 		writeLimit(w, "upload body exceeds maxSizeUpload")
 		return

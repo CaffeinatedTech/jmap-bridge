@@ -23,7 +23,7 @@ mode = "token"
 id = "gmail"
 name = "Gmail"
 address = "cyaegha@gmail.com"
-token = "dev-token-gmail-local-only"
+token = "dev-token-gmail-local-only-0123456789"
 
   [accounts.imap]
   host = "imap.gmail.com"

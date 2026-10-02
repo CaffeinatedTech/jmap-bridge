@@ -259,6 +259,51 @@ func TestEventSourceRejectsBadParamsAndMissingAuth(t *testing.T) {
 	}
 }
 
+// newSSEEnvRate builds an SSE env whose config carries an extra [rate]
+// block, so a test can pin the connection caps (A4).
+func newSSEEnvRate(t *testing.T, rateBlock string) *sseEnv {
+	t.Helper()
+	cfgText := strings.Replace(testConfig, "[[accounts]]", rateBlock+"\n[[accounts]]", 1)
+	cfg, err := config.LoadReader(strings.NewReader(cfgText))
+	if err != nil {
+		t.Fatalf("test config: %v", err)
+	}
+	hub := push.New()
+	st, err := store.Open(context.Background(), store.Options{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Publish: hub.Publish,
+	})
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	tokens := auth.NewTokens(map[string]string{cfg.Accounts[0].ID: cfg.Accounts[0].Token})
+	ts := httptest.NewServer(New(cfg, tokens, st, nil, hub, nil, nil, nil, nil))
+	t.Cleanup(ts.Close)
+	return &sseEnv{ts: ts, st: st, hub: hub, token: cfg.Accounts[0].Token}
+}
+
+func TestEventSourceConnectionCap(t *testing.T) {
+	env := newSSEEnvRate(t, "[rate]\nmax_eventsource_per_account = 1\nmax_eventsource_total = 1")
+	lines, stop := env.open(t, "types=*&closeafter=no&ping=0", nil)
+	defer stop()
+	_ = lines
+	time.Sleep(100 * time.Millisecond) // let the first slot register
+
+	req, _ := http.NewRequest(http.MethodGet,
+		env.ts.URL+"/personal/eventsource/?types=*&closeafter=no&ping=0", nil)
+	req.SetBasicAuth("any", env.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second stream = %d, want 429", resp.StatusCode)
+	}
+}
+
 // dataOf returns the data payload of the first event named name.
 func dataOf(t *testing.T, lines []string, name string) string {
 	t.Helper()

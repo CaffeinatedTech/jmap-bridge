@@ -64,7 +64,10 @@ requirements are `NFR-<n>`.
   (session, `/jmap`, upload, download, eventsource): username is any non-empty
   value, password is the account's token, compared in constant time against a
   stored hash. `auth.mode = "none"` is accepted **only** when `listen` binds a
-  loopback address; otherwise startup fails (FR-A.11).
+  loopback address; otherwise startup fails (FR-A.11). A token must carry at
+  least 24 characters of entropy (startup error otherwise), and repeated failed
+  authentication from one source is throttled and then locked out for a backoff
+  window (`[rate]`), so the token cannot be guessed at request rate.
 - **FR-A.4** Backend password authentication: accounts with `auth = "password"`
   log in to IMAP and SMTP with the configured credentials (SASL PLAIN / LOGIN),
   over TLS by default; plaintext transport requires an explicit config flag.
@@ -422,6 +425,13 @@ requirements are `NFR-<n>`.
   size caps (JSON ≤ 32 MiB, upload ≤ 64 MiB, confirmed); no path
   traversal via blob ids or download names; no server-side fetch of
   client-supplied URLs; auth failures indistinguishable across accounts.
+  Client tokens carry a minimum entropy and failed authentication is
+  rate-limited per source+account; the session's advertised
+  `maxConcurrentRequests`/`maxConcurrentUpload` are enforced and EventSource
+  connections are capped per account and in total; `/query` results are
+  server-capped; the HTTP server sets read/idle timeouts, a header-size cap and
+  `nosniff`/CSP/`Referrer-Policy` headers; account existence is not observable
+  through response timing.
 - **NFR-6 Observability:** health, metrics and structured logs sufficient to
   diagnose a failed sync without a debugger (FR-D.4/6/12).
 - **NFR-7 Compatibility:** works against jmap-tui's live suite (session quirks in

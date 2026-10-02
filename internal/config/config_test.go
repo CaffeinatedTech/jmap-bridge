@@ -16,7 +16,7 @@ data_dir = "/data"
 [[accounts]]
 id = "personal"
 address = "me@example.com"
-token = "t0ken"
+token = "t0ken-0123456789abcdef0123456789"
 `
 
 func load(t *testing.T, toml string) (*Config, error) {
@@ -59,7 +59,7 @@ func TestValidMinimal(t *testing.T) {
 	if cfg.Sync.PrefetchWindow.Std() != 30*24*time.Hour {
 		t.Errorf("prefetch_window = %s, want 720h", cfg.Sync.PrefetchWindow)
 	}
-	if cfg.Accounts[0].Token != "t0ken" {
+	if cfg.Accounts[0].Token != "t0ken-0123456789abcdef0123456789" {
 		t.Errorf("token = %q", cfg.Accounts[0].Token)
 	}
 }
@@ -85,7 +85,7 @@ func TestMissingRequired(t *testing.T) {
 		{"listen", strings.Replace(minimalLoopback, `listen = "127.0.0.1:8080"`, "", 1), "listen"},
 		{"base_url", strings.Replace(minimalLoopback, `base_url = "http://127.0.0.1:8080"`, "", 1), "base_url"},
 		{"data_dir", strings.Replace(minimalLoopback, `data_dir = "/data"`, "", 1), "data_dir"},
-		{"token", strings.Replace(minimalLoopback, `token = "t0ken"`, "", 1), "token"},
+		{"token", strings.Replace(minimalLoopback, `token = "t0ken-0123456789abcdef0123456789"`, "", 1), "token"},
 		{"accounts", `
 listen = "127.0.0.1:8080"
 base_url = "http://127.0.0.1:8080"
@@ -127,10 +127,10 @@ func TestBaseURLRules(t *testing.T) {
 
 func TestNoneRequiresLoopback(t *testing.T) {
 	public := strings.Replace(minimalLoopback, `listen = "127.0.0.1:8080"`, `listen = "0.0.0.0:8080"`, 1)
-	withNone := strings.Replace(public, "token = \"t0ken\"", "token = \"t0ken\"\n\n[auth]\nmode = \"none\"", 1)
+	withNone := strings.Replace(public, "token = \"t0ken-0123456789abcdef0123456789\"", "token = \"t0ken-0123456789abcdef0123456789\"\n\n[auth]\nmode = \"none\"", 1)
 	wantErrKey(t, withNone, "auth.mode")
 
-	loopbackNone := strings.Replace(minimalLoopback, "token = \"t0ken\"", "token = \"t0ken\"\n\n[auth]\nmode = \"none\"", 1)
+	loopbackNone := strings.Replace(minimalLoopback, "token = \"t0ken-0123456789abcdef0123456789\"", "token = \"t0ken-0123456789abcdef0123456789\"\n\n[auth]\nmode = \"none\"", 1)
 	cfg := mustLoad(t, loopbackNone)
 	if cfg.Auth.Mode != "none" {
 		t.Errorf("auth.mode = %q, want none", cfg.Auth.Mode)
@@ -141,7 +141,7 @@ func TestDuplicateAccountID(t *testing.T) {
 	toml := minimalLoopback + `
 [[accounts]]
 id = "personal"
-token = "other"
+token = "other-0123456789abcdef01234567"
 `
 	wantErrKey(t, toml, "id")
 }
@@ -150,35 +150,35 @@ func TestEnvStemCollision(t *testing.T) {
 	toml := minimalLoopback + `
 [[accounts]]
 id = "a_b"
-token = "x"
+token = "x-0123456789abcdef0123456789"
 `
 	toml = strings.Replace(toml, `id = "personal"`, `id = "a-b"`, 1)
 	wantErrKey(t, toml, "id")
 }
 
 func TestTokenFromEnv(t *testing.T) {
-	t.Setenv("JMAP_BRIDGE_PERSONAL_TOKEN", "env-token")
-	toml := strings.Replace(minimalLoopback, `token = "t0ken"`, "", 1)
+	t.Setenv("JMAP_BRIDGE_PERSONAL_TOKEN", "env-token-0123456789abcdef0123")
+	toml := strings.Replace(minimalLoopback, `token = "t0ken-0123456789abcdef0123456789"`, "", 1)
 	cfg := mustLoad(t, toml)
-	if cfg.Accounts[0].Token != "env-token" {
-		t.Errorf("token = %q, want env-token", cfg.Accounts[0].Token)
+	if cfg.Accounts[0].Token != "env-token-0123456789abcdef0123" {
+		t.Errorf("token = %q, want env-token-0123456789abcdef0123", cfg.Accounts[0].Token)
 	}
 }
 
 func TestTokenFromFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(path, []byte("file-token\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("file-token-0123456789abcdef0123\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	toml := strings.Replace(minimalLoopback, `token = "t0ken"`, `token_file = "`+path+`"`, 1)
+	toml := strings.Replace(minimalLoopback, `token = "t0ken-0123456789abcdef0123456789"`, `token_file = "`+path+`"`, 1)
 	cfg := mustLoad(t, toml)
-	if cfg.Accounts[0].Token != "file-token" {
-		t.Errorf("token = %q, want file-token", cfg.Accounts[0].Token)
+	if cfg.Accounts[0].Token != "file-token-0123456789abcdef0123" {
+		t.Errorf("token = %q, want file-token-0123456789abcdef0123", cfg.Accounts[0].Token)
 	}
 }
 
 func TestTokenFileMissingNamesKey(t *testing.T) {
-	toml := strings.Replace(minimalLoopback, `token = "t0ken"`, `token_file = "/nonexistent/token"`, 1)
+	toml := strings.Replace(minimalLoopback, `token = "t0ken-0123456789abcdef0123456789"`, `token_file = "/nonexistent/token"`, 1)
 	_, err := load(t, toml)
 	if err == nil {
 		t.Fatal("expected error")
@@ -190,7 +190,7 @@ func TestTokenFileMissingNamesKey(t *testing.T) {
 
 func TestErrorsNeverContainSecrets(t *testing.T) {
 	secret := "sup3r-s3cret-value"
-	toml := strings.Replace(minimalLoopback, `token = "t0ken"`, `token = "`+secret+`"`, 1)
+	toml := strings.Replace(minimalLoopback, `token = "t0ken-0123456789abcdef0123456789"`, `token = "`+secret+`"`, 1)
 	toml = strings.Replace(toml, `base_url = "http://127.0.0.1:8080"`, `base_url = "ftp://nope"`, 1)
 	_, err := load(t, toml)
 	if err == nil {
@@ -203,7 +203,7 @@ func TestErrorsNeverContainSecrets(t *testing.T) {
 
 func TestIMAPValidation(t *testing.T) {
 	withIMAP := func(body string) string {
-		return strings.Replace(minimalLoopback, "token = \"t0ken\"", "token = \"t0ken\"\n\n  [accounts.imap]\n  "+body, 1)
+		return strings.Replace(minimalLoopback, "token = \"t0ken-0123456789abcdef0123456789\"", "token = \"t0ken-0123456789abcdef0123456789\"\n\n  [accounts.imap]\n  "+body, 1)
 	}
 	t.Run("missing host", func(t *testing.T) {
 		wantErrKey(t, withIMAP(`port = 993`), "accounts[0].imap.host")
@@ -238,7 +238,7 @@ func TestIMAPValidation(t *testing.T) {
 }
 
 func TestSMTPDefaultsFromIMAP(t *testing.T) {
-	toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", `token = "t0ken"
+	toml := strings.Replace(minimalLoopback, "token = \"t0ken-0123456789abcdef0123456789\"", `token = "t0ken-0123456789abcdef0123456789"
 
   [accounts.imap]
   host = "imap.example.com"
@@ -260,7 +260,7 @@ func TestSMTPDefaultsFromIMAP(t *testing.T) {
 }
 
 func TestOAuth2GenericRequiresURLs(t *testing.T) {
-	toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", `token = "t0ken"
+	toml := strings.Replace(minimalLoopback, "token = \"t0ken-0123456789abcdef0123456789\"", `token = "t0ken-0123456789abcdef0123456789"
 
   [accounts.oauth2]
   provider = "generic"
@@ -275,7 +275,7 @@ func TestBadLogLevel(t *testing.T) {
 }
 
 func TestDurationSyntax(t *testing.T) {
-	toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", "token = \"t0ken\"\n\n[sync]\ninterval = \"30s\"\nprefetch_window = \"10d\"", 1)
+	toml := strings.Replace(minimalLoopback, "token = \"t0ken-0123456789abcdef0123456789\"", "token = \"t0ken-0123456789abcdef0123456789\"\n\n[sync]\ninterval = \"30s\"\nprefetch_window = \"10d\"", 1)
 	cfg := mustLoad(t, toml)
 	if cfg.Sync.Interval.Std() != 30*time.Second {
 		t.Errorf("interval = %s", cfg.Sync.Interval)
@@ -286,7 +286,7 @@ func TestDurationSyntax(t *testing.T) {
 }
 
 func TestBadDurationNamesKey(t *testing.T) {
-	toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", "token = \"t0ken\"\n\n[sync]\ninterval = \"soon\"", 1)
+	toml := strings.Replace(minimalLoopback, "token = \"t0ken-0123456789abcdef0123456789\"", "token = \"t0ken-0123456789abcdef0123456789\"\n\n[sync]\ninterval = \"soon\"", 1)
 	_, err := load(t, toml)
 	if err == nil {
 		t.Fatal("expected error")
@@ -326,7 +326,7 @@ func TestSMTPRequiresAddress(t *testing.T) {
 // defaults must not leak into an oauth2 SMTP block.
 func TestOAuth2RefusesPasswordFallback(t *testing.T) {
 	t.Run("imap password alongside oauth2", func(t *testing.T) {
-		toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", `token = "t0ken"
+		toml := strings.Replace(minimalLoopback, "token = \"t0ken-0123456789abcdef0123456789\"", `token = "t0ken-0123456789abcdef0123456789"
 
   [accounts.imap]
   host = "imap.gmail.com"
@@ -337,7 +337,7 @@ func TestOAuth2RefusesPasswordFallback(t *testing.T) {
 		wantErrKey(t, toml, "accounts[0].imap.password")
 	})
 	t.Run("smtp password alongside oauth2", func(t *testing.T) {
-		toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", `token = "t0ken"
+		toml := strings.Replace(minimalLoopback, "token = \"t0ken-0123456789abcdef0123456789\"", `token = "t0ken-0123456789abcdef0123456789"
 
   [accounts.imap]
   host = "imap.gmail.com"
@@ -358,7 +358,7 @@ func TestOAuth2RefusesPasswordFallback(t *testing.T) {
 		wantErrKey(t, toml, "accounts[0].smtp.password")
 	})
 	t.Run("smtp oauth2 does not inherit the imap password", func(t *testing.T) {
-		toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", `token = "t0ken"
+		toml := strings.Replace(minimalLoopback, "token = \"t0ken-0123456789abcdef0123456789\"", `token = "t0ken-0123456789abcdef0123456789"
 
   [accounts.imap]
   host = "imap.gmail.com"
@@ -387,7 +387,7 @@ func TestOAuth2RefusesPasswordFallback(t *testing.T) {
 
 // FR-A.9: the google provider profile needs only the client pair.
 func TestOAuth2GoogleMinimal(t *testing.T) {
-	toml := strings.Replace(minimalLoopback, "token = \"t0ken\"", `token = "t0ken"
+	toml := strings.Replace(minimalLoopback, "token = \"t0ken-0123456789abcdef0123456789\"", `token = "t0ken-0123456789abcdef0123456789"
 
   [accounts.imap]
   host = "imap.gmail.com"
@@ -420,7 +420,7 @@ data_dir = "/tmp/x"
 [[accounts]]
 id = "personal"
 address = "me@example.test"
-token = "tok"
+token = "tok-0123456789abcdef01234567"
 
   [accounts.imap]
   host = "127.0.0.1"
@@ -482,7 +482,7 @@ data_dir = "/tmp/x"
 [[accounts]]
 id = "personal"
 address = "me@example.test"
-token = "tok"
+token = "tok-0123456789abcdef01234567"
 
   [accounts.imap]
   host = "127.0.0.1"
@@ -512,7 +512,7 @@ data_dir = "/tmp/x"
 [[accounts]]
 id = "personal"
 address = "me@example.test"
-token = "tok"
+token = "tok-0123456789abcdef01234567"
 
   [accounts.carddav]
 ` + body + "\n"
@@ -527,7 +527,7 @@ data_dir = "/tmp/x"
 [[accounts]]
 id = "personal"
 address = "me@example.test"
-token = "tok"
+token = "tok-0123456789abcdef01234567"
 
   [accounts.imap]
   host = "127.0.0.1"

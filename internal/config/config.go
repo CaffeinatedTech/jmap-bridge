@@ -24,7 +24,39 @@ type Config struct {
 	Auth     Auth      `toml:"auth"`
 	Search   Search    `toml:"search"`
 	Sync     Sync      `toml:"sync"`
+	Rate     Rate      `toml:"rate"`
 	Accounts []Account `toml:"accounts"`
+}
+
+// Rate configures the in-process abuse protection (NFR-5, SECURITY-PLAN
+// A1/A2/A4). It is the credential-aware layer: the reverse proxy bounds
+// raw volume before requests arrive, this bounds failed logins and
+// concurrent work. Enabled by default; every zero field takes the
+// documented default in defaults().
+type Rate struct {
+	Enabled bool `toml:"enabled"`
+
+	// AuthFailures failed client-authentication attempts within
+	// AuthWindow trip a lockout of AuthBlock for that source+account.
+	AuthFailures int      `toml:"auth_failures"`
+	AuthWindow   Duration `toml:"auth_window"`
+	AuthBlock    Duration `toml:"auth_block"`
+
+	// Advertised as maxConcurrentRequests / maxConcurrentUpload in the
+	// session core capability and enforced here (golden rule 4).
+	MaxConcurrentRequests int `toml:"max_concurrent_requests"`
+	MaxConcurrentUploads  int `toml:"max_concurrent_uploads"`
+
+	// EventSource connection caps.
+	MaxEventsourcePerAccount int `toml:"max_eventsource_per_account"`
+	MaxEventsourceTotal      int `toml:"max_eventsource_total"`
+
+	// TrustedProxies are CIDRs whose forwarding headers are believed;
+	// ClientIPHeader names the real-client header they set (e.g.
+	// "CF-Connecting-IP"). Empty TrustedProxies means the connection
+	// address is used, so per-source limits become effectively global.
+	TrustedProxies []string `toml:"trusted_proxies"`
+	ClientIPHeader string   `toml:"client_ip_header"`
 }
 
 // Auth configures client-facing authentication (FR-A.3, D-15).
@@ -131,6 +163,16 @@ func defaults() Config {
 			Interval:       Duration(5 * time.Minute),
 			BatchSize:      500,
 			PrefetchWindow: Duration(30 * 24 * time.Hour),
+		},
+		Rate: Rate{
+			Enabled:                  true,
+			AuthFailures:             10,
+			AuthWindow:               Duration(5 * time.Minute),
+			AuthBlock:                Duration(15 * time.Minute),
+			MaxConcurrentRequests:    8,
+			MaxConcurrentUploads:     4,
+			MaxEventsourcePerAccount: 8,
+			MaxEventsourceTotal:      128,
 		},
 	}
 }

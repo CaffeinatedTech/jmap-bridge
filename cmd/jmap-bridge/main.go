@@ -151,6 +151,13 @@ func run(args []string) error {
 				kick(engines, log), contactsReady(engines)),
 			readiness(engines, cfg.Accounts)),
 		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout also covers the upload body, so it is generous
+		// enough for a 64 MiB attachment on a slow link while still
+		// bounding a slow-loris request. WriteTimeout stays 0: it would
+		// kill long-lived EventSource responses.
+		ReadTimeout:    5 * time.Minute,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 	}
 
 	log.Info("jmap-bridge starting",

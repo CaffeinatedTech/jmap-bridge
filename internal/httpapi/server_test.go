@@ -24,12 +24,12 @@ data_dir = "/tmp/jmap-bridge-test"
 [[accounts]]
 id = "personal"
 address = "me@example.test"
-token = "tok-personal"
+token = "tok-personal-0123456789abcdef"
 
 [[accounts]]
 id = "work"
 address = "me@work.example.test"
-token = "tok-work"
+token = "tok-work-0123456789abcdef0123456789"
 `
 
 // contactsURN spelled out to keep the test self-contained.
@@ -135,7 +135,7 @@ func mustAPI(t *testing.T, s *testServer, body string, user ...string) map[strin
 	if len(user) > 0 {
 		u = user[0]
 	}
-	resp := s.postAPI(t, u, "tok-personal", body)
+	resp := s.postAPI(t, u, "tok-personal-0123456789abcdef", body)
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		t.Fatalf("POST /jmap = %d, want 200: %s", resp.StatusCode, raw)
@@ -166,7 +166,7 @@ func responsesAsList(t *testing.T, resp map[string]any) [][]any {
 
 func TestSessionShape(t *testing.T) {
 	s := newTestServer(t)
-	resp := s.do(t, http.MethodGet, "/personal/.well-known/jmap", "alice", "tok-personal", "", "")
+	resp := s.do(t, http.MethodGet, "/personal/.well-known/jmap", "alice", "tok-personal-0123456789abcdef", "", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("session status = %d", resp.StatusCode)
 	}
@@ -255,8 +255,8 @@ func TestSessionRejectsBadAuth(t *testing.T) {
 	cases := []struct{ name, user, pass string }{
 		{"missing header", "", ""},
 		{"wrong token", "alice", "nope"},
-		{"empty username", "", "tok-personal"},
-		{"other account's token", "alice", "tok-work"},
+		{"empty username", "", "tok-personal-0123456789abcdef"},
+		{"other account's token", "alice", "tok-work-0123456789abcdef0123456789"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -275,8 +275,8 @@ func TestUnknownAccountIsIndistinguishable(t *testing.T) {
 	s := newTestServer(t)
 	// A valid personal token against a real other account and against a
 	// nonexistent one must answer identically (FR-A.11).
-	existing := s.do(t, http.MethodGet, "/work/.well-known/jmap", "alice", "tok-personal", "", "")
-	missing := s.do(t, http.MethodGet, "/ghost/.well-known/jmap", "alice", "tok-personal", "", "")
+	existing := s.do(t, http.MethodGet, "/work/.well-known/jmap", "alice", "tok-personal-0123456789abcdef", "", "")
+	missing := s.do(t, http.MethodGet, "/ghost/.well-known/jmap", "alice", "tok-personal-0123456789abcdef", "", "")
 	if existing.StatusCode != http.StatusUnauthorized || missing.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("statuses = %d and %d, want 401 and 401 (FR-A.11)", existing.StatusCode, missing.StatusCode)
 	}
@@ -284,18 +284,18 @@ func TestUnknownAccountIsIndistinguishable(t *testing.T) {
 
 func TestWrongMethodAndUnknownPaths(t *testing.T) {
 	s := newTestServer(t)
-	if resp := s.do(t, http.MethodPost, "/personal/.well-known/jmap", "a", "tok-personal", "application/json", "{}"); resp.StatusCode != http.StatusMethodNotAllowed {
+	if resp := s.do(t, http.MethodPost, "/personal/.well-known/jmap", "a", "tok-personal-0123456789abcdef", "application/json", "{}"); resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("POST session = %d, want 405", resp.StatusCode)
 	}
-	if resp := s.do(t, http.MethodGet, "/personal/jmap", "a", "tok-personal", "", ""); resp.StatusCode != http.StatusMethodNotAllowed {
+	if resp := s.do(t, http.MethodGet, "/personal/jmap", "a", "tok-personal-0123456789abcdef", "", ""); resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("GET jmap = %d, want 405", resp.StatusCode)
 	}
 	// /{account}/jmap also claims the unprefixed /.well-known/jmap path
 	// (account would be ".well-known"); GET there is a method mismatch.
-	if resp := s.do(t, http.MethodGet, "/.well-known/jmap", "a", "tok-personal", "", ""); resp.StatusCode != http.StatusMethodNotAllowed {
+	if resp := s.do(t, http.MethodGet, "/.well-known/jmap", "a", "tok-personal-0123456789abcdef", "", ""); resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("root session = %d, want 405", resp.StatusCode)
 	}
-	if resp := s.do(t, http.MethodGet, "/personal/other", "a", "tok-personal", "", ""); resp.StatusCode != http.StatusNotFound {
+	if resp := s.do(t, http.MethodGet, "/personal/other", "a", "tok-personal-0123456789abcdef", "", ""); resp.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown path = %d, want 404", resp.StatusCode)
 	}
 }
@@ -411,7 +411,7 @@ func TestRequestLevelProblems(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := s.do(t, http.MethodPost, "/personal/jmap", "any", "tok-personal", tc.contentType, tc.body)
+			resp := s.do(t, http.MethodPost, "/personal/jmap", "any", "tok-personal-0123456789abcdef", tc.contentType, tc.body)
 			if resp.StatusCode != tc.wantStatus {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
 			}
@@ -441,7 +441,7 @@ func TestOversizedRequestRejected(t *testing.T) {
 	s := newTestServer(t)
 	pad := strings.Repeat("x", maxSizeRequest+1024)
 	body := `{"using":["urn:ietf:params:jmap:core"],"methodCalls":[],"pad":"` + pad + `"}`
-	resp := s.postAPI(t, "any", "tok-personal", body)
+	resp := s.postAPI(t, "any", "tok-personal-0123456789abcdef", body)
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", resp.StatusCode)
 	}
@@ -654,7 +654,7 @@ func TestSessionStateEchoedOnAPIResponses(t *testing.T) {
 	// Same credentials on both endpoints: the state string must match
 	// (RFC 8620 §2), so a client can compare the API's sessionState with
 	// the session it fetched.
-	sess := decodeJSON(t, s.do(t, http.MethodGet, "/personal/.well-known/jmap", "alice", "tok-personal", "", ""))
+	sess := decodeJSON(t, s.do(t, http.MethodGet, "/personal/.well-known/jmap", "alice", "tok-personal-0123456789abcdef", "", ""))
 	resp := mustAPI(t, s, `{
 		"using": ["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"],
 		"methodCalls": [["Mailbox/get", {"accountId":"personal","ids":[]}, "g1"]]
@@ -741,7 +741,7 @@ data_dir = "/tmp/jmap-bridge-test"
 [[accounts]]
 id = "personal"
 address = "me@example.test"
-token = "tok-personal"
+token = "tok-personal-0123456789abcdef"
 
   [accounts.imap]
   host = "127.0.0.1"
@@ -768,7 +768,7 @@ func TestSessionContactsGating(t *testing.T) {
 	srv := &testServer{Server: httptest.NewServer(handler), cfg: cfg, h: handler}
 
 	// Before the gate opens: no contacts anywhere (FR-P.3).
-	resp := srv.get(t, "any", "tok-personal", "/personal/.well-known/jmap")
+	resp := srv.get(t, "any", "tok-personal-0123456789abcdef", "/personal/.well-known/jmap")
 	doc := decodeJSON(t, resp)
 	caps := doc["capabilities"].(map[string]any)
 	if _, ok := caps[contactsURN]; ok {
@@ -782,7 +782,7 @@ func TestSessionContactsGating(t *testing.T) {
 
 	// The API refuses the URN as a request-level problem, never as
 	// half-working data.
-	r := srv.postAPI(t, "any", "tok-personal", `{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail","`+contactsURN+`"],"methodCalls":[["AddressBook/get",{"accountId":"personal"},"c1"]]}`)
+	r := srv.postAPI(t, "any", "tok-personal-0123456789abcdef", `{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail","`+contactsURN+`"],"methodCalls":[["AddressBook/get",{"accountId":"personal"},"c1"]]}`)
 	body := decodeJSON(t, r)
 	if !strings.Contains(fmt.Sprintf("%v", body), "unknownCapability") {
 		t.Fatalf("non-ready contacts call: %v", body)
@@ -792,7 +792,7 @@ func TestSessionContactsGating(t *testing.T) {
 	// session state that moved (RFC 8620 §2 — the state is a hash over
 	// the session, so a capability change must show in it).
 	ready = true
-	resp = srv.get(t, "any", "tok-personal", "/personal/.well-known/jmap")
+	resp = srv.get(t, "any", "tok-personal-0123456789abcdef", "/personal/.well-known/jmap")
 	doc = decodeJSON(t, resp)
 	caps = doc["capabilities"].(map[string]any)
 	if _, ok := caps[contactsURN]; !ok {
@@ -801,7 +801,7 @@ func TestSessionContactsGating(t *testing.T) {
 	if state, _ := doc["state"].(string); state == stateNotReady {
 		t.Fatal("sessionState unchanged across a capability change")
 	}
-	r = srv.postAPI(t, "any", "tok-personal", `{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail","`+contactsURN+`"],"methodCalls":[["AddressBook/get",{"accountId":"personal"},"c1"]]}`)
+	r = srv.postAPI(t, "any", "tok-personal-0123456789abcdef", `{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail","`+contactsURN+`"],"methodCalls":[["AddressBook/get",{"accountId":"personal"},"c1"]]}`)
 	if r.StatusCode != 200 {
 		t.Fatalf("ready contacts call: HTTP %d", r.StatusCode)
 	}

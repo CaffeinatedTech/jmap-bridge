@@ -28,7 +28,7 @@ data_dir = "/tmp/jmap-bridge-test"
 id = "personal"
 name = "Personal"
 address = "me@example.test"
-token = "tok-personal"
+token = "tok-personal-0123456789abcdef"
 
   [accounts.imap]
   host = "127.0.0.1"
@@ -51,7 +51,7 @@ func TestUploadDownloadRoundTrip(t *testing.T) {
 	s := newTestServer(t)
 	payload := []byte("attachment payload\x00\xff\r\n.end\r\n")
 
-	resp := s.do(t, http.MethodPost, "/personal/upload/", "alice", "tok-personal",
+	resp := s.do(t, http.MethodPost, "/personal/upload/", "alice", "tok-personal-0123456789abcdef",
 		"application/octet-stream", string(payload))
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
@@ -71,7 +71,7 @@ func TestUploadDownloadRoundTrip(t *testing.T) {
 
 	// Download through the session's own template, expanded exactly the
 	// way a client does it (RFC 8620 §6.2).
-	sess := decodeJSON(t, s.do(t, http.MethodGet, "/personal/.well-known/jmap", "alice", "tok-personal", "", ""))
+	sess := decodeJSON(t, s.do(t, http.MethodGet, "/personal/.well-known/jmap", "alice", "tok-personal-0123456789abcdef", "", ""))
 	dl, _ := sess["downloadUrl"].(string)
 	path := strings.NewReplacer(
 		"{accountId}", "personal",
@@ -79,7 +79,7 @@ func TestUploadDownloadRoundTrip(t *testing.T) {
 		"{name}", "notes.bin",
 		"{type}", "application/octet-stream",
 	).Replace(strings.TrimPrefix(dl, "http://127.0.0.1:8080"))
-	got := s.do(t, http.MethodGet, path, "alice", "tok-personal", "", "")
+	got := s.do(t, http.MethodGet, path, "alice", "tok-personal-0123456789abcdef", "", "")
 	if got.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(got.Body)
 		t.Fatalf("download = %d: %s", got.StatusCode, raw)
@@ -116,7 +116,7 @@ func TestUploadRequiresAuthAndRejectsBadContent(t *testing.T) {
 	})
 
 	t.Run("unparseable media type", func(t *testing.T) {
-		resp := s.do(t, http.MethodPost, "/personal/upload/", "alice", "tok-personal",
+		resp := s.do(t, http.MethodPost, "/personal/upload/", "alice", "tok-personal-0123456789abcdef",
 			"not a media type", "x")
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("status = %d, want 400", resp.StatusCode)
@@ -131,7 +131,7 @@ func TestUploadRequiresAuthAndRejectsBadContent(t *testing.T) {
 	// HTTP client refuses to lie about Content-Length).
 	t.Run("declared oversize", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/personal/upload/", strings.NewReader("x"))
-		req.SetBasicAuth("alice", "tok-personal")
+		req.SetBasicAuth("alice", "tok-personal-0123456789abcdef")
 		req.Header.Set("Content-Type", "application/octet-stream")
 		req.ContentLength = maxSizeUpload + 1
 		rec := s.serve(t, req)
@@ -154,7 +154,7 @@ func TestUploadRequiresAuthAndRejectsBadContent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.SetBasicAuth("alice", "tok-personal")
+		req.SetBasicAuth("alice", "tok-personal-0123456789abcdef")
 		req.Header.Set("Content-Type", "application/octet-stream")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -170,7 +170,7 @@ func TestUploadRequiresAuthAndRejectsBadContent(t *testing.T) {
 	})
 
 	t.Run("no type at all", func(t *testing.T) {
-		resp := s.do(t, http.MethodPost, "/personal/upload/", "alice", "tok-personal", "", "x")
+		resp := s.do(t, http.MethodPost, "/personal/upload/", "alice", "tok-personal-0123456789abcdef", "", "x")
 		if resp.StatusCode != http.StatusOK {
 			raw, _ := io.ReadAll(resp.Body)
 			t.Fatalf("upload without Content-Type = %d: %s", resp.StatusCode, raw)
@@ -185,7 +185,7 @@ func TestDownloadUnknownAndForeignBlobsAre404(t *testing.T) {
 	s := newTestServer(t)
 
 	unknown := s.do(t, http.MethodGet, "/personal/download/nope/notes.bin?type=text/plain",
-		"alice", "tok-personal", "", "")
+		"alice", "tok-personal-0123456789abcdef", "", "")
 	if unknown.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown blob = %d, want 404", unknown.StatusCode)
 	}
@@ -196,11 +196,11 @@ func TestDownloadUnknownAndForeignBlobsAre404(t *testing.T) {
 	// A blob that exists in another account answers exactly the same:
 	// a probe learns nothing about accounts it is not authenticated for
 	// (FR-M.17, FR-A.11).
-	foreign := s.do(t, http.MethodPost, "/personal/upload/", "alice", "tok-personal",
+	foreign := s.do(t, http.MethodPost, "/personal/upload/", "alice", "tok-personal-0123456789abcdef",
 		"application/octet-stream", "personal bytes")
 	blobID, _ := decodeJSON(t, foreign)["blobId"].(string)
 	viaWork := s.do(t, http.MethodGet, "/work/download/"+blobID+"/x.bin?type=text/plain",
-		"bob", "tok-work", "", "")
+		"bob", "tok-work-0123456789abcdef0123456789", "", "")
 	if viaWork.StatusCode != http.StatusNotFound {
 		t.Errorf("foreign blob via another account = %d, want 404", viaWork.StatusCode)
 	}
@@ -208,7 +208,7 @@ func TestDownloadUnknownAndForeignBlobsAre404(t *testing.T) {
 
 func TestDownloadRefusesATypeItCannotSend(t *testing.T) {
 	s := newTestServer(t)
-	up := decodeJSON(t, s.do(t, http.MethodPost, "/personal/upload/", "alice", "tok-personal",
+	up := decodeJSON(t, s.do(t, http.MethodPost, "/personal/upload/", "alice", "tok-personal-0123456789abcdef",
 		"text/plain", "hello"))
 	blobID, _ := up["blobId"].(string)
 
@@ -216,7 +216,7 @@ func TestDownloadRefusesATypeItCannotSend(t *testing.T) {
 	// response headers (NFR-5); the recorded type stands in.
 	resp := s.do(t, http.MethodGet,
 		"/personal/download/"+blobID+"/x.bin?type=text%2Fplain%3B%0D%0AX-Injected%3A%20yes",
-		"alice", "tok-personal", "", "")
+		"alice", "tok-personal-0123456789abcdef", "", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("download = %d, want 200 with a safe type", resp.StatusCode)
 	}
@@ -235,7 +235,7 @@ func TestDownloadRefusesATypeItCannotSend(t *testing.T) {
 
 func TestSessionAdvertisesSubmissionWithSMTP(t *testing.T) {
 	s := newTestServerCfg(t, submitConfig)
-	sess := decodeJSON(t, s.do(t, http.MethodGet, "/personal/.well-known/jmap", "alice", "tok-personal", "", ""))
+	sess := decodeJSON(t, s.do(t, http.MethodGet, "/personal/.well-known/jmap", "alice", "tok-personal-0123456789abcdef", "", ""))
 
 	caps, _ := sess["capabilities"].(map[string]any)
 	sub, ok := caps["urn:ietf:params:jmap:submission"].(map[string]any)
