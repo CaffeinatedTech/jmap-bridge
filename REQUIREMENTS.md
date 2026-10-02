@@ -393,6 +393,13 @@ requirements are `NFR-<n>`.
 - **FR-D.12** Structured logs (`log/slog`) with request ids and per-account sync
   events, level configurable, and log output containing no secrets or message
   bodies (verified by a redaction test).
+- **FR-D.13** The bridge serves two unauthenticated static pages on `base_url`'s
+  origin for the Google OAuth consent screen: `GET /` (an application home page
+  describing the bridge and linking to the privacy policy) and `GET /privacy` (a
+  privacy policy disclosing how Google user data is accessed, used, stored and
+  shared, per Google's API Services User Data Policy). Neither page carries
+  account information, and an unauthenticated request to an unknown path still
+  returns 404.
 
 ## 9. Non-functional requirements
 

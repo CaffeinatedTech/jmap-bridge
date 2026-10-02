@@ -244,6 +244,13 @@ Do this once; the settings in step 2 are what make it set-and-forget.
    `https://jmap.example.com/oauth/{account}/start` in a browser, and approve.
    Refresh tokens are stored encrypted at rest.
 
+5. **Publish the consent screen.** Set the **Application home page** to
+   `https://jmap.example.com/` and the **Privacy policy** to
+   `https://jmap.example.com/privacy` — the bridge serves both (FR-D.13) — and
+   add the host to **Authorized domains**. Moving the publishing status to
+   **In production** clears the 7-day Testing refresh-token expiry; personal use
+   qualifies for the verification exemption, so no full review is needed.
+
 #### The warnings you will see when consenting
 
 Because your app is unverified, Google shows its "unverified app" interstitial on
