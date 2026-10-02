@@ -146,11 +146,45 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 		idleFolder:   "INBOX",
 		contactsKick: make(chan struct{}, 1),
 	}
+	// The store holds one process-wide Ensure/SearchBackfill hook, so a
+	// single-engine process can claim it here. A multi-account process
+	// must install Router after building every engine (cmd/jmap-bridge
+	// does); otherwise the last engine built would win and the other
+	// accounts' reads would fail as "foreign account".
 	st.Ensure = e.Ensure
 	if cfg.SearchBackfill {
 		st.SearchBackfill = e.searchBackfill
 	}
 	return e
+}
+
+// Router returns the store's process-wide Ensure and SearchBackfill hooks
+// for a set of engines. The store holds exactly one of each, so a process
+// with more than one account cannot let every engine claim them: the last
+// one built would then serve all accounts and reject the rest as foreign.
+// Router dispatches by account instead. An account with no engine
+// (cache-only) is a no-op, and the returned SearchBackfill is nil when
+// search backfill is off (FR-X.8).
+func Router(engines map[string]*Engine, searchBackfill bool) (
+	ensure func(ctx context.Context, account string, previewIDs, bodyIDs []string) error,
+	backfill func(account string, ids []string),
+) {
+	ensure = func(ctx context.Context, account string, previewIDs, bodyIDs []string) error {
+		e, ok := engines[account]
+		if !ok {
+			return nil // cache-only account: nothing to fetch
+		}
+		return e.Ensure(ctx, account, previewIDs, bodyIDs)
+	}
+	if !searchBackfill {
+		return ensure, nil
+	}
+	backfill = func(account string, ids []string) {
+		if e, ok := engines[account]; ok {
+			e.searchBackfill(account, ids)
+		}
+	}
+	return ensure, backfill
 }
 
 // Kick nudges the engine to run a pass now, skipping any backoff sleep:
