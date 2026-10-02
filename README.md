@@ -356,11 +356,24 @@ interval     = "5m"            # fallback poll when IDLE is unavailable
 batch_size   = 500             # UIDs per FETCH during backfill
 prefetch_window = "30d"        # bodies auto-hydrate for mail newer than this (0 = never)
 
+[rate]                         # in-process abuse protection (NFR-5); see SECURITY-PLAN.md
+enabled          = true
+auth_failures    = 10          # failed client logins per window before a lockout
+auth_window      = "5m"
+auth_block       = "15m"
+max_concurrent_requests = 8    # advertised and enforced
+max_concurrent_uploads  = 4
+max_eventsource_per_account = 8
+max_eventsource_total       = 128
+trusted_proxies  = []          # CIDRs whose X-Forwarded-For is believed
+# client_ip_header = "CF-Connecting-IP"   # set behind Cloudflare (peer must be trusted)
+
 [[accounts]]
 id      = "personal"           # path prefix and JMAP account identity
 name    = "Personal"
 address = "me@example.com"     # default identity / envelope sender
-token   = "…"                  # client password (Basic auth)
+token   = "…"                  # client password (Basic auth), ≥24 chars:
+                               #   openssl rand -hex 24
 
   [accounts.imap]              # host, port, tls, auth = "password"|"oauth2",
                                # username, password

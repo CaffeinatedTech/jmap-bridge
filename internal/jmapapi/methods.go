@@ -226,7 +226,7 @@ func (h *Handler) mailboxQuery(ctx context.Context, acct *Account, raw json.RawM
 	for _, mb := range filtered {
 		ids = append(ids, mb.ID)
 	}
-	position, window := paginate(ids, args.Anchor, args.AnchorOffset, args.Position, args.Limit)
+	position, window := paginate(ids, args.Anchor, args.AnchorOffset, args.Position, capQueryLimit(args.Limit))
 
 	resp := map[string]any{
 		"accountId":           acct.ID,
@@ -355,7 +355,7 @@ func (h *Handler) emailQuery(ctx context.Context, acct *Account, raw json.RawMes
 			HasAttachment: args.Filter.HasAttachment,
 		},
 		Position:        args.Position,
-		Limit:           args.Limit,
+		Limit:           capQueryLimit(args.Limit),
 		Anchor:          args.Anchor,
 		AnchorOffset:    args.AnchorOffset,
 		CollapseThreads: args.CollapseThreads,
@@ -384,6 +384,20 @@ func (h *Handler) emailQuery(ctx context.Context, acct *Account, raw json.RawMes
 		resp["total"] = total
 	}
 	return resp, nil
+}
+
+// maxQueryResults bounds one /query's returned window. RFC 8620 §4.4
+// lets the server cap results; without this a single authenticated
+// request could materialise an entire 100k mailbox in memory (NFR-5).
+const maxQueryResults = 1000
+
+// capQueryLimit turns a client limit into a bounded server limit: 0
+// (unlimited) and oversized values both become maxQueryResults.
+func capQueryLimit(limit int) int {
+	if limit <= 0 || limit > maxQueryResults {
+		return maxQueryResults
+	}
+	return limit
 }
 
 func supportedEmailSort(prop string) bool {

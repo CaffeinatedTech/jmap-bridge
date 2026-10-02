@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+// maxPingSeconds bounds the client's ping interval. A value large enough
+// to overflow time.Duration would panic time.NewTicker, so the server
+// clamps it; pinging more often is always RFC-compliant.
+const maxPingSeconds = 3600
+
 // handleEventSource serves GET /{account}/eventsource/ — RFC 8620 §7.3
 // (FR-J.8). The session advertises a level-1 URI template; the client
 // expands types/closeafter/ping into the query string and this handler
@@ -24,6 +29,13 @@ func (s *Server) handleEventSource(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Every stream holds a goroutine and a hub subscription, so cap them
+	// per account and in total (A4). Released when the handler returns.
+	if !s.acquireSSE(acct.ID) {
+		s.tooManyRequests(w, "maxEventSourceConnections")
+		return
+	}
+	defer s.releaseSSE(acct.ID)
 
 	q := r.URL.Query()
 	types := q.Get("types")
@@ -55,6 +67,12 @@ func (s *Server) handleEventSource(w http.ResponseWriter, r *http.Request) {
 				"detail": "ping must be a non-negative integer",
 			}, nil)
 			return
+		}
+		// A very large value overflows time.Duration and makes the
+		// ticker panic; cap it. Pinging more often than asked still
+		// satisfies RFC 8620 §7.3's "at least every ping seconds".
+		if v > maxPingSeconds {
+			v = maxPingSeconds
 		}
 		ping = v
 	}

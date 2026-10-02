@@ -17,7 +17,7 @@ mode = "token"
 id = "personal"
 name = "Personal"
 address = "jmaptest@example.test"
-token = "dev-token-local-only"
+token = "dev-token-local-only-0123456789ab"
 
   [accounts.imap]
   host = "127.0.0.1"
@@ -46,7 +46,7 @@ token = "dev-token-local-only"
 # id = "gmail"
 # name = "Gmail"
 # address = "me@gmail.com"
-# token = "dev-token-local-only"
+# token = "dev-token-local-only-0123456789ab"
 #
 #   [accounts.imap]
 #   host = "imap.gmail.com"

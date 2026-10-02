@@ -561,10 +561,15 @@ func containsTilde(s string) bool {
 }
 
 func atoi(s string) (int, error) {
-	n := 0
 	if s == "" {
 		return 0, fmt.Errorf("empty index")
 	}
+	// Array indices never need many digits; a length bound prevents the
+	// int multiply below from overflowing into a plausible index.
+	if len(s) > 9 {
+		return 0, fmt.Errorf("index out of range")
+	}
+	n := 0
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
 			return 0, fmt.Errorf("not a number")

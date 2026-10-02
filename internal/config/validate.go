@@ -11,6 +11,12 @@ import (
 
 var accountIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
+// minTokenBytes is the floor for a client token (NFR-5, A3). The token
+// is the only client-facing credential and may be brute-forced, so it
+// must carry real entropy; 24 bytes matches the documented
+// `openssl rand -hex 24` advice.
+const minTokenBytes = 24
+
 // validate normalises optional fields to their documented defaults and
 // then checks every required field (FR-A.1), failing with an error that
 // names the offending key. Error strings never carry secret values
@@ -58,6 +64,35 @@ func (c *Config) validate() error {
 	}
 	if c.Sync.PrefetchWindow.Std() < 0 {
 		return errKey("sync.prefetch_window", "must not be negative")
+	}
+	if c.Rate.AuthFailures < 0 {
+		return errKey("rate.auth_failures", "must not be negative")
+	}
+	if c.Rate.AuthWindow.Std() < 0 {
+		return errKey("rate.auth_window", "must not be negative")
+	}
+	if c.Rate.AuthBlock.Std() < 0 {
+		return errKey("rate.auth_block", "must not be negative")
+	}
+	if c.Rate.MaxConcurrentRequests < 0 {
+		return errKey("rate.max_concurrent_requests", "must not be negative")
+	}
+	if c.Rate.MaxConcurrentUploads < 0 {
+		return errKey("rate.max_concurrent_uploads", "must not be negative")
+	}
+	if c.Rate.MaxEventsourcePerAccount < 0 {
+		return errKey("rate.max_eventsource_per_account", "must not be negative")
+	}
+	if c.Rate.MaxEventsourceTotal < 0 {
+		return errKey("rate.max_eventsource_total", "must not be negative")
+	}
+	if strings.ContainsAny(c.Rate.ClientIPHeader, "\r\n:") {
+		return errKey("rate.client_ip_header", "must be a valid header name")
+	}
+	for i, cidr := range c.Rate.TrustedProxies {
+		if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
+			return errKey(fmt.Sprintf("rate.trusted_proxies[%d]", i), "must be a CIDR (e.g. 10.0.0.0/8)")
+		}
 	}
 	if len(c.Accounts) == 0 {
 		return errKey("accounts", "at least one account is required")
@@ -149,6 +184,11 @@ func (c *Config) validateAccount(i int, a *Account) error {
 	if c.Auth.Mode == "token" && a.Token == "" {
 		return errKey(fmt.Sprintf("accounts[%d].token", i),
 			`required when auth.mode = "token" (config, JMAP_BRIDGE_%s_TOKEN, or token_file)`, envStem(a.ID))
+	}
+	if c.Auth.Mode == "token" && len(a.Token) < minTokenBytes {
+		// The value is never echoed (FR-A.2).
+		return errKey(fmt.Sprintf("accounts[%d].token", i),
+			"must be at least %d characters of entropy; generate one with: openssl rand -hex 24", minTokenBytes)
 	}
 	if a.IMAP != nil {
 		if err := validateIMAP(fmt.Sprintf("accounts[%d].imap", i), a.IMAP); err != nil {

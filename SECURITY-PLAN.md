@@ -1,6 +1,7 @@
 # Security Hardening Plan — JMAP endpoints
 
-Status: draft, not yet started.
+Status: edge layer landed and verified live 2026-10-02; app-side A1–A8 landed.
+F9 (OAuth bootstrap throttle) and F10 (opaque server errors) deferred — see §10.
 Owner: (assign)
 Related: `REQUIREMENTS.md` NFR-5 (security), `PLAN.md` §9 (auth), §11
 (observability), §13 (risk register). Golden rules 4, 7 and 8 in `AGENTS.md`
@@ -350,3 +351,36 @@ and `PLAN.md` changes ship together.
 - Whether to add `golang.org/x/time/rate` or keep the stdlib bucket (D-22).
 - Whether the edge `RateLimit` should be enabled by default in the shipped
   kustomize stack, or left commented as an opt-in.
+
+## 10. Progress (2026-10-02)
+
+Landed:
+
+- **A5** server `ReadTimeout`/`IdleTimeout`/`MaxHeaderBytes` (`cmd/jmap-bridge`).
+- **A6** `authorize` always runs the constant-time compare, removing the
+  account-existence timing oracle.
+- **A1** `internal/ratelimit`: bounded per-source failed-auth lockout with
+  trusted-proxy-aware `ClientIP` (unit-tested).
+- **A2** failed-auth lockout wired into `authorize` (`429` + `Retry-After`,
+  `401` shape unchanged).
+- **A3** 24-character minimum client-token entropy (FR-A.3; test fixtures and
+  `dev/*.toml` migrated).
+- **A4** request/upload semaphores and per-account/total EventSource caps;
+  advertised `maxConcurrentRequests`/`maxConcurrentUpload` now equal what is
+  enforced.
+- **A7** `/query` window capped at `maxQueryResults`.
+- **A8** EventSource `ping` clamped against `time.Duration` overflow.
+- **F11** `nosniff`/CSP/`X-Frame-Options`/`Referrer-Policy` on every response.
+- **F12** JSON-pointer index length-bounded.
+- **Traefik** `RateLimit`/`InFlightReq` middlewares, keyed on
+  `CF-Connecting-IP`; live-verified (burst → `429`, `retry-after`).
+
+Deferred (P2, not blocking):
+
+- **F9** OAuth `/start` throttle — the `jmap-oauth-ratelimit` Traefik middleware
+  exists but is not attached; needs a second `/oauth` Ingress.
+- **F10** opaque `serverFail` responses — the client still sees the wrapped
+  server error string; logging the detail behind a correlation id is a
+  follow-up.
+- App-side general request-rate limiting is intentionally absent (D-22): the
+  proxy owns volume.
