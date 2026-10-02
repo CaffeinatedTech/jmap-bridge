@@ -26,6 +26,20 @@ data:
     [sync]
     interval = "5m"
 
+    # [rate]                       # in-process abuse protection (NFR-5, SECURITY-PLAN.md).
+    #                              # Defaults are already active: enabled = true.
+    # enabled          = true
+    # auth_failures    = 10        # failed client logins per window before a lockout
+    # auth_window      = "5m"
+    # auth_block       = "15m"
+    # max_concurrent_requests = 8  # advertised in the session and enforced
+    # max_concurrent_uploads  = 4
+    # max_eventsource_per_account = 8
+    # max_eventsource_total       = 128
+    # trusted_proxies  = ["10.42.0.0/16"]   # CIDRs whose forwarding headers are believed
+    # client_ip_header = "CF-Connecting-IP"  # set behind Cloudflare; peer must be trusted
+    #                              # (all-zero/empty trusted_proxies = one shared bucket)
+
     [[accounts]]
     id      = "personal"
     name    = "Personal"
