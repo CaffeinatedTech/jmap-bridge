@@ -102,8 +102,8 @@ digest: `ghcr.io/caffeinatedtech/jmap-bridge:v0.1.0@sha256:…`.
 ## 3. Run it on Kubernetes
 
 Prerequisites: a cluster, a default `StorageClass` for the PVC, and an Ingress
-controller (the example uses ingress-nginx). TLS terminates at the Ingress
-(FR-D.2, D-12).
+controller (the example targets Traefik, the k3s default). TLS terminates at the
+Ingress (FR-D.2, D-12).
 
 ### a. Configure
 
@@ -135,7 +135,18 @@ kubectl -n jmap-bridge create secret generic jmap-bridge-secrets \
 
 ### c. TLS certificate
 
-Either let cert-manager issue `jmap-bridge-tls`, or create it yourself:
+The example uses a namespaced cert-manager `Issuer` (`issuer.yaml`,
+Let's Encrypt via Cloudflare DNS-01). Copy the token secret into the
+`jmap-bridge` namespace first, then apply; cert-manager issues
+`jmap-bridge-tls` from the Ingress annotation:
+
+```sh
+kubectl -n default get secret cloudflare-api-token-secret -o json \
+  | sed 's/"namespace": "default"/"namespace": "jmap-bridge"/' \
+  | kubectl apply -f -
+```
+
+Or skip `issuer.yaml` and create `jmap-bridge-tls` yourself:
 
 ```sh
 kubectl -n jmap-bridge create secret tls jmap-bridge-tls \
@@ -153,7 +164,26 @@ The manifest is deliberately a **single replica** with `strategy: Recreate`:
 the cache is one SQLite writer on a ReadWriteOnce volume (PLAN §10). Do not
 scale it horizontally.
 
-### e. Dev / tunnel mode
+### e. First consent (Gmail / any OAuth account)
+
+An OAuth account has no credentials until someone consents, so its engine
+cannot complete a sync pass and `/readyz` stays `503`. The Service sets
+`publishNotReadyAddresses: true` so this is not a deadlock: the Ingress still
+reaches the pod, and the `/oauth/…` endpoints are never behind the client
+token. Open once per OAuth account:
+
+```
+https://jmap.example.com/oauth/gmail/start
+```
+
+Approve; the bridge stores the refresh token (encrypted when
+`JMAP_BRIDGE_SECRET_KEY` is set), wakes the account, and `/readyz` flips to
+`ready` once every account has synced. The same URL re-consents after a
+revoked or expired token (for example Google's 7-day Testing expiry). Do not
+patch the readiness probe to bootstrap consent — that is exactly what the
+Service setting exists for.
+
+### f. Dev / tunnel mode
 
 No public hostname yet? Forward the Service and use a loopback `base_url`
 (cleartext is allowed only on loopback, FR-A.3):
@@ -180,7 +210,9 @@ curl -sS https://jmap.example.com/readyz           # "ready" once every account 
 `/healthz` is process liveness; `/readyz` is false until every account with an
 IMAP backend has completed a sync pass, and false again if an account hits an
 authentication failure (a dead Gmail refresh token, for example) — re-consent
-via `/oauth/{account}/start` (FR-D.4).
+via `/oauth/{account}/start` (FR-D.4). Until then `get pods` shows `0/1`; that
+is expected, and the consent URL stays reachable (see e) because the Service
+publishes not-ready addresses.
 
 For a Gmail account, finish onboarding from a browser:
 

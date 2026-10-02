@@ -13,6 +13,7 @@ resources:
   - configmap.yaml
   - deployment.yaml
   - service.yaml
+  - issuer.yaml
   - ingress.yaml
 # Bump the release tag without editing the Deployment:
 # images:

@@ -1,10 +1,12 @@
-# TLS is terminated here (or at an upstream load balancer). The host must
+# TLS terminates here (or at an upstream load balancer). The host must
 # match base_url in the ConfigMap and the redirect URI registered on the
 # Google OAuth client (FR-D.3, FR-D.11).
 #
-# The annotations are for ingress-nginx. For another controller, keep the
-# TLS/host part and drop them: the equivalents are Caddy's defaults and
-# nginx's `proxy_buffering off` (README §Deployment).
+# Written for Traefik (the k3s default). Traefik streams responses without
+# buffering unless a buffering middleware is attached, so ingress-nginx's
+# proxy-buffering/timeout annotations have no counterpart here; the upload
+# cap (NFR-5) is enforced by the app, not the proxy. For another controller,
+# keep the TLS/host part and translate the annotations.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -12,12 +14,14 @@ metadata:
   labels:
     app.kubernetes.io/name: jmap-bridge
   annotations:
-    nginx.ingress.kubernetes.io/proxy-buffering: "off"        # SSE must stream (FR-D.8)
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-body-size: "64m"        # upload cap (NFR-5)
+    # Namespaced Issuer from issuer.yaml (not a ClusterIssuer: it could not
+    # read cloudflare-api-token-secret from its own namespace).
+    cert-manager.io/issuer: "le-issuer-cloudflare"
+    # HTTP -> HTTPS redirect; the middleware lives in `default` and is
+    # referenced by its fully-qualified CRD name.
+    traefik.ingress.kubernetes.io/router.middlewares: default-default-redirect-https@kubernetescrd
 spec:
-  ingressClassName: nginx
+  ingressClassName: traefik
   tls:
     - hosts:
         - jmap.example.com
