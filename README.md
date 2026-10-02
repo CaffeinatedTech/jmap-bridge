@@ -408,6 +408,11 @@ consent screen **In production** (see "Google OAuth setup" above) the refresh
 token is durable and re-used indefinitely; if it is left in **Testing** it dies
 after 7 days. Either way, when Google revokes or expires a token the bridge logs
 that consent is needed again and the same URL restarts the flow.
+
+Behind a Kubernetes ingress, the shipped Service sets
+`publishNotReadyAddresses: true` so this URL is reachable while `/readyz` is
+still `503` (no account has synced yet). Without it, an ingress that routes only
+to Ready pods would 503 the very endpoint needed to make the account Ready.
 Labels appear as mailboxes, archiving removes Inbox membership only, and
 Gmail's thread grouping drives the client's threads.
 

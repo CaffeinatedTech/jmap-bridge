@@ -1,3 +1,13 @@
+# publishNotReadyAddresses keeps the pod in the Service endpoints while it is
+# not Ready. /readyz is deliberately false until every account has synced, and
+# false while any account is in auth failure (FR-D.4) — but an OAuth account
+# cannot sync until its first consent (or a re-consent after the refresh token
+# expires), and that consent URL lives on this same origin. Without this, an
+# ingress that routes only to Ready pods would 503 /oauth/<account>/start and
+# Gmail setup could never complete (chicken-and-egg). Kubernetes forces the
+# EndpointSlice ready condition true for such Services, so the controller
+# routes to the pod regardless. Safe here: one replica, and the bridge still
+# refuses to fabricate data it does not have.
 apiVersion: v1
 kind: Service
 metadata:
@@ -6,6 +16,7 @@ metadata:
     app.kubernetes.io/name: jmap-bridge
 spec:
   type: ClusterIP
+  publishNotReadyAddresses: true
   selector:
     app.kubernetes.io/name: jmap-bridge
   ports:

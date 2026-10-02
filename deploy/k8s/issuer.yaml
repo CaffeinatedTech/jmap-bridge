@@ -1,0 +1,31 @@
+# Example namespaced ACME Issuer: Let's Encrypt via Cloudflare DNS-01.
+# Adjust the solver to your DNS provider, or drop this file and manage the
+# jmap-bridge-tls Secret by hand (see deploy/README.md §3c).
+#
+# cert-manager reads the API token from a Secret in THIS namespace, so copy
+# it over before applying (or the Issuer never becomes Ready):
+#
+#   kubectl -n default get secret cloudflare-api-token-secret -o json \
+#     | sed 's/"namespace": "default"/"namespace": "jmap-bridge"/' \
+#     | kubectl apply -f -
+#
+# A ClusterIssuer would not work here: it cannot see a namespaced token
+# secret from its own namespace.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: le-issuer-cloudflare
+  labels:
+    app.kubernetes.io/name: jmap-bridge
+spec:
+  acme:
+    email: admin@example.com
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: le-issuer-account-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token-secret
+              key: api-token
