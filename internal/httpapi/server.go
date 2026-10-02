@@ -86,6 +86,10 @@ func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
 	// (RFC 8620 §6.1 only requires the template to carry accountId).
 	s.mux.HandleFunc("POST /{account}/upload/", s.handleUpload)
 	s.mux.HandleFunc("GET /{account}/download/{blobId}/{name}", s.handleDownload)
+	// FR-D.13: the OAuth consent screen's public home page and privacy
+	// policy. Both are on this origin and neither carries account data.
+	s.mux.HandleFunc("GET /{$}", s.handleHome)
+	s.mux.HandleFunc("GET /privacy", s.handlePrivacy)
 	return s
 }
 

@@ -538,6 +538,8 @@ codes; commit `.env*` or secrets; echo test credentials.
   stats (folder counts, lag, tier, last pass). Never bodies, never credentials.
 - `GET /healthz` (process alive), `GET /readyz` (every account completed a pass;
   no account stuck in auth failure).
+- `GET /` and `GET /privacy`: unauthenticated static pages for the OAuth consent
+  screen's home page and privacy policy (FR-D.13); neither carries account data.
 - Metrics endpoint (optional, text format): sync lag seconds, hydration queue
   depth, JMAP method counts/errors, IMAP reconnects.
 - Graceful shutdown: stop accepting HTTP, cancel IDLE, checkpoint SQLite.

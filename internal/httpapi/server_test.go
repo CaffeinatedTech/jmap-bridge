@@ -810,3 +810,40 @@ func TestSessionContactsGating(t *testing.T) {
 		t.Fatalf("ready call did not answer the method: %v", body)
 	}
 }
+
+// --- FR-D.13: OAuth consent-screen pages ---
+
+func TestConsentPages(t *testing.T) {
+	s := newTestServer(t)
+	for _, tc := range []struct{ path, want string }{
+		{"/", "jmap-bridge"},
+		{"/privacy", "Privacy policy"},
+	} {
+		resp := s.do(t, http.MethodGet, tc.path, "", "", "", "")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200", tc.path, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+			t.Errorf("GET %s Content-Type = %q, want text/html", tc.path, ct)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), tc.want) {
+			t.Errorf("GET %s body missing %q", tc.path, tc.want)
+		}
+	}
+
+	// The pages are unauthenticated by design; a public page must never
+	// carry account data.
+	home, _ := io.ReadAll(s.do(t, http.MethodGet, "/", "", "", "", "").Body)
+	for _, secret := range []string{"me@example.test", "tok-"} {
+		if strings.Contains(string(home), secret) {
+			t.Errorf("home page leaks %q", secret)
+		}
+	}
+
+	// They are exact routes: registering them must not turn the server
+	// into a catch-all for unknown paths.
+	if code := s.do(t, http.MethodGet, "/nope", "", "", "", "").StatusCode; code != http.StatusNotFound {
+		t.Errorf("GET /nope = %d, want 404", code)
+	}
+}

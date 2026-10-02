@@ -183,6 +183,13 @@ revoked or expired token (for example Google's 7-day Testing expiry). Do not
 patch the readiness probe to bootstrap consent — that is exactly what the
 Service setting exists for.
 
+When filling in the OAuth consent screen, the **Application home page** and
+**Privacy policy** links are also served by the bridge (FR-D.13): set them to
+`https://<host>/` and `https://<host>/privacy`, and add `<host>` to
+**Authorized domains**. Switching the publishing status to **In production**
+then clears the 7-day Testing refresh-token expiry; personal use does not need
+full verification.
+
 ### f. Dev / tunnel mode
 
 No public hostname yet? Forward the Service and use a loopback `base_url`
