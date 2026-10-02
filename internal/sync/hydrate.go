@@ -188,14 +188,19 @@ func firstErrOf(fails map[string]error) error {
 }
 
 // storeBody parses one fetched message and commits it — the tail both
-// the single and the batched hydration path share.
+// the single and the batched hydration path share. An unparseable or
+// partless message is cached as hydrated-but-empty rather than failed:
+// the bytes were fetched, and re-fetching the same bytes on every read
+// would be a permanent retry loop and a warning per list view (FR-S.8,
+// FR-X.6). The reason is logged once, at warn.
 func (e *Engine) storeBody(id string, raw []byte) error {
-	res, soft := convert.ParseBody(raw)
-	if soft != nil {
-		e.log.Debug("sync: body parsed with warnings", "email", id, "err", soft)
+	res, perr := convert.ParseBody(raw)
+	if perr != nil {
+		e.log.Debug("sync: body parsed with warnings", "email", id, "err", perr)
 	}
 	if len(res.Values) == 0 && len(res.Attachments) == 0 {
-		return fmt.Errorf("%w: %s parsed empty", errNotHydrated, id)
+		e.log.Warn("sync: body has no readable parts; caching empty",
+			"email", id, "err", perr)
 	}
 	if err := e.st.PutHydrated(context.Background(), e.cfg.Account, id, res); err != nil {
 		return err
