@@ -137,6 +137,10 @@ func run(args []string) error {
 		engines[a.ID] = eng
 		go eng.Run(ctx)
 	}
+	// One Ensure/SearchBackfill hook serves every account, so route them
+	// by account: without this the last engine built would hydrate every
+	// account's reads and reject the rest as "foreign account".
+	st.Ensure, st.SearchBackfill = sync.Router(engines, cfg.Search.Backfill)
 
 	go purgeLoop(ctx, st, log)
 
