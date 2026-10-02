@@ -60,6 +60,10 @@ type Engine struct {
 	// queue behind a pass holding workMu.
 	wr *writer
 
+	// rd is the dedicated hydration session (FR-X.6): previews and
+	// bodies never queue behind a pass holding workMu either.
+	rd *reader
+
 	// idleFolder is the folder the idle connection watches (the inbox
 	// role when discovery finds one); idleLoop reads it under idleMu.
 	idleMu     sync.Mutex
@@ -138,6 +142,7 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 		st:           st,
 		log:          log,
 		wr:           newWriter(cfg.IMAP, log),
+		rd:           newReader(cfg.IMAP, log),
 		wake:         make(chan string, 8),
 		kick:         make(chan struct{}, 1),
 		flights:      map[string]*flight{},
@@ -223,6 +228,7 @@ func (e *Engine) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			e.disconnect()
 			e.wr.close()
+			e.rd.close()
 			return
 		}
 		if !e.isWorkConnected() {
@@ -247,6 +253,7 @@ func (e *Engine) Run(ctx context.Context) {
 		case <-ctx.Done():
 			e.disconnect()
 			e.wr.close()
+			e.rd.close()
 			return
 		}
 		if err := e.doPass(ctx, hint); err != nil {
@@ -264,6 +271,7 @@ func (e *Engine) Run(ctx context.Context) {
 				failures = 0
 				if !e.sleepOrKick(ctx, throttleCooldown) {
 					e.wr.close()
+					e.rd.close()
 					return
 				}
 				continue
@@ -271,6 +279,7 @@ func (e *Engine) Run(ctx context.Context) {
 			failures++
 			if !e.sleepOrKick(ctx, backoff(failures)) {
 				e.wr.close()
+				e.rd.close()
 				return
 			}
 			continue
