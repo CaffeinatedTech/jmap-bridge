@@ -108,7 +108,10 @@ cmd/jmap-bridge
 **Process model (v0.1):** one binary, one goroutine group per configured account
 (sync loop, hydration workers, IDLE connection), one SQLite database in WAL mode
 with a single writer. `context.Context` on every network call. No global mutable
-state, no `init()` side effects.
+state, no `init()` side effects. Each account holds up to four IMAP sessions —
+the sync/work connection, a dedicated write session (§7.1), a dedicated
+hydration session, and an IDLE watcher — so a long backfill never starves a read
+or a mutation (FR-X.6, NFR-1).
 
 **Request flow (read):**
 `POST /jmap` → auth → per-method handler → SQLite query (index-covered) →

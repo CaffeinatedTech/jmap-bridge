@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/convert"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 )
 
 // errNotHydrated means the backend fetch for a body did not produce
@@ -113,9 +114,15 @@ func (e *Engine) hydrateBatch(ctx context.Context, ids []string) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		e.workMu.Lock()
-		bodies, err := e.work.FetchBodies(ctx, folder, uidKeys(uids))
-		e.workMu.Unlock()
+		// Hydrate on the dedicated session (FR-X.6): a sync pass holds
+		// the work connection for a whole backfill, so reading through
+		// it would starve this request.
+		var bodies map[uint32][]byte
+		err := e.rd.withConn(ctx, func(conn *imapdrv.Conn) error {
+			var ferr error
+			bodies, ferr = conn.FetchBodies(ctx, folder, uidKeys(uids))
+			return ferr
+		})
 		if err != nil {
 			for _, id := range uids {
 				fails[id] = err
@@ -267,22 +274,22 @@ func (e *Engine) fetchRawBody(id string) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("%w: %s has no backend location", errNotHydrated, id)
 	}
-	e.workMu.Lock()
-	defer e.workMu.Unlock()
-	if e.work == nil {
-		return nil, errNotConnected
-	}
 	e.hydrateFetches.Add(1)
 	opCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if _, err := e.work.Examine(opCtx, loc.Folder, nil); err != nil {
-		return nil, err
-	}
-	raw, err := e.work.FetchBody(opCtx, loc.UID)
+	var raw []byte
+	err = e.rd.withConn(opCtx, func(conn *imapdrv.Conn) error {
+		if _, err := conn.Examine(opCtx, loc.Folder, nil); err != nil {
+			return err
+		}
+		if raw, err = conn.FetchBody(opCtx, loc.UID); err != nil {
+			return err
+		}
+		return conn.Unselect(opCtx)
+	})
 	if err != nil {
 		return nil, err
 	}
-	_ = e.work.Unselect(opCtx)
 	return raw, nil
 }
 
@@ -302,36 +309,35 @@ func (e *Engine) fetchPreviews(ctx context.Context, ids []string) error {
 	if len(byFolder) == 0 {
 		return nil
 	}
-	e.workMu.Lock()
-	defer e.workMu.Unlock()
-	if e.work == nil {
-		return errNotConnected
-	}
-	defer func() { _ = e.work.Unselect(context.Background()) }()
-	for folder, uids := range byFolder {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if _, err := e.work.Examine(ctx, folder, nil); err != nil {
-			return err
-		}
-		previews, err := e.work.FetchPreviews(ctx, uids)
-		if err != nil {
-			return err
-		}
-		byID := map[string]string{}
-		for _, id := range ids {
-			if loc, ok := locs[id]; ok && loc.Folder == folder {
-				if p, ok := previews[loc.UID]; ok && p != "" {
-					byID[id] = p
+	// Previews run on the dedicated session too (FR-X.6), so listing a
+	// folder never waits out a backfill on the work connection.
+	return e.rd.withConn(ctx, func(conn *imapdrv.Conn) error {
+		defer func() { _ = conn.Unselect(context.Background()) }()
+		for folder, uids := range byFolder {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if _, err := conn.Examine(ctx, folder, nil); err != nil {
+				return err
+			}
+			previews, err := conn.FetchPreviews(ctx, uids)
+			if err != nil {
+				return err
+			}
+			byID := map[string]string{}
+			for _, id := range ids {
+				if loc, ok := locs[id]; ok && loc.Folder == folder {
+					if p, ok := previews[loc.UID]; ok && p != "" {
+						byID[id] = p
+					}
 				}
 			}
+			if err := e.st.SetPreviews(ctx, e.cfg.Account, byID); err != nil {
+				return err
+			}
 		}
-		if err := e.st.SetPreviews(ctx, e.cfg.Account, byID); err != nil {
-			return err
-		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // prefetch enqueues background hydration for messages inside the

@@ -4,6 +4,11 @@
 // per handler call; a handler that scripts no tagged reply gets a bare
 // tagged OK appended, so exchanges keep moving.
 //
+// It accepts any number of connections, each scripted by the same
+// handler: an engine opens a separate session for sync, writes and
+// hydration (FR-X.6), so a one-connection fake would deadlock the
+// second dialer.
+//
 // Test-only: never import from production code.
 package wireimap
 
@@ -35,50 +40,57 @@ func Start(t testing.TB, caps string, handle func(tag, line string) []string) *S
 	}
 	s := &Server{t: t, ln: ln, handle: handle}
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		_, _ = conn.Write([]byte("* OK [" + caps + "] ready\r\n"))
-		r := bufio.NewReader(conn)
 		for {
-			line, err := r.ReadString('\n')
+			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			line = strings.TrimRight(line, "\r\n")
-			tag := "*"
-			if fields := strings.Fields(line); len(fields) > 0 {
-				tag = fields[0]
-			}
-			s.mu.Lock()
-			s.lines = append(s.lines, line)
-			s.mu.Unlock()
-			replies := handle(tag, line)
-			for _, reply := range replies {
-				if _, err := conn.Write([]byte(reply + "\r\n")); err != nil {
-					return
-				}
-			}
-			// A handler that scripted no tagged reply for this command
-			// gets a bare success appended.
-			tagged := false
-			for _, reply := range replies {
-				if strings.HasPrefix(reply, tag+" ") {
-					tagged = true
-					break
-				}
-			}
-			if !tagged {
-				if _, err := conn.Write([]byte(tag + " OK done\r\n")); err != nil {
-					return
-				}
-			}
+			go s.serve(conn, caps)
 		}
 	}()
 	t.Cleanup(func() { _ = ln.Close() })
 	return s
+}
+
+// serve scripts one connection until it closes.
+func (s *Server) serve(conn net.Conn, caps string) {
+	defer func() { _ = conn.Close() }()
+	_, _ = conn.Write([]byte("* OK [" + caps + "] ready\r\n"))
+	r := bufio.NewReader(conn)
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		tag := "*"
+		if fields := strings.Fields(line); len(fields) > 0 {
+			tag = fields[0]
+		}
+		s.mu.Lock()
+		s.lines = append(s.lines, line)
+		s.mu.Unlock()
+		replies := s.handle(tag, line)
+		for _, reply := range replies {
+			if _, err := conn.Write([]byte(reply + "\r\n")); err != nil {
+				return
+			}
+		}
+		// A handler that scripted no tagged reply for this command gets
+		// a bare success appended.
+		tagged := false
+		for _, reply := range replies {
+			if strings.HasPrefix(reply, tag+" ") {
+				tagged = true
+				break
+			}
+		}
+		if !tagged {
+			if _, err := conn.Write([]byte(tag + " OK done\r\n")); err != nil {
+				return
+			}
+		}
+	}
 }
 
 // Close tears the listener down early.
