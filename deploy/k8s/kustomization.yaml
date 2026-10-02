@@ -14,6 +14,7 @@ resources:
   - deployment.yaml
   - service.yaml
   - issuer.yaml
+  - middleware-ratelimit.yaml
   - ingress.yaml
 # Bump the release tag without editing the Deployment:
 # images:
