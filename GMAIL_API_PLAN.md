@@ -73,7 +73,7 @@ backend = "gmail_api"         # NEW; "imap" (default) | "gmail_api"
   #                                          else "poll"
   # pubsub_topic     = "projects/P/topics/T"
   # pubsub_audience  = "https://bridge.example.com"   # OIDC audience to verify
-  # quota_units_per_second = 200        # pacer, see §4.3
+  # quota_units_per_second = 100       # pacer; verified 2026-10-03 (6000/min per user)
   # push_allow_plain = false            # refuse non-OIDC push unless true
 
   # [accounts.carddav] optional and unchanged; consumes the same OAuth2 token
@@ -218,7 +218,8 @@ subscription". The concurrency and single-writer rules (PLAN §10) are unchanged
 ### 4.1 Transport and auth
 
 - Use the generated client: `gmail.NewService(ctx,
-  option.WithHTTPClient(hc))` from `google.golang.org/api/gmail/v1`. `hc` is an
+  option.WithHTTPClient(hc))` from `google.golang.org/api/gmail/v1` (package
+  docs: <https://pkg.go.dev/google.golang.org/api@v0.300.0/gmail/v1>). `hc` is an
   `*http.Client` whose transport attaches the bearer token from an
   `oauth2.TokenSource` backed by the existing `internal/oauth.Manager`, so
   PKCE, refresh, sealing and `ErrReauthNeeded` stay ours and propagate to the
@@ -245,15 +246,23 @@ endpoint ever becomes a problem.
 
 ### 4.3 Quota pacer and backoff
 
-- A per-account token bucket paces requests at `quota_units_per_second`
-  (default 200, just under Google's documented default per-user budget; Google
-  has also documented a 6 000-units/min form — the exact figures and per-method
-  costs move, so the pacer is configurable and the gate re-measures).
-- Cost table (units), verified at the M9 gate against
+- A per-account token bucket paces requests at `quota_units_per_second`.
+  **Verified at M9 (2026-10-03)**: Google's current per-minute per-user budget is
+  **6 000 units**, i.e. **100 units/s**, so the default is **100**, not the 200
+  this plan first assumed from an older figure. The value stays configurable and
+  the pacer charges each method its real cost; the exact figures move, so the
+  gate re-measures.
+- Cost table (units), **verified at the M9 gate (2026-10-03)** against
   <https://developers.google.com/workspace/gmail/api/reference/quota>:
-  `labels.list 1`, `history.list 2`, `messages.list 5`, `messages.get 5`,
-  `messages.modify 5`, `messages.send 100`, `drafts.create 10`,
-  `messages.batchModify` (bulk, price verified at M9).
+  `getProfile 1`, `labels.list 1`, `labels.get 1`, `labels.create 5`,
+  `labels.update 5` (also used for `patch`), `labels.delete 5`,
+  `history.list 2`, `messages.list 5`, **`messages.get 20`** (was 5 when this
+  plan was drafted — the cost table moved), `messages.modify 5`,
+  `messages.delete 10`, `messages.batchDelete 50`, `messages.batchModify 50`,
+  `messages.attachments.get 20`, `messages.send 100`, `threads.get 40`,
+  `drafts.create 10`, `drafts.get 20`, `drafts.send 100`, `drafts.delete 10`,
+  `watch 100`, `stop 50`. These live in `internal/gmailapi/costs.go` and are
+  pinned by `TestCostTable` so a future change is a deliberate re-measurement.
 - `429` and `403 rateLimitExceeded|userRateLimitExceeded` honour `Retry-After`,
   then exponential backoff with jitter, and surface a neutral
   `mailbackend.ErrThrottled` that the engine's existing cooldown/queue logic can
@@ -592,7 +601,7 @@ pure refactor; M9–M14 mirror the M1–M4 gating style.
 | # | Deliverable | Gate | FRs |
 |---|---|---|---|
 | **M8** | `internal/mailbackend` seam; `imapdrv` adapter; sync engine depends only on the interface; `ErrThrottled`/auth errors made backend-neutral — **landed 2026-10-03 (PLAN §12 gate ✅ done)** | **no behaviour change**: every existing test green; jmap-tui live suite over loopback still green; go-imap types still confined to `imapdrv` | none new (refactor) |
-| **M9** | Gmail REST client on the official `google.golang.org/api/gmail/v1` package + `x/oauth2` bridge, pinned; hand-rolled batch, quota pacer, error taxonomy; `test/fixturegmail` skeleton + golden pairs | fixture-backed client tests green incl. quota/backoff and batch correlation; cost table verified against Google's docs | (groundwork) |
+| **M9** | Gmail REST client on the official `google.golang.org/api/gmail/v1` package + `x/oauth2` bridge, pinned; hand-rolled batch, quota pacer, error taxonomy; `test/fixturegmail` skeleton + golden pairs — **landed 2026-10-03 (PLAN §12 gate ✅ done)** | fixture-backed client tests green incl. quota/backoff and batch correlation; cost table verified against Google's docs (corrected `messages.get` to 20) | (groundwork) |
 | **M10** | Config `backend`/`[accounts.gmail_api]` + validation; discovery, initial backfill, incremental history, hydration, `/changes` | jmap-tui browses a fixture Gmail account in API mode; **live read-only** gate against a throwaway Gmail account (folders/labels/counts/threads correct; a web-UI flag change appears) | FR-A.13, FR-S.13 (new), FR-M.1–.8 |
 | **M11** | Write path §8; drafts; `Mailbox/set` (incl. refusing `onDestroyRemoveEmails=true`, §16.4) | live write gate (dedicated account, abort on first `429`): label both ways, archive, star, move, `Mailbox/set`, draft create, destroy; every claim re-read from the Gmail web/API independently | FR-M.9–.13, FR-M.20 (new) |
 | **M12** | Submission §8.1 | compose → send → exactly one Sent copy + delivery to a test sink; ambiguous-send reconciliation proven (simulated timeout) | FR-M.14–.17 |
