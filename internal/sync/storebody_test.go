@@ -1,9 +1,11 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -26,5 +28,28 @@ func TestStoreBodyCachesUnparseableAsEmpty(t *testing.T) {
 	}
 	if !hydrated {
 		t.Fatal("unparseable body not marked hydrated: it will be re-fetched on every read")
+	}
+}
+
+// FR-D.12: message bodies never reach the logs. go-message's parse
+// errors embed the offending bytes ("malformed MIME header line: …"), so
+// storeBody must not log the error text — the sentinel below appears in
+// the error but must not appear in the captured log output.
+func TestStoreBodyNeverLogsMessageBytes(t *testing.T) {
+	const sentinel = "SECRET-BODY-SENTINEL-4f3a"
+	st := gmStore(t)
+	id := gmSeedPerFolder(t, st, map[string]uint32{"INBOX": 4242})
+	var logs bytes.Buffer
+	e := New(Config{Account: "acct"}, st, slog.New(slog.NewTextHandler(&logs, nil)))
+
+	raw := []byte("From: a@b\r\n" + sentinel + "\r\nSubject: x\r\n\r\n" + sentinel + "\r\n")
+	if err := e.storeBody(id, raw); err != nil {
+		t.Fatalf("storeBody = %v, want nil", err)
+	}
+	if strings.Contains(logs.String(), sentinel) {
+		t.Fatalf("message body reached the logs:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "no readable parts") {
+		t.Fatalf("expected the partless warning, got:\n%s", logs.String())
 	}
 }

@@ -172,6 +172,10 @@ type fakeBackend struct {
 
 	err      error           // force a failure on the next mutation
 	knownIDs map[string]bool // when set: unknown ids fail with notFound
+
+	importErr  error                 // force ImportEmail to fail
+	importDone *jmapapi.CreatedEmail // when set: the ImportEmail result
+	imported   []jmapapi.ImportSpec  // every spec ImportEmail was handed
 }
 
 func newFakeBackend() *fakeBackend {
@@ -187,6 +191,19 @@ func (*fakeBackend) ApplyEmailPatch(context.Context, string, string, jmapapi.Ema
 func (*fakeBackend) DestroyEmails(context.Context, string, string) error { return nil }
 func (*fakeBackend) CreateDraft(context.Context, string, jmapapi.DraftSpec) (*jmapapi.CreatedEmail, error) {
 	return nil, nil
+}
+
+func (b *fakeBackend) ImportEmail(_ context.Context, _ string, spec jmapapi.ImportSpec) (*jmapapi.CreatedEmail, error) {
+	if b.importErr != nil {
+		return nil, b.importErr
+	}
+	b.imported = append(b.imported, spec)
+	if b.importDone != nil {
+		return b.importDone, nil
+	}
+	return &jmapapi.CreatedEmail{
+		ID: "em-import", BlobID: spec.BlobID, ThreadID: "th-import", Size: 128,
+	}, nil
 }
 
 func (*fakeBackend) SubmitEmail(context.Context, string, jmapapi.SubmissionSpec) (*jmapapi.CreatedSubmission, error) {

@@ -58,11 +58,11 @@ second protocol to every client, run one bridge:
 | Capability | Methods & endpoints | Status |
 |---|---|---|
 | `urn:ietf:params:jmap:core` (RFC 8620) | session resource, `POST /jmap` (batched, result references), `/changes`, upload/download, error taxonomy | v0.1 |
-| `urn:ietf:params:jmap:mail` (RFC 8621) | `Mailbox/get\|query\|changes\|set`, `Email/get\|query\|changes\|set`, `Thread/get`, `Identity/get` | v0.1 |
+| `urn:ietf:params:jmap:mail` (RFC 8621) | `Mailbox/get\|query\|changes\|set`, `Email/get\|query\|changes\|set\|import`, `Thread/get`, `Identity/get` | v0.1 |
 | `urn:ietf:params:jmap:submission` | `EmailSubmission/set` (create → SMTP) | v0.1 |
 | `urn:ietf:params:jmap:contacts` (RFC 9610) | `AddressBook/get\|changes`, `ContactCard/get\|changes\|set` | v0.1 |
 | push (RFC 8620 §7.3) | EventSource `/{account}/eventsource` (SSE) | v0.1 |
-| roadmap | `Email/queryChanges`, `Email/copy`, `ContactCard/query`, `AddressBook/set`, `Identity/set`, `EmailSubmission/get\|query` | later |
+| roadmap | `Email/queryChanges`, `Email/copy`, `Email/parse`, `Thread/changes`, `ContactCard/query`, `AddressBook/set`, `Identity/set`, `EmailSubmission/get\|query`, `SearchSnippet/get`, `PushSubscription` | later |
 | not planned | JMAP Calendar, `Principal`/sharing, `VacationResponse`, `MDN`, `Quota`, Sieve | see PLAN roadmap |
 
 If a capability is not configured (no CardDAV URL → no contacts capability), the
@@ -368,6 +368,9 @@ max_eventsource_total       = 128
 trusted_proxies  = []          # CIDRs whose X-Forwarded-For is believed
 # client_ip_header = "CF-Connecting-IP"   # set behind Cloudflare (peer must be trusted)
 
+[metrics]                      # opt-in Prometheus endpoint (FR-D.6)
+enabled = false                 # GET /metrics (text/plain, version 0.0.4)
+
 [[accounts]]
 id      = "personal"           # path prefix and JMAP account identity
 name    = "Personal"
@@ -386,6 +389,12 @@ token   = "…"                  # client password (Basic auth), ≥24 chars:
 
 Secrets may also be supplied as `JMAP_BRIDGE_<ACCOUNT>_<FIELD>` environment
 variables or mounted files — never commit them, never log them.
+
+`[metrics] enabled = true` serves `GET /metrics` on the same origin for
+Prometheus scraping: per-account sync lag and tier, hydration queue depth,
+JMAP method counts/errors, IMAP reconnects and EventSource clients. The endpoint
+is unauthenticated (like `/healthz`) and names accounts, so enable it only where
+the origin is not publicly reachable, or gate `/metrics` at the reverse proxy.
 
 Stored OAuth2 tokens are encrypted at rest with a 32-byte key from the
 `JMAP_BRIDGE_SECRET_KEY` environment variable (raw, base64, or hex). Without

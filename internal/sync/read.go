@@ -17,14 +17,15 @@ import (
 // writer: one connection, dialed lazily, ping-checked, dropped on a
 // transport failure.
 type reader struct {
-	mu   sync.Mutex
-	cfg  imapdrv.Config
-	log  *slog.Logger
-	conn *imapdrv.Conn
+	mu    sync.Mutex
+	cfg   imapdrv.Config
+	log   *slog.Logger
+	conn  *imapdrv.Conn
+	count reconnectCounter // nil disables the FR-D.6 reconnect count
 }
 
-func newReader(cfg imapdrv.Config, log *slog.Logger) *reader {
-	return &reader{cfg: cfg, log: log}
+func newReader(cfg imapdrv.Config, log *slog.Logger, count reconnectCounter) *reader {
+	return &reader{cfg: cfg, log: log, count: count}
 }
 
 func (r *reader) close() {
@@ -74,6 +75,9 @@ func (r *reader) ensureLocked(ctx context.Context) (*imapdrv.Conn, error) {
 			r.log.Debug("sync: hydration session stale", "err", err)
 		}
 		r.dropLocked()
+	}
+	if r.count != nil {
+		r.count("hydrate")
 	}
 	conn, err := imapdrv.Dial(ctx, r.cfg)
 	if err != nil {

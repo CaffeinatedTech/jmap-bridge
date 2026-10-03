@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -423,12 +424,13 @@ func TestCoveredPageMatchesStreaming(t *testing.T) {
 			}
 		}
 	}
-	// Unknown anchor clamps to the end (paginateIDs semantics).
-	_, pos, _ := page(jmapapi.EmailQuery{
+	// An unknown anchor is an error, not a clamp to the end (RFC 8620
+	// §5.5): Email/query reports anchorNotFound.
+	_, _, _, _, err := s.QueryEmails(ctx, "acct", jmapapi.EmailQuery{
 		Filter: jmapapi.EmailFilter{InMailbox: inbox}, Anchor: "nope", Limit: 5,
 	})
-	if pos != len(full) {
-		t.Errorf("unknown anchor position = %d, want %d", pos, len(full))
+	if !errors.Is(err, jmapapi.ErrAnchorNotFound) {
+		t.Errorf("unknown anchor error = %v, want ErrAnchorNotFound", err)
 	}
 	// Attachment filter narrows the covered total.
 	_, _, total := page(jmapapi.EmailQuery{

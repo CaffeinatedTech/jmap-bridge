@@ -192,15 +192,19 @@ func firstErrOf(fails map[string]error) error {
 // partless message is cached as hydrated-but-empty rather than failed:
 // the bytes were fetched, and re-fetching the same bytes on every read
 // would be a permanent retry loop and a warning per list view (FR-S.8,
-// FR-X.6). The reason is logged once, at warn.
+// FR-X.6).
+//
+// The parse error text is deliberately NOT logged: go-message embeds the
+// offending message bytes in its errors ("malformed MIME header key:
+// <bytes>"), and FR-D.12 forbids message bodies in logs. The envelope id
+// is enough to find the raw message in the blob store.
 func (e *Engine) storeBody(id string, raw []byte) error {
 	res, perr := convert.ParseBody(raw)
 	if perr != nil {
-		e.log.Debug("sync: body parsed with warnings", "email", id, "err", perr)
+		e.log.Debug("sync: body parsed with warnings", "email", id)
 	}
 	if len(res.Values) == 0 && len(res.Attachments) == 0 {
-		e.log.Warn("sync: body has no readable parts; caching empty",
-			"email", id, "err", perr)
+		e.log.Warn("sync: body has no readable parts; caching empty", "email", id)
 	}
 	if err := e.st.PutHydrated(context.Background(), e.cfg.Account, id, res); err != nil {
 		return err

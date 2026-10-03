@@ -16,6 +16,11 @@ import (
 // §5.2); dispatch turns it into a cannotCalculateChanges method error.
 var ErrCannotCalculateChanges = errors.New("cannot calculate changes")
 
+// ErrAnchorNotFound makes a Store report that a /query's anchor id was
+// not among the results (RFC 8620 §5.5); dispatch turns it into an
+// anchorNotFound method error.
+var ErrAnchorNotFound = errors.New("anchor not found")
+
 // Mailbox is the store-level view of a JMAP Mailbox (FR-M.1).
 type Mailbox struct {
 	ID       string

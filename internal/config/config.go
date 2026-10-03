@@ -25,7 +25,15 @@ type Config struct {
 	Search   Search    `toml:"search"`
 	Sync     Sync      `toml:"sync"`
 	Rate     Rate      `toml:"rate"`
+	Metrics  Metrics   `toml:"metrics"`
 	Accounts []Account `toml:"accounts"`
+}
+
+// Metrics configures the opt-in Prometheus exposition endpoint
+// (FR-D.6). Disabled by default: metrics leak operational shape (account
+// ids, queue depths), so an operator turns the endpoint on deliberately.
+type Metrics struct {
+	Enabled bool `toml:"enabled"`
 }
 
 // Rate configures the in-process abuse protection (NFR-5, SECURITY-PLAN

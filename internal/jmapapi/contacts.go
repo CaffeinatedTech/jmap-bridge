@@ -71,10 +71,7 @@ func (h *Handler) addressBookGet(ctx context.Context, acct *Account, raw json.Ra
 	for _, b := range books {
 		list = append(list, filterProps(addressBookObject(b, b.ID == def), args.Properties))
 	}
-	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list}
-	if len(notFound) > 0 {
-		resp["notFound"] = notFound
-	}
+	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list, "notFound": notFoundList(notFound)}
 	return resp, nil
 }
 
@@ -151,10 +148,7 @@ func (h *Handler) contactCardGet(ctx context.Context, acct *Account, raw json.Ra
 		}
 		list = append(list, filterProps(obj, args.Properties))
 	}
-	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list}
-	if len(notFound) > 0 {
-		resp["notFound"] = notFound
-	}
+	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list, "notFound": notFoundList(notFound)}
 	return resp, nil
 }
 

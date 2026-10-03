@@ -36,6 +36,8 @@ type writer struct {
 	// (FR-S.10). It is set from this session's dials and, before the
 	// first write, from the work connection's discovery.
 	gmailFlag bool
+	// count reports each dial attempt (FR-D.6); nil disables counting.
+	count reconnectCounter
 }
 
 // gmail reports the session's Gmail profile under the writer lock.
@@ -53,8 +55,8 @@ func (w *writer) noteGmail(v bool) {
 	w.mu.Unlock()
 }
 
-func newWriter(cfg imapdrv.Config, log *slog.Logger) *writer {
-	return &writer{cfg: cfg, log: log}
+func newWriter(cfg imapdrv.Config, log *slog.Logger, count reconnectCounter) *writer {
+	return &writer{cfg: cfg, log: log, count: count}
 }
 
 func (w *writer) close() {
@@ -102,6 +104,9 @@ func (w *writer) ensureLocked(ctx context.Context) (*imapdrv.Conn, error) {
 			w.log.Debug("sync: write session stale", "err", err)
 		}
 		w.dropLocked()
+	}
+	if w.count != nil {
+		w.count("write")
 	}
 	conn, err := imapdrv.Dial(ctx, w.cfg)
 	if err != nil {
@@ -599,6 +604,83 @@ func (e *Engine) CreateDraft(ctx context.Context, account string, spec jmapapi.D
 	}
 	return &jmapapi.CreatedEmail{
 		ID: created.ID, BlobID: blobID, ThreadID: created.ThreadID, Size: created.Size,
+	}, nil
+}
+
+// ImportEmail files client-supplied raw RFC 5322 bytes, already held in
+// this account's blob store, into the named mailboxes (RFC 8621 §4.8).
+// The bytes ARE the message, so there is no build step: APPEND once to
+// the first mailbox, commit, then file any extra mailboxes through the
+// proven membership path (Gmail labels are not the APPEND mechanism,
+// FR-S.10).
+func (e *Engine) ImportEmail(ctx context.Context, account string, spec jmapapi.ImportSpec) (*jmapapi.CreatedEmail, error) {
+	if account != e.cfg.Account {
+		return nil, fmt.Errorf("sync: import for foreign account %q", account)
+	}
+	raw, _, err := e.st.ReadBlob(ctx, account, spec.BlobID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: blob %s", jmapapi.ErrBlobNotFound, spec.BlobID)
+	}
+	mbs, _, notFound, err := e.st.MailboxesByID(ctx, account, spec.MailboxIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(spec.MailboxIDs) == 0 || len(notFound) > 0 || len(mbs) == 0 {
+		return nil, jmapapi.ErrUnknownMailbox
+	}
+	folder := mbs[0].Path
+
+	flags := keyword.ToIMAP(truthy(boolKeys(spec.Keywords)))
+	received := spec.ReceivedAt
+	if received.IsZero() {
+		received = time.Now()
+	}
+	// Build the summary before appending: a message only the server
+	// knows about (a parse the cache cannot record) is a lost import.
+	rec, err := convert.SummaryFromRaw(raw, received)
+	if err != nil {
+		return nil, err
+	}
+	rec.Flags = flags
+
+	var uid, uidValidity uint32
+	if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
+		var err error
+		uid, uidValidity, err = conn.AppendMessage(ctx, folder, raw, flags, &received)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	rec.UID = uid
+	rec.UIDValidity = uidValidity
+
+	created, err := e.st.CommitAppend(ctx, account, folder, rec)
+	if err != nil {
+		return nil, err
+	}
+	// The bytes we appended are the message's raw copy; linking them
+	// gives Email/get its blobId (FR-M.4, RFC 8621 §4.1.1).
+	if err := e.st.LinkRawBlob(ctx, account, created.ID, spec.BlobID); err != nil {
+		e.log.Warn("sync: imported raw copy not linked", "email", created.ID, "err", err)
+	}
+	// Body values are already in the imported bytes; a failure here only
+	// costs a hydration fetch on the next read.
+	res, _ := convert.ParseBody(raw) // a soft error still yields usable parts
+	if err := e.st.PutHydrated(ctx, account, created.ID, res); err != nil {
+		e.log.Warn("sync: imported body not cached", "email", created.ID, "err", err)
+	}
+	if len(spec.MailboxIDs) > 1 {
+		if err := e.ApplyEmailPatch(ctx, account, created.ID, jmapapi.EmailPatch{
+			MailboxAdd: spec.MailboxIDs[1:],
+		}); err != nil {
+			// The message exists in the first mailbox; the extras did
+			// not land, so the create fails rather than under-reporting
+			// its membership (FR-M.13).
+			return nil, err
+		}
+	}
+	return &jmapapi.CreatedEmail{
+		ID: created.ID, BlobID: spec.BlobID, ThreadID: created.ThreadID, Size: created.Size,
 	}, nil
 }
 

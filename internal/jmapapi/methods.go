@@ -6,12 +6,15 @@ import (
 	"errors"
 	"sort"
 	"time"
+	"unicode/utf8"
 )
 
 // method looks up a dispatchable method; nil means unknownMethod
 // (FR-J.2).
 func (h *Handler) method(name string) methodFunc {
 	switch name {
+	case "Core/echo":
+		return coreEcho
 	case "Mailbox/get":
 		return h.mailboxGet
 	case "Mailbox/query":
@@ -28,6 +31,8 @@ func (h *Handler) method(name string) methodFunc {
 		return changesMethod("Email")
 	case "Email/set":
 		return h.emailSet
+	case "Email/import":
+		return h.emailImport
 	case "Thread/get":
 		return h.threadGet
 	case "Identity/get":
@@ -49,16 +54,32 @@ func (h *Handler) method(name string) methodFunc {
 	}
 }
 
+// coreEcho implements Core/echo (RFC 8620 §3.1): the method echoes its
+// arguments object back unchanged, and an absent object echoes as `{}`.
+// It is mandatory for every JMAP server and needs no account.
+func coreEcho(_ context.Context, _ *Account, raw json.RawMessage) (any, *methodErr) {
+	var args map[string]any
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, methodErrorf("invalidArguments", "arguments must be a JSON object")
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	return args, nil
+}
+
 // checkAccount validates the accountId argument: required, and equal to
-// the account the request was routed for. Any other value is notFound —
-// identical whether the account exists or not, so a caller cannot probe
-// other accounts through method errors (FR-A.11).
+// the account the request was routed for. An absent accountId is
+// invalidArguments; a present one that is not this account is
+// accountNotFound — identical whether the account exists or not, so a
+// caller cannot probe other accounts through method errors (FR-A.11,
+// RFC 8620 §3.6.2).
 func checkAccount(acct *Account, id string) *methodErr {
 	if id == "" {
 		return methodErrorf("invalidArguments", "accountId is required")
 	}
 	if id != acct.ID {
-		return methodErrorf("notFound", "unknown accountId")
+		return methodErrorf("accountNotFound", "unknown accountId")
 	}
 	return nil
 }
@@ -76,6 +97,10 @@ type getArgs struct {
 	FetchTextBodyValues bool `json:"fetchTextBodyValues"`
 	FetchHTMLBodyValues bool `json:"fetchHTMLBodyValues"`
 	FetchAllBodyValues  bool `json:"fetchAllBodyValues"`
+
+	// MaxBodyValueBytes, when set, caps each returned body value at that
+	// many octets and marks it truncated (RFC 8621 §4.1.4).
+	MaxBodyValueBytes int `json:"maxBodyValueBytes"`
 }
 
 func (h *Handler) mailboxGet(ctx context.Context, acct *Account, raw json.RawMessage) (any, *methodErr) {
@@ -99,16 +124,13 @@ func (h *Handler) mailboxGet(ctx context.Context, acct *Account, raw json.RawMes
 	}
 	list := make([]map[string]any, 0, len(mbs))
 	for _, mb := range mbs {
-		list = append(list, filterProps(mailboxObject(mb), args.Properties))
+		list = append(list, filterProps(mailboxObject(mb, accountOffers(acct, SubmissionURN)), args.Properties))
 	}
-	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list}
-	if len(notFound) > 0 {
-		resp["notFound"] = notFound
-	}
+	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list, "notFound": notFoundList(notFound)}
 	return resp, nil
 }
 
-func mailboxObject(mb *Mailbox) map[string]any {
+func mailboxObject(mb *Mailbox, maySubmit bool) map[string]any {
 	obj := map[string]any{
 		"id":            mb.ID,
 		"name":          mb.Name,
@@ -122,9 +144,12 @@ func mailboxObject(mb *Mailbox) map[string]any {
 			"mayReadItems":   mb.MayRead,
 			"mayAddItems":    mb.MayAddItems,
 			"mayRemoveItems": mb.MayRemoveItems,
+			"maySetSeen":     mb.MayRead,
+			"maySetKeywords": mb.MayAddItems,
 			"mayCreateChild": mb.MayCreateChild,
 			"mayRename":      mb.MayRename,
 			"mayDelete":      mb.MayDelete,
+			"maySubmit":      maySubmit,
 		},
 	}
 	if mb.ParentID != "" {
@@ -283,9 +308,10 @@ func mailboxSortLess(sortArgs []sortArg) (func(a, b *Mailbox) bool, *methodErr) 
 }
 
 // paginate applies anchor/anchorOffset (which replace position) and
-// limit, returning the starting position and the window. An anchor id
-// that is no longer in the result set clamps to the end of the list —
-// the tolerant behaviour jmap-tui's mock server implements and its
+// limit, returning the starting position and the window. A negative
+// position counts from the end of the list (RFC 8620 §5.5). An anchor
+// id that is no longer in the result set clamps to the end of the list
+// — the tolerant behaviour jmap-tui's mock server implements and its
 // window repair relies on.
 func paginate(ids []string, anchor string, anchorOffset, position, limit int) (int, []string) {
 	if anchor != "" {
@@ -296,6 +322,8 @@ func paginate(ids []string, anchor string, anchorOffset, position, limit int) (i
 				break
 			}
 		}
+	} else if position < 0 {
+		position = len(ids) + position
 	}
 	if position < 0 {
 		position = 0
@@ -370,6 +398,9 @@ func (h *Handler) emailQuery(ctx context.Context, acct *Account, raw json.RawMes
 	}
 
 	ids, position, total, counter, err := acct.Store.QueryEmails(ctx, acct.ID, q)
+	if errors.Is(err, ErrAnchorNotFound) {
+		return nil, methodErrorf("anchorNotFound", "anchor %q is not in the query results", args.Anchor)
+	}
 	if err != nil {
 		return nil, serverFail(err)
 	}
@@ -435,10 +466,7 @@ func (h *Handler) emailGet(ctx context.Context, acct *Account, raw json.RawMessa
 	for _, e := range emails {
 		list = append(list, filterProps(emailObject(e, &args), args.Properties))
 	}
-	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list}
-	if len(notFound) > 0 {
-		resp["notFound"] = notFound
-	}
+	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list, "notFound": notFoundList(notFound)}
 	return resp, nil
 }
 
@@ -536,7 +564,12 @@ func structureInto(obj map[string]any, e *Email, args *getArgs) {
 	add := func(ids []string) {
 		for _, id := range ids {
 			if v, ok := e.BodyValues[id]; ok {
-				values[id] = map[string]any{"value": v, "isTruncated": false}
+				val, truncated := truncateBodyValue(v, args.MaxBodyValueBytes)
+				values[id] = map[string]any{
+					"value":             val,
+					"isEncodingProblem": false,
+					"isTruncated":       truncated,
+				}
 			}
 		}
 	}
@@ -574,15 +607,45 @@ func fixtureBodies(obj map[string]any, e *Email, args *getArgs) {
 	if wantValues && fetch {
 		values := map[string]map[string]any{}
 		if textPart != nil && (args.FetchAllBodyValues || args.FetchTextBodyValues) {
-			values["1"] = map[string]any{"value": e.TextBody}
+			val, truncated := truncateBodyValue(e.TextBody, args.MaxBodyValueBytes)
+			values["1"] = map[string]any{
+				"value": val, "isEncodingProblem": false, "isTruncated": truncated,
+			}
 		}
 		if htmlPart != nil && (args.FetchAllBodyValues || args.FetchHTMLBodyValues) {
-			values["2"] = map[string]any{"value": e.HTMLBody}
+			val, truncated := truncateBodyValue(e.HTMLBody, args.MaxBodyValueBytes)
+			values["2"] = map[string]any{
+				"value": val, "isEncodingProblem": false, "isTruncated": truncated,
+			}
 		}
 		if len(values) > 0 {
 			obj["bodyValues"] = values
 		}
 	}
+}
+
+// truncateBodyValue caps a body value at maxBytes octets (when positive)
+// without splitting a UTF-8 code point, reporting whether it cut
+// anything (RFC 8621 §4.1.4).
+func truncateBodyValue(s string, maxBytes int) (string, bool) {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s, false
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.ValidString(s[:cut]) {
+		cut--
+	}
+	return s[:cut], true
+}
+
+// notFoundList normalises a notFound result to a JSON array: the /get
+// response object REQUIRES the property (RFC 8620 §5.1), and an empty
+// list must serialise as `[]`, never be omitted.
+func notFoundList(ids []string) []string {
+	if ids == nil {
+		return []string{}
+	}
+	return ids
 }
 
 // collectParts indexes every part of the tree by partId.
@@ -665,10 +728,7 @@ func (h *Handler) threadGet(ctx context.Context, acct *Account, raw json.RawMess
 	for _, t := range threads {
 		list = append(list, map[string]any{"id": t.ID, "emailIds": t.EmailIDs})
 	}
-	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list}
-	if len(notFound) > 0 {
-		resp["notFound"] = notFound
-	}
+	resp := map[string]any{"accountId": acct.ID, "state": state, "list": list, "notFound": notFoundList(notFound)}
 	return resp, nil
 }
 

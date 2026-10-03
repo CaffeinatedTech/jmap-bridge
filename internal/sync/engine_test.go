@@ -323,6 +323,21 @@ func TestUIDValidityChangeMintsFreshIDs(t *testing.T) {
 		}
 		return false
 	})
+	// FR-S.6 invariant: exactly one live Doc, and the pre-reset id is
+	// never recycled — the old id is tombstoned, a fresh one minted.
+	liveDocs := 0
+	for _, e := range emailList(t, env.st) {
+		if e.Subject != "Doc" {
+			continue
+		}
+		liveDocs++
+		if e.ID == oldID {
+			t.Errorf("old id %s is live after a UIDVALIDITY reset: ids must never be recycled", oldID)
+		}
+	}
+	if liveDocs != 1 {
+		t.Errorf("live Doc count = %d, want 1", liveDocs)
+	}
 	cs, err := env.st.Changes(context.Background(), "acct", "Email", state)
 	if err != nil {
 		t.Fatal(err)

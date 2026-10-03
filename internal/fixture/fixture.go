@@ -268,6 +268,9 @@ func (s *Store) QueryEmails(_ context.Context, account string, q jmapapi.EmailQu
 
 	position := q.Position
 	if q.Anchor != "" {
+		if !containsString(ids, q.Anchor) {
+			return nil, 0, 0, "", jmapapi.ErrAnchorNotFound
+		}
 		position = len(ids)
 		for i, id := range ids {
 			if id == q.Anchor {
@@ -275,6 +278,8 @@ func (s *Store) QueryEmails(_ context.Context, account string, q jmapapi.EmailQu
 				break
 			}
 		}
+	} else if position < 0 {
+		position = len(ids) + position
 	}
 	if position < 0 {
 		position = 0

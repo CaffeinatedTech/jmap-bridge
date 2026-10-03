@@ -17,7 +17,8 @@ requirements are `NFR-<n>`.
 **In v0.1**
 
 - JMAP Mail (RFC 8621) over HTTP for browsing, reading, flagging, moving,
-  deleting, threading and drafting against an IMAP backend.
+  deleting, threading, drafting and importing raw messages against an IMAP
+  backend.
 - Sending via `EmailSubmission/set` → SMTP submission, filed to Sent on IMAP.
 - JMAP Contacts (RFC 9610) over CardDAV for the same account's provider.
 - A local hybrid cache (headers/flags/structure always; bodies lazy) with an
@@ -28,7 +29,7 @@ requirements are `NFR-<n>`.
 **Explicitly out of scope (v0.1)** — see also PLAN §15 roadmap:
 
 - JMAP Calendar / CalDAV (roadmap), `Principal`/sharing/ACL, `VacationResponse`,
-  `MDN`, `Quota`, Sieve management, `SearchSnippet`, `Email/import`, `Email/parse`,
+  `MDN`, `Quota`, Sieve management, `SearchSnippet`, `Email/parse`,
   WebSocket push (SSE only), `Email/queryChanges`, `Email/copy`,
   `ContactCard/query|queryChanges|copy`, `AddressBook/set`, `Identity/set`,
   `EmailSubmission/get|query` (roadmap items are listed in PLAN §15).
@@ -238,6 +239,14 @@ requirements are `NFR-<n>`.
   `[Gmail]/Drafts`) discovered by SPECIAL-USE or well-known names; Gmail's
   eventual consistency must not cause FR-M.9/FR-M.10 to report failure when the
   server accepted the command.
+- **FR-M.19 `Email/import`**: imports an RFC 5322 message already in the blob
+  store into one or more mailboxes with `keywords` and `receivedAt` (RFC 8621
+  §4.8): the raw bytes are placed on the server first (APPEND to the first
+  mailbox, membership for the rest through the normal write path, FR-M.9), then
+  committed locally; the response carries `created` (id/blobId/threadId/size)
+  and per-member `notCreated`. A missing blob or unknown mailbox is
+  `invalidProperties`; `ifInState` mismatch is `stateMismatch`. The bytes are
+  linked as the message's raw blob so `Email/get` answers `blobId`.
 
 ## 5. FR-P — Contacts (CardDAV backend)
 
@@ -435,8 +444,10 @@ requirements are `NFR-<n>`.
 - **NFR-6 Observability:** health, metrics and structured logs sufficient to
   diagnose a failed sync without a debugger (FR-D.4/6/12).
 - **NFR-7 Compatibility:** works against jmap-tui's live suite (session quirks in
-  PLAN §2.1) and passes the `JMAP-TestSuite` subset covering implemented methods
-  by M7; degrades honestly where a backend lacks an extension.
+  PLAN §2.1) and passes the `JMAP-TestSuite` subset covering the implemented
+  surface by M7 — the deliberate out-of-scope methods and feature gaps are
+  enumerated in PLAN §12's "Known conformance gaps"; degrades honestly where a
+  backend lacks an extension.
 - **NFR-8 Resource use:** idle RSS target < 150 MB for a 100k-message account
   with 10k hydrated bodies (verify at M5); no goroutine or connection leaks after
   account reconnect cycles (race detector clean in soak).
@@ -457,7 +468,7 @@ requirements are `NFR-<n>`.
 | FR-A.5–.10, FR-S.10, FR-S.12, FR-M.18 | M4 | live Gmail end-to-end |
 | FR-X.1–.8, FR-S.11, NFR-1, NFR-2, NFR-8 | M5 | search correctness + 100k soak |
 | FR-P.1–.13 | M6 | contacts live suite green against real CardDAV |
-| FR-J.9–.10, FR-D.2–.12, NFR-3–.7, NFR-9–.10 | M7 | documented install works; conformance suite green |
+| FR-M.19, FR-J.9–.10, FR-D.2–.12, NFR-3–.7, NFR-9–.10 | M7 | documented install works; JMAP-TestSuite subset for the implemented surface green (deliberate gaps enumerated in PLAN §12) |
 
 *(If PLAN.md's traceability column ever disagrees with this table, this table
 wins. This table maps requirements to milestones only — completion state is

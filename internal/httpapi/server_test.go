@@ -235,6 +235,13 @@ func TestSessionShape(t *testing.T) {
 	if pa["name"] != "me@example.test" || pa["isPersonal"] != true {
 		t.Errorf("personal account = %v", pa)
 	}
+	if pa["isReadOnly"] != false {
+		t.Errorf("isReadOnly = %v, want false (RFC 8620 §2)", pa["isReadOnly"])
+	}
+	core, _ := caps["urn:ietf:params:jmap:core"].(map[string]any)
+	if _, ok := core["collationAlgorithms"].([]any); !ok {
+		t.Errorf("collationAlgorithms = %T, want array (RFC 8620 §2)", core["collationAlgorithms"])
+	}
 	acctCaps, _ := pa["accountCapabilities"].(map[string]any)
 	mailCap, ok := acctCaps["urn:ietf:params:jmap:mail"].(map[string]any)
 	if !ok {
@@ -558,8 +565,8 @@ func TestWrongAccountIDFailsClosed(t *testing.T) {
 		if entries[0][0] != "error" {
 			t.Fatalf("accountId %q: responses = %v", id, entries)
 		}
-		if args := entries[0][1].(map[string]any); args["type"] != "notFound" {
-			t.Errorf("accountId %q: type = %v, want notFound", id, args["type"])
+		if args := entries[0][1].(map[string]any); args["type"] != "accountNotFound" {
+			t.Errorf("accountId %q: type = %v, want accountNotFound", id, args["type"])
 		}
 	}
 }
@@ -845,5 +852,32 @@ func TestConsentPages(t *testing.T) {
 	// into a catch-all for unknown paths.
 	if code := s.do(t, http.MethodGet, "/nope", "", "", "", "").StatusCode; code != http.StatusNotFound {
 		t.Errorf("GET /nope = %d, want 404", code)
+	}
+}
+
+// TestSSECountsWithRateDisabled pins the FR-D.6 fix: acquireSSE writes
+// into ssePerAcct, which used to be allocated only when rate limiting was
+// enabled, so an unbounded server (rate.enabled = false) panicked on the
+// first EventSource connection.
+func TestSSECountsWithRateDisabled(t *testing.T) {
+	cfg := &config.Config{
+		Auth: config.Auth{Mode: "none"},
+		Rate: config.Rate{Enabled: false},
+	}
+	s := New(cfg, auth.NewTokens(nil), nil, nil, push.New(), nil, nil, nil, nil)
+
+	for _, account := range []string{"personal", "personal", "work"} {
+		if !s.acquireSSE(account) {
+			t.Fatalf("acquireSSE refused %q with caps disabled", account)
+		}
+	}
+	total, per := s.SSECounts()
+	if total != 3 || per["personal"] != 2 || per["work"] != 1 {
+		t.Fatalf("SSECounts = %d %v, want 3 map[personal:2 work:1]", total, per)
+	}
+	s.releaseSSE("personal")
+	total, per = s.SSECounts()
+	if total != 2 || per["personal"] != 1 {
+		t.Fatalf("after release SSECounts = %d %v, want 2 map[personal:1]", total, per)
 	}
 }

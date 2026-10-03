@@ -272,6 +272,9 @@ func structureObject(p *Part) map[string]any {
 	if p.Disposition != "" {
 		obj["disposition"] = strings.ToLower(p.Disposition)
 	}
+	if cid := stripAngle(p.ID); cid != "" {
+		obj["cid"] = cid
+	}
 	if p.isMultipart() && len(p.Children) > 0 {
 		subs := make([]any, 0, len(p.Children))
 		for _, c := range p.Children {

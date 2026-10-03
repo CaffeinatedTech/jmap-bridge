@@ -79,16 +79,17 @@ func (h *Handler) identityGet(ctx context.Context, acct *Account, raw json.RawMe
 	}
 	id := acct.Identity
 	list := []map[string]any{filterProps(id.object(), args.Properties)}
-	resp := map[string]any{
-		"accountId": acct.ID,
-		"state":     identityState(id),
-		"list":      list,
-	}
+	notFound := []string{}
 	if args.IDs != nil && !containsString(*args.IDs, id.ID) {
 		// ids was given and does not name this identity: the list is
 		// empty and the requested id is reported as not found.
-		resp["list"] = []map[string]any{}
-		resp["notFound"] = *args.IDs
+		list = []map[string]any{}
+		notFound = *args.IDs
 	}
-	return resp, nil
+	return map[string]any{
+		"accountId": acct.ID,
+		"state":     identityState(id),
+		"list":      list,
+		"notFound":  notFound,
+	}, nil
 }

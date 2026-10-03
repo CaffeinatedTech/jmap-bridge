@@ -372,6 +372,7 @@ Email/query with a text/filter component
 | remove `mailboxIds/<id>` | `UID MOVE` to target, or `COPY` + `STORE \Deleted` + `UID EXPUNGE` (UIDPLUS) fallback |
 | destroy | `STORE \Deleted` + `UID EXPUNGE` (UIDPLUS) in **every** folder holding the message — destroy is permanent (RFC 8621 §4.6); a client files to Trash with a `mailboxIds` patch instead |
 | create (draft) | `APPEND` to Drafts with `\Draft \Seen` + `$draft` |
+| import raw message (FR-M.19) | `APPEND` the blob's bytes to the first target mailbox, then file the remaining `mailboxIds` through the membership path (Gmail label writes included) — the message is never copied per mailbox by hand |
 | Gmail label change | `UID STORE +X-GM-LABELS (…)` where supported (avoids copy storms) |
 
 Local commit + modseq bump + SSE **only after** the IMAP command returns OK; on
@@ -575,24 +576,57 @@ milestones but deliberately carries no completion state). Rules:
 | **M4** | Gmail profile: OAuth2 bootstrap, XOAUTH2 IMAP/SMTP, `X-GM-LABELS`↔mailboxes, All Mail/archive, `X-GM-THRID`, CONDSTORE tier validation, rate limits | live Gmail: folders+labels both ways, compose/send, archive from jmap-tui, no rate-limit warnings | FR-A.5–.10, FR-S.10, FR-S.12, FR-M.18 | ✅ done 2026-10-01 (live Gmail `you@gmail.com`, `dev/gate/m4gate.py` once, **14/14 checks, no `[THROTTLED]`**, every claim re-read from an independent `imaplib` client: a label applied in Gmail appears in the bridge; archiving from the bridge drops INBOX membership and the undo restores it; compose/send over XOAUTH2 SMTP delivers exactly one copy and files exactly one Sent copy. The gate caught and fixed **five real Gmail bugs**: a label write sourced from the folder being removed is accepted and silently ignored (archive now sources from All Mail); a fresh message with no cached All Mail copy is addressed there by a Message-ID search (`imapdrv.FindUID`); filing a draft into Sent tombstoned it (non-implicit label adds now commit locally); Gmail's draft label is `\Draft`, not `\Drafts`; and Gmail delays an SMTP submission whose Message-ID matches the upstream draft, so the submission path expunges that draft before SMTP and restores it on failure. Fixture coverage: per-folder UIDs in `internal/sync/gmail_test.go`, `TestGmailArchiveSearchesAllMailWhenUncached`, `TestGmailSendExpungesDraftBeforeSMTP`) |
 | **M5** | FTS5 + search-driven backfill, filter/sort/anchor/collapseThreads correctness, `PREVIEW`/partial-fetch, COMPRESS, 100k soak | jmap-tui live search cases green; cold browse of a 100k mailbox stays responsive; soak within NFR bounds | FR-X.1–.8, FR-S.11, NFR-1, NFR-2, NFR-8 | ✅ done 2026-09-30 (dev Dovecot 100k-message corpus, `test/live TestLiveSoak100k`: warm `Email/query` p95 browse 31.1 ms / collapseThreads 32.0 ms / body-token text 82.8 ms, all < NFR-1's 150 ms; hydration 133.4 bodies/s (≥ 15); idle RSS 29.0 MB (< 150 MB, NFR-8); 3 engine-reconnect cycles flat at the 3-goroutine baseline; cold reopen browse 37.7 ms / collapse 32.6 ms — and the same full workload under the race detector with **zero data races** (the soak relaxes its NFR budgets only under `-race`, which it also enforces verbatim otherwise); jmap-tui cross-client gate `TestLiveSearchVerification` green over loopback: 3000-message text search first page 505 ms, from/subject/hasKeyword/after/before/all-mailbox filters, engine `SearchOpen`/`SearchClose`, and both substring fallbacks (partial-word + fielded-subject scan matched 3000/3000); FTS5 index at ingest + hydration, tombstones, search-driven backfill and batched hydration covered by `internal/store/fts_test.go`, `internal/sync/backfill_search_test.go` and `internal/imapdrv/fetchbodies_test.go`) |
 | **M6** | CardDAV §8: discovery, sync-collection, PUT/DELETE, vCard↔JSContact, photo blobs, capability gating | jmap-tui `contacts_live_test` suite green against a real CardDAV server; create/edit/delete contact round-trips | FR-P.1–.13 | ✅ done 2026-09-30 (loopback Radicale 3.8.1 as the real server — `dev/gate/radicale-start.sh`: jmap-tui `TestLiveContactsGate` green over loopback (capability + lazy load, create → SSE ContactCard push < 8 s → rename → destroy, card proven gone from the server); bridge-side `test/live TestLiveContactsGate` green against the same Rig (create/update/move/destroy each re-read from an **independent DAV session**, RFC 6578 sync-token replay + 412/refetch write guard); the gate caught and fixed a real bug — an update re-minted the card UID (Radicale answered 409 no-uid-conflict), now the uid is canonicalized into the stored JSContact on create and reused on update. Fixture-tier coverage: `internal/dav` (sync/getctag/bare tiers, well-known redirect, conditional PUT/DELETE, multiget/GET), `test/fixturecarddav`, `internal/convert` golden pairs (v3+v4, groups, inline photos, malformed), `internal/store/contacts_test.go` (bookkeeping never moves states, cascade tombstones), `internal/jmapapi` set/patch/error-mapping tests, `internal/httpapi` FR-P.3 session gating test)
-| **M7** | Packaging: multi-account paths, credential encryption, metrics/health, UIDVALIDITY recovery drill, Docker image + k8s manifests, README deployment verified, `JMAP-TestSuite` run | fresh `docker run` + `kubectl` install works end-to-end from the docs; conformance suite passing; all gates green | FR-J.9–.10, FR-D.2–.12, NFR-3–.7, NFR-9–.10 | pending |
+| **M7** | Packaging: multi-account paths, credential encryption, metrics/health (`[metrics]` + `/metrics`), UIDVALIDITY recovery drill, Docker image + k8s manifests, README deployment verified, `JMAP-TestSuite` run | fresh `docker run` + `kubectl` install works end-to-end from the docs; JMAP-TestSuite subset for the implemented surface green (deliberate gaps enumerated below); all gates green | FR-M.19, FR-J.9–.10, FR-D.2–.12, NFR-3–.7, NFR-9–.10 | ✅ done 2026-10-03 (live k3s `v0.1.5` at https://jmap-bridge.geekify.me — cPanel IMAP + Gmail OAuth2 accounts, jmap-tui connected, `/healthz`=ok `/readyz`=ready; `JMAP-TestSuite` vs loopback dev Dovecot: **208/262 required pass**, 28 skip, 54 required fail — **all** in the documented out-of-scope gaps below, zero in-scope failures; `[metrics]` `/metrics` demonstrated `200` enabled vs `404` disabled; FR-D.12 redaction tests; FR-S.6 UIDVALIDITY drill; all local gates green: build, vet, gofumpt, golangci-lint 0 issues, `go test -race`, version smoke) |
+| **M8** | Gmail API track (D-API-8, `GMAIL_API_PLAN.md`): `internal/mailbackend` seam + `imapdrv` adapter, behaviour-preserving | every existing test green; jmap-tui live suite over loopback still green; go-imap types still confined to `imapdrv` | (refactor) | pending |
+| **M9** | Gmail API client on the official `google.golang.org/api/gmail/v1` (pinned) + hand-rolled batch/quota/errors + `test/fixturegmail` + golden pairs | fixture-backed client tests incl. quota/backoff and batch correlation; cost table verified | (groundwork; see `GMAIL_API_PLAN.md`) | pending |
+| **M10** | `backend`/`[accounts.gmail_api]` config + validation; API discovery, metadata backfill, history incremental, hydration, `/changes` | jmap-tui browses a fixture Gmail account in API mode; live read-only Gmail gate | FR-A.13, FR-S.13, FR-M.1–.8 (new; with code) | pending |
+| **M11** | API writes: `Email/set`, `destroy`, drafts, `Mailbox/set` (refusing `onDestroyRemoveEmails=true`) | live write gate on a dedicated throwaway Gmail account, aborting on first `429` | FR-M.9–.13, FR-M.20 (new; with code) | pending |
+| **M12** | API submission §8.1 via Gmail API | compose → send → exactly one Sent copy + sink delivery; ambiguous-send reconciliation proven | FR-M.14–.17 | pending |
+| **M13** | Pub/Sub push: `users.watch` + renewal + stop, `/gmail/push/{account}`, `idtoken` verification, `watch="poll"` fallback | live foreign change ≤ 2 s through push; watch-renewal expiry simulation; forged push rejected; poll fallback works | FR-S.14, NFR-2 (new; with code) | pending |
+| **M14** | API mode docs + re-run M7 packaging/conformance with API mode included | README install works end to end; `JMAP-TestSuite` subset green incl. API mode; all gates green | FR-D.14, NFR-3–.7 (new; with code) | pending |
+
+**M8–M14 are the v0.1 Gmail API track** (D-API-8, `GMAIL_API_PLAN.md`). At the
+user's direction (2026-10-03) M8 begins in parallel with M7's remaining
+verification, because M7 is near-complete; M7's gate is still owed, the v0.1 tag
+waits for both tracks, and M14 re-runs M7's packaging/conformance with API mode
+included. FRs marked "new; with code" are added to `REQUIREMENTS.md` in the same
+commit as the code that implements them (golden rule 7).
 
 **Verification assets**: jmap-tui's live integration suite pointed at the bridge
 (`JMAP_BRIDGE_TEST_*`); its `mockjmap`-derived fixtures seeded M0; Fastmail's
-`JMAP-TestSuite` (Perl) as the external conformance gate at M7.
+`JMAP-TestSuite` ([`jmapio/jmap-test-suite`](https://github.com/jmapio/jmap-test-suite),
+Node/TypeScript) as the external conformance gate at M7.
 
 **Known conformance gaps for that M7 run** (deliberate, and rejected rather
-than faked): `Mailbox/set` accepts `name`/`parentId` and, since M5, `sortOrder`
-**on create** — the requested order is stored in the cache and served until a
-later discovery pass re-derives it (jmap-tui seeds fixtures this way). `role`
-and `isSubscribed` on create, and `sortOrder` on update, are still refused with
-`invalidProperties`, because those values are re-derived from the server on
-every discovery pass and a value we cannot keep must not be acknowledged; and
-`/get` ignores property names it does not model instead of answering
-`invalidArguments`.
-(Email/get's top-level `blobId` landed with M3: it names the raw copy the
-bridge holds — a message it built or fetched — and is absent until it does,
-because bodies stay lazy.)
+than faked). The external `JMAP-TestSuite` ran 2026-10-03 against the loopback
+dev Dovecot rig: **208/262 required tests pass, 28 skip, 54 required fail**, and
+every failure is one of the deliberate gaps below — no in-scope failure remains.
+
+*Methods not in v0.1* (roadmap, §15): `Email/parse` (6), `Email/queryChanges`
+(5), `Mailbox/queryChanges` (4), `Email/copy` (1), `Blob/copy` (1),
+`PushSubscription/get|set` (7 — SSE `eventSourceUrl`, RFC 8620 §7.3, is the push
+transport, not the §7.2 PushSubscription surface), `SearchSnippet/get` (6),
+`Thread/changes` (4).
+
+*Sub-features beyond the declared FR subset inside implemented methods*:
+- `Email/get` header property forms (`header:Name:asRaw|asText|asAddresses|`
+  `asGroupedAddresses|asMessageIds|asDate|asURLs`, case-insensitive) — 10; FR-M.4
+  models the header subset, not the RFC 8621 §4.1.2 `as*` projections.
+- `Email/query` filters outside FR-M.5 (`header`, `minSize`/`maxSize`,
+  `notKeyword`, `some`/`noneInThreadHaveKeyword`, and the `AND`/`OR`/`NOT`
+  filter operators) — 7.
+- `Email/query` sorts outside FR-M.5 (`to`, `sentAt`, `hasKeyword`) — 3.
+- `Mailbox/query` `hasAnyRole` (FR-M.2 filters on `parentId`/`role`) — 1.
+- `Mailbox/set` `sortOrder` on update — re-derived from the server at discovery
+  and refused, so the requested value is never acknowledged — 1.
+
+Earlier deliberate gaps still stand: `Mailbox/set` accepts `name`/`parentId` and
+`sortOrder` **on create** (stored in the cache until a discovery pass re-derives
+it, the shape jmap-tui seeds fixtures with); `role`/`isSubscribed` on create and
+`sortOrder` on update are refused with `invalidProperties`; `/get` ignores
+property names it does not model instead of answering `invalidArguments`; and
+`Email/get`'s top-level `blobId` names the raw copy the bridge holds and is
+absent until it does, because bodies stay lazy.
 
 ---
 
@@ -656,9 +690,18 @@ Normative for v0.1 (verify status before relying on a draft):
   enabled, endpoint `apidata.googleusercontent.com/caldav/v2`; the legacy
   `www.google.com/calendar/dav` is dead). Dovecot provides no CalDAV → same
   capability-gating pattern as contacts.
-- `Email/queryChanges`, `Email/copy`, `ContactCard/query`, `AddressBook/set`,
-  `Identity/set`, `EmailSubmission/get|query`, `Thread/changes`.
-- Microsoft 365 OAuth2 profile (basic auth dies December 2026).
+- `Email/queryChanges`, `Email/copy`, `Email/parse`, `ContactCard/query`,
+  `AddressBook/set`, `Identity/set`, `EmailSubmission/get|query`, `Thread/changes`,
+  `SearchSnippet/get`, and `PushSubscription/get|set` (RFC 8620 §7.2; SSE
+  `eventSourceUrl` covers push today).
+- The conformance surface M7 deliberately excludes, named in §12: the
+  `Email/get` `header:Name:as*` property forms, the `Email/query` `header`/
+  `minSize`/`maxSize`/`notKeyword`/`some|noneInThreadHaveKeyword` filters and
+  `AND`/`OR`/`NOT` operators, the `to`/`sentAt`/`hasKeyword` sorts,
+  `Mailbox/query` `hasAnyRole`, and `Mailbox/set` `sortOrder` on update.
+- **Microsoft Graph backend** behind the `internal/mailbackend` seam (D-API-2/4;
+  M365 basic auth dies December 2026): a second implementation of the interface
+  the Gmail API mode introduced, not a new engine.
 - WebSocket push (RFC 8620 §7.6) alongside SSE.
 - **Backfill steering**: order the sync pass by user intent rather than Go's map
   order (`engine.go` `doPass`) — INBOX first, then the folder a client is actively

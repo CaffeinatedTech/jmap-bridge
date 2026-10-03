@@ -293,3 +293,55 @@ func TestStripBcc(t *testing.T) {
 		t.Errorf("StripBcc changed a message without Bcc: %q", got)
 	}
 }
+
+// TestStructureCarriesContentID pins RFC 8621 §4.1.4: an inline part's
+// Content-ID travels as the body part's cid, with the angle brackets
+// stripped.
+func TestStructureCarriesContentID(t *testing.T) {
+	raw := "MIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/related; boundary=\"b\"\r\n" +
+		"\r\n" +
+		"--b\r\n" +
+		"Content-Type: text/html; charset=utf-8\r\n" +
+		"\r\n" +
+		"<html><img src=\"cid:image1@example.test\"></html>\r\n" +
+		"--b\r\n" +
+		"Content-Type: image/jpeg\r\n" +
+		"Content-ID: <image1@example.test>\r\n" +
+		"Content-Transfer-Encoding: base64\r\n" +
+		"\r\n" +
+		"/9j/4AAQ\r\n" +
+		"--b--\r\n"
+
+	treeJSON, err := structureOfRaw([]byte(raw))
+	if err != nil {
+		t.Fatalf("structureOfRaw: %v", err)
+	}
+	var tree map[string]any
+	if err := json.Unmarshal([]byte(treeJSON), &tree); err != nil {
+		t.Fatal(err)
+	}
+	image := findPartByType(tree, "image/jpeg")
+	if image == nil {
+		t.Fatalf("no image part in %s", treeJSON)
+	}
+	if got := image["cid"]; got != "image1@example.test" {
+		t.Errorf("cid = %v, want image1@example.test", got)
+	}
+}
+
+func findPartByType(part map[string]any, mediaType string) map[string]any {
+	if t, _ := part["type"].(string); strings.Contains(t, mediaType) {
+		return part
+	}
+	if subs, ok := part["subParts"].([]any); ok {
+		for _, s := range subs {
+			if child, ok := s.(map[string]any); ok {
+				if found := findPartByType(child, mediaType); found != nil {
+					return found
+				}
+			}
+		}
+	}
+	return nil
+}

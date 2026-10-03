@@ -24,6 +24,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/httpapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/metrics"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/oauth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/push"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
@@ -70,6 +71,10 @@ func run(args []string) error {
 	log := newLogger(cfg.LogLevel)
 	tokens := auth.NewTokens(tokenMap(cfg))
 	hub := push.New()
+	// The FR-D.6 registry is built before the engines so they can
+	// register their gauges; whether it is exposed is gated by
+	// cfg.Metrics.Enabled at the HTTP wrapper below.
+	reg := metrics.New()
 
 	// Credential encryption at rest (FR-A.8): with a key configured the
 	// OAuth2 tokens are sealed before they land in SQLite; without one
@@ -132,7 +137,7 @@ func run(args []string) error {
 			log.Warn("account has no [imap] block; serving cache only", "account", a.ID)
 			continue
 		}
-		eng := sync.New(syncConfig(cfg, a, managers[a.ID]), st, log)
+		eng := sync.New(syncConfig(cfg, a, managers[a.ID], reg), st, log)
 		backends[a.ID] = eng
 		engines[a.ID] = eng
 		go eng.Run(ctx)
@@ -144,12 +149,40 @@ func run(args []string) error {
 
 	go purgeLoop(ctx, st, log)
 
+	api := httpapi.New(cfg, tokens, st, backends, hub, log, managers,
+		kick(engines, log), contactsReady(engines), httpapi.WithMetrics(reg))
+	// The SSE gauge needs the server, so it is registered after the
+	// handler exists: the total is one series, each account another
+	// (FR-D.6).
+	reg.GaugeFunc("jmap_bridge_sse_clients",
+		"Open JMAP EventSource connections, total and by account.",
+		func() []metrics.Sample {
+			total, perAccount := api.SSECounts()
+			samples := make([]metrics.Sample, 0, len(perAccount)+1)
+			samples = append(samples, metrics.Sample{
+				Labels: []metrics.Label{{Name: "account", Value: ""}},
+				Value:  float64(total),
+			})
+			for account, n := range perAccount {
+				samples = append(samples, metrics.Sample{
+					Labels: []metrics.Label{{Name: "account", Value: account}},
+					Value:  float64(n),
+				})
+			}
+			return samples
+		})
+
+	handler := withHealth(api, readiness(engines, cfg.Accounts))
+	if cfg.Metrics.Enabled {
+		// Opt-in (FR-D.6): when off the route is never mounted, so
+		// /metrics 404s exactly like any unknown path and cannot be
+		// probed.
+		handler = withMetrics(handler, reg)
+	}
+
 	srv := &http.Server{
-		Addr: cfg.Listen,
-		Handler: withHealth(
-			httpapi.New(cfg, tokens, st, backends, hub, log, managers,
-				kick(engines, log), contactsReady(engines)),
-			readiness(engines, cfg.Accounts)),
+		Addr:              cfg.Listen,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		// ReadTimeout also covers the upload body, so it is generous
 		// enough for a 64 MiB attachment on a slow link while still
@@ -193,7 +226,7 @@ func run(args []string) error {
 // SMTP: it can be read from and written to, but not sent from (FR-J.5).
 // The account's OAuth2 manager, when one exists, is the token provider
 // for both IMAP and SMTP XOAUTH2 (FR-A.7).
-func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager) sync.Config {
+func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager, reg *metrics.Registry) sync.Config {
 	tls := true
 	if a.IMAP.TLS != nil {
 		tls = *a.IMAP.TLS
@@ -212,6 +245,7 @@ func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager) sync.
 		PrefetchWindow: cfg.Sync.PrefetchWindow.Std(),
 		Concurrency:    cfg.Search.Concurrency,
 		SearchBackfill: cfg.Search.Backfill,
+		Metrics:        reg,
 	}
 	if a.IMAP.Auth == "oauth2" && mgr != nil {
 		out.IMAP.Token = mgr.AccessToken
@@ -333,6 +367,20 @@ func withHealth(next http.Handler, ready func() bool) http.Handler {
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprint(w, "ready\n")
+	})
+	mux.Handle("/", next)
+	return mux
+}
+
+// withMetrics mounts the opt-in FR-D.6 endpoint ahead of the rest of the
+// handler. It is installed only when metrics are enabled, so a disabled
+// bridge answers /metrics with the same 404 an unknown path gets. The
+// endpoint shares the configured origin and listener (golden rule 3).
+func withMetrics(next http.Handler, reg *metrics.Registry) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = reg.WriteTo(w)
 	})
 	mux.Handle("/", next)
 	return mux

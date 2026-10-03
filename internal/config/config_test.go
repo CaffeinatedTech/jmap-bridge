@@ -285,6 +285,20 @@ func TestDurationSyntax(t *testing.T) {
 	}
 }
 
+// FR-D.6: the metrics endpoint is opt-in. It defaults off, decodes
+// [metrics] enabled, and strict decoding still rejects an unknown key in
+// the block.
+func TestMetricsBlock(t *testing.T) {
+	if cfg := mustLoad(t, minimalLoopback); cfg.Metrics.Enabled {
+		t.Error("metrics.enabled default = true, want false")
+	}
+	cfg := mustLoad(t, minimalLoopback+"\n[metrics]\nenabled = true\n")
+	if !cfg.Metrics.Enabled {
+		t.Error("metrics.enabled = false, want true")
+	}
+	wantErrKey(t, minimalLoopback+"\n[metrics]\nfoo = true\n", "metrics.foo")
+}
+
 func TestBadDurationNamesKey(t *testing.T) {
 	toml := strings.Replace(minimalLoopback, "token = \"t0ken-0123456789abcdef0123456789\"", "token = \"t0ken-0123456789abcdef0123456789\"\n\n[sync]\ninterval = \"soon\"", 1)
 	_, err := load(t, toml)

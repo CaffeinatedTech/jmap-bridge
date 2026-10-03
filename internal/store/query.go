@@ -15,8 +15,8 @@ import (
 // live-membership index (inMailbox → email_mailbox, dates →
 // emails.received_at, keyword → the keywords JSON) or the FTS5 search
 // index (text/from/to/subject → email_search, FR-X.2); the ordered id
-// list is collapsed and paged exactly like the M0 fixture (anchor
-// clamps to the end, collapseThreads keeps the first exemplar in sort
+// list is collapsed and paged like the M0 fixture (an unknown anchor is
+// anchorNotFound, collapseThreads keeps the first exemplar in sort
 // order), and the counter folds the Email state with the search-index
 // state so queryState moves when — and only when — results may have
 // changed, hydration included (FR-X.7).
@@ -263,12 +263,26 @@ func (s *Store) QueryEmails(ctx context.Context, account string, q jmapapi.Email
 	for i, h := range hits {
 		ids[i] = h.id
 	}
+	if q.Anchor != "" && !containsID(ids, q.Anchor) {
+		// RFC 8620 §5.5: an anchor that is not among the results is an
+		// anchorNotFound error, not a silent clamp to the end.
+		return nil, 0, 0, "", jmapapi.ErrAnchorNotFound
+	}
 	position, window := paginateIDs(ids, q.Anchor, q.AnchorOffset, q.Position, q.Limit)
 	s.log.Debug("store: query",
 		"mailbox", q.Filter.InMailbox, "collapse", q.CollapseThreads,
 		"position", q.Position, "limit", q.Limit,
 		"hits", len(ids), "window", len(window))
 	return window, position, len(ids), counter, nil
+}
+
+func containsID(ids []string, want string) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
 }
 
 // sortClause renders every requested comparator (RFC 8620 §4.4: the
@@ -303,8 +317,10 @@ func sortClause(sorts []jmapapi.EmailSort) string {
 	return strings.Join(parts, ", ") + ", e.id ASC"
 }
 
-// paginateIDs mirrors the M0 fixture's window maths, anchor included
-// (jmap-tui's window repair relies on the clamp-to-end behaviour).
+// paginateIDs applies anchor/anchorOffset (which replace position) and
+// limit to an ordered id list. The caller has already rejected an anchor
+// that is not in the results (ErrAnchorNotFound); a negative position
+// counts from the end of the list (RFC 8620 §5.5).
 func paginateIDs(ids []string, anchor string, anchorOffset, position, limit int) (int, []string) {
 	if anchor != "" {
 		position = len(ids)
@@ -314,6 +330,8 @@ func paginateIDs(ids []string, anchor string, anchorOffset, position, limit int)
 				break
 			}
 		}
+	} else if position < 0 {
+		position = len(ids) + position
 	}
 	if position < 0 {
 		position = 0
@@ -625,7 +643,7 @@ func (s *Store) queryEmailsCoveredPage(ctx context.Context, q jmapapi.EmailQuery
 			 WHERE em.mailbox_uid = ? AND em.email_id = ? AND em.removed_modseq = 0`,
 			mailboxUID, q.Anchor).Scan(&recv)
 		if err == sql.ErrNoRows {
-			position = total // anchor gone: clamp to the end, as paginateIDs does
+			return nil, 0, 0, "", jmapapi.ErrAnchorNotFound
 		} else if err != nil {
 			return nil, 0, 0, "", fmt.Errorf("store: covered anchor: %w", err)
 		} else {
@@ -646,6 +664,8 @@ func (s *Store) queryEmailsCoveredPage(ctx context.Context, q jmapapi.EmailQuery
 			}
 			position = before + q.AnchorOffset
 		}
+	} else if position < 0 {
+		position = total + position
 	}
 	if position < 0 {
 		position = 0
@@ -741,10 +761,11 @@ func (s *Store) queryEmailsCollapsedPage(ctx context.Context, q jmapapi.EmailQue
 			return nil, 0, 0, "", err
 		}
 		if found < 0 {
-			position = total // anchor gone: clamp to the end, as paginateIDs does
-		} else {
-			position = found + q.AnchorOffset
+			return nil, 0, 0, "", jmapapi.ErrAnchorNotFound
 		}
+		position = found + q.AnchorOffset
+	} else if position < 0 {
+		position = total + position
 	}
 	if position < 0 {
 		position = 0

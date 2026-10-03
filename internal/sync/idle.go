@@ -16,6 +16,7 @@ import (
 func (e *Engine) idleLoop(ctx context.Context) {
 	backoffDur := time.Second
 	for ctx.Err() == nil {
+		e.countReconnect("idle")
 		conn, err := imapdrv.Dial(ctx, e.cfg.IMAP)
 		if err != nil {
 			e.log.Warn("sync: idle dial failed", "err", err)

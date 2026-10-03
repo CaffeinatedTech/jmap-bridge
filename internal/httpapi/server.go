@@ -18,6 +18,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/auth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/config"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/metrics"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/oauth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/push"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/ratelimit"
@@ -66,6 +67,23 @@ type Server struct {
 	sseTotal      int
 	maxSSEPerAcct int
 	maxSSETotal   int
+
+	// metrics, when non-nil, is handed to the JMAP dispatcher (FR-D.6).
+	metrics *metrics.Registry
+}
+
+// Option configures optional Server collaborators.
+type Option func(*Server)
+
+// WithMetrics attaches the FR-D.6 registry: the JMAP method counters are
+// wired into the dispatcher and the registry is kept so main can register
+// the SSE gauge. A nil registry leaves metrics off.
+func WithMetrics(reg *metrics.Registry) Option {
+	return func(s *Server) {
+		if reg != nil {
+			s.metrics = reg
+		}
+	}
 }
 
 // New wires a Server: routing, auth, dispatch and push. store serves
@@ -77,7 +95,7 @@ type Server struct {
 func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
 	backends map[string]jmapapi.Backend, hub *push.Hub, log *slog.Logger,
 	oauth map[string]*oauth.Manager, kick func(account string),
-	contactsReady func(account string) bool,
+	contactsReady func(account string) bool, opts ...Option,
 ) *Server {
 	s := &Server{
 		cfg:           cfg,
@@ -85,13 +103,20 @@ func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
 		store:         store,
 		backends:      backends,
 		hub:           hub,
-		jmap:          jmapapi.NewHandler(store),
 		log:           log,
 		mux:           http.NewServeMux(),
 		oauth:         oauth,
 		kick:          kick,
 		contactsReady: contactsReady,
+		// Allocated regardless of rate limiting: acquireSSE writes into
+		// it on every stream, and a nil map would panic when rate
+		// limiting is disabled (SSE caps are then simply unbounded).
+		ssePerAcct: map[string]int{},
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	s.jmap = jmapapi.NewHandler(store, jmapapi.WithMetrics(s.metrics))
 	if s.log == nil {
 		// Tests build Servers without logging; the error paths must not
 		// segfault for it.
@@ -230,6 +255,19 @@ func (s *Server) releaseSSE(account string) {
 	if s.sseTotal > 0 {
 		s.sseTotal--
 	}
+}
+
+// SSECounts reports the live EventSource connections (FR-D.6): the total
+// and a copy of the per-account counts, so the caller can read them
+// without holding sseMu.
+func (s *Server) SSECounts() (total int, perAccount map[string]int) {
+	s.sseMu.Lock()
+	defer s.sseMu.Unlock()
+	perAccount = make(map[string]int, len(s.ssePerAcct))
+	for account, n := range s.ssePerAcct {
+		perAccount[account] = n
+	}
+	return s.sseTotal, perAccount
 }
 
 // tooManyRequests answers a refused request with Retry-After and the
@@ -384,6 +422,9 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		"maxCallsInRequest":     256,
 		"maxObjectsInGet":       512,
 		"maxObjectsInSet":       512,
+		// RFC 8620 §2 requires the property; the bridge imposes no
+		// collation of its own, so an empty array is the honest answer.
+		"collationAlgorithms": []string{},
 	}
 	session := map[string]any{
 		"capabilities": capabilities,
@@ -391,6 +432,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 			acct.ID: map[string]any{
 				"name":                name,
 				"isPersonal":          true,
+				"isReadOnly":          false,
 				"accountCapabilities": accountCapabilities,
 			},
 		},

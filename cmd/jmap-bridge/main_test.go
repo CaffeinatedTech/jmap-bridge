@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CaffeinatedTech/jmap-bridge/internal/metrics"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/sync"
 )
 
@@ -57,5 +58,45 @@ func TestReadinessWithoutEngines(t *testing.T) {
 	// A bridge with no IMAP engines (cache-only) has nothing to wait for.
 	if got := readiness(map[string]*sync.Engine{}, nil)(); !got {
 		t.Fatal("readiness with no engines should be true")
+	}
+}
+
+// The FR-D.6 endpoint is served only when wired in; any other path falls
+// through to the JMAP surface untouched.
+func TestWithMetrics(t *testing.T) {
+	reg := metrics.New()
+	reg.Counter("jmap_bridge_method_calls_total", "JMAP method calls.", "account", "method").
+		With("personal", "Email/get").Inc()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = io.WriteString(w, "jmap")
+	})
+	srv := httptest.NewServer(withMetrics(next, reg))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("get /metrics: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/metrics status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/plain; version=0.0.4; charset=utf-8" {
+		t.Fatalf("/metrics Content-Type = %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body),
+		`jmap_bridge_method_calls_total{account="personal",method="Email/get"} 1`) {
+		t.Fatalf("/metrics body missing series:\n%s", body)
+	}
+
+	passthrough, err := http.Get(srv.URL + "/personal/jmap")
+	if err != nil {
+		t.Fatalf("get passthrough: %v", err)
+	}
+	defer func() { _ = passthrough.Body.Close() }()
+	if passthrough.StatusCode != http.StatusTeapot {
+		t.Fatalf("passthrough status = %d, want 418", passthrough.StatusCode)
 	}
 }

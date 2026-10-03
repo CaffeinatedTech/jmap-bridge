@@ -32,6 +32,11 @@ type Backend interface {
 	// records it (FR-M.11).
 	CreateDraft(ctx context.Context, account string, spec DraftSpec) (*CreatedEmail, error)
 
+	// ImportEmail APPENDs raw RFC 5322 bytes already held in the blob
+	// store and records them (RFC 8621 §4.8). The first mailbox is the
+	// append target; any others are filed through the membership path.
+	ImportEmail(ctx context.Context, account string, spec ImportSpec) (*CreatedEmail, error)
+
 	// SubmitEmail relays one EmailSubmission/create over SMTP and then
 	// files the sent message, never the other way round (FR-M.15,
 	// PLAN §7.2). It is the only place the bridge talks SMTP.
@@ -200,6 +205,16 @@ type DraftSpec struct {
 	Parts                      []DraftPart
 	InReplyTo, References      []string
 	ReceivedAt                 time.Time
+}
+
+// ImportSpec is one validated Email/import creation (RFC 8621 §4.8):
+// raw RFC 5322 bytes already in the blob store, filed into one or more
+// mailboxes with optional keywords and an optional receivedAt.
+type ImportSpec struct {
+	BlobID     string
+	MailboxIDs []string
+	Keywords   map[string]bool
+	ReceivedAt time.Time
 }
 
 // CreatedEmail is the created object RFC 8621 §4.6 requires in

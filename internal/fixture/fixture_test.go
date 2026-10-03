@@ -2,6 +2,7 @@ package fixture
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -163,11 +164,12 @@ func TestQueryPositionLimitAnchor(t *testing.T) {
 		t.Errorf("anchored window = %v", anchored)
 	}
 
-	// A vanished anchor clamps to the end rather than failing (the
-	// contract jmap-tui's window repair expects).
-	stale, _, pos := mustQuery(t, s, jmapapi.EmailQuery{Anchor: "ghost", Limit: 3})
-	if pos != 10 || len(stale) != 0 {
-		t.Errorf("stale anchor: pos=%d ids=%v, want end of list", pos, stale)
+	// A vanished anchor is an anchorNotFound error (RFC 8620 §5.5),
+	// not a clamp to the end.
+	_, _, _, _, err := s.QueryEmails(context.Background(), "personal",
+		jmapapi.EmailQuery{Anchor: "ghost", Limit: 3})
+	if !errors.Is(err, jmapapi.ErrAnchorNotFound) {
+		t.Errorf("stale anchor error = %v, want ErrAnchorNotFound", err)
 	}
 }
 

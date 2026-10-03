@@ -555,7 +555,24 @@ func (h *Handler) mailboxCreated(ctx context.Context, acct *Account, id string) 
 	if err != nil || len(mbs) == 0 {
 		return map[string]any{"id": id}
 	}
-	return mailboxObject(mbs[0])
+	return mailboxObject(mbs[0], accountOffers(acct, SubmissionURN))
+}
+
+// resolveMailboxRefs resolves each "#handle" mailbox id against an
+// earlier creation in the same request (RFC 8620 §5.3): a draft created
+// after its target mailbox may name it by creation id. A plain id, or a
+// reference the batch cannot resolve, travels unchanged for the backend
+// to validate.
+func resolveMailboxRefs(ctx context.Context, ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if resolved, ok := resolveCreationRef(ctx, id); ok {
+			out = append(out, resolved)
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 // backendMethodErr converts a create/update failure into a methodErr
@@ -637,7 +654,7 @@ func (h *Handler) createDraft(ctx context.Context, acct *Account, raw json.RawMe
 		return nil, merr
 	}
 	spec := DraftSpec{
-		MailboxIDs: trueKeys(d.MailboxIDs),
+		MailboxIDs: resolveMailboxRefs(ctx, trueKeys(d.MailboxIDs)),
 		From:       d.From, To: d.To, Cc: d.Cc, Bcc: d.Bcc, ReplyTo: d.ReplyTo,
 		Subject:    d.Subject,
 		Keywords:   d.Keywords,

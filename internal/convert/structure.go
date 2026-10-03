@@ -59,7 +59,16 @@ func structureOf(ent *message.Entity, section string) map[string]any {
 	if disposition != "" {
 		obj["disposition"] = strings.ToLower(disposition)
 	}
+	if cid := stripAngle(ent.Header.Get("Content-Id")); cid != "" {
+		obj["cid"] = cid
+	}
 	return obj
+}
+
+// stripAngle removes the angle brackets RFC 5322 puts around a
+// Content-ID value; JMAP carries the bare content id (RFC 8621 §4.1.4).
+func stripAngle(s string) string {
+	return strings.Trim(strings.TrimSpace(s), "<>")
 }
 
 // structureOfRaw parses raw bytes and renders that tree as JSON.

@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+
+	"github.com/CaffeinatedTech/jmap-bridge/internal/metrics"
 )
 
 // Request limits mirrored into the core capability object (RFC 8620 §2).
@@ -103,11 +106,36 @@ func Capabilities() []string {
 // Handler dispatches JMAP batches against a Store.
 type Handler struct {
 	store Store
+	// methodCalls and methodErrors are nil unless WithMetrics was given;
+	// the dispatcher checks before every use so a metrics-free Handler
+	// pays nothing (FR-D.6).
+	methodCalls  *metrics.CounterVec
+	methodErrors *metrics.CounterVec
+}
+
+// Option configures an optional Handler collaborator.
+type Option func(*Handler)
+
+// WithMetrics attaches a registry for the FR-D.6 method counters. A nil
+// registry leaves metrics off.
+func WithMetrics(reg *metrics.Registry) Option {
+	return func(h *Handler) {
+		if reg != nil {
+			h.methodCalls = reg.Counter("jmap_bridge_method_calls_total",
+				"JMAP method invocations, by account and method.", "account", "method")
+			h.methodErrors = reg.Counter("jmap_bridge_method_errors_total",
+				"JMAP method errors, by account, method and error type.", "account", "method", "type")
+		}
+	}
 }
 
 // NewHandler returns a Handler backed by store.
-func NewHandler(store Store) *Handler {
-	return &Handler{store: store}
+func NewHandler(store Store, opts ...Option) *Handler {
+	h := &Handler{store: store}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // request is the decoded Request object (RFC 8620 §3.3). Pointers
@@ -176,6 +204,11 @@ func (h *Handler) Dispatch(ctx context.Context, acct *Account, body []byte) (int
 	}
 
 	hdr := &dispatcher{h: h, acct: acct}
+	using := make(map[string]bool, len(*req.Using))
+	for _, urn := range *req.Using {
+		using[urn] = true
+	}
+	hdr.using = using
 	for _, c := range calls {
 		hdr.dispatch(withCallScope(ctx, hdr, c.CallID), c)
 	}
@@ -235,6 +268,38 @@ type dispatcher struct {
 	out   []invocation
 	names map[string]string // callId → method name
 	args  map[string]any    // callId → decoded result object
+	// using is the request's declared capability set: a method whose
+	// capability is absent is unknownMethod (RFC 8620 §3.3).
+	using map[string]bool
+	// method is the call currently being dispatched; fail reports it on
+	// the error counter even when its arguments never parsed.
+	method string
+}
+
+// Capability URNs a method can belong to (RFC 8620 §3.3). Core is not
+// assumed: an empty using makes even Core/echo unknownMethod.
+const (
+	coreURN       = "urn:ietf:params:jmap:core"
+	mailURN       = "urn:ietf:params:jmap:mail"
+	submissionURN = "urn:ietf:params:jmap:submission"
+)
+
+// capabilityForMethod names the capability a method requires; "" means
+// the name is not a known method (the lookup will answer unknownMethod).
+func capabilityForMethod(name string) string {
+	switch {
+	case strings.HasPrefix(name, "Core/"):
+		return coreURN
+	case strings.HasPrefix(name, "Mailbox/"), strings.HasPrefix(name, "Email/"),
+		strings.HasPrefix(name, "Thread/"):
+		return mailURN
+	case strings.HasPrefix(name, "Identity/"), strings.HasPrefix(name, "EmailSubmission/"):
+		return submissionURN
+	case strings.HasPrefix(name, "AddressBook/"), strings.HasPrefix(name, "ContactCard/"):
+		return ContactURN
+	default:
+		return ""
+	}
 }
 
 func decodeCall(raw json.RawMessage) (call, error) {
@@ -282,6 +347,24 @@ func accountOffers(acct *Account, urn string) bool {
 
 // dispatch runs one call, resolving result references first (FR-J.3).
 func (d *dispatcher) dispatch(ctx context.Context, c call) {
+	d.method = c.Name
+	if d.h.methodCalls != nil {
+		// The method name is counted even when it turns out to be
+		// unknown: a client hammering a typo is a signal too.
+		d.h.methodCalls.With(d.acct.ID, c.Name).Inc()
+	}
+	// RFC 8620 §3.3: a method requires its capability to be declared in
+	// using. Core is not implicit — an empty using refuses every method.
+	// Only gate capabilities the account actually offers; a method whose
+	// capability is unconfigured must reach its handler and answer its
+	// specific error (e.g. accountNotSupportedByMethod for submission).
+	if urn := capabilityForMethod(c.Name); urn != "" && !d.using[urn] && accountOffers(d.acct, urn) {
+		d.fail(c.CallID, &methodErr{
+			Type:        "unknownMethod",
+			Description: "method " + c.Name + " requires capability " + urn + " not declared in using",
+		})
+		return
+	}
 	var parsed any
 	if err := json.Unmarshal(c.Args, &parsed); err != nil {
 		d.fail(c.CallID, &methodErr{Type: "invalidArguments", Description: "arguments must be a JSON object"})
@@ -378,6 +461,9 @@ func (d *dispatcher) resolveCreation(ref string) (string, bool) {
 }
 
 func (d *dispatcher) fail(callID string, merr *methodErr) {
+	if d.h.methodErrors != nil {
+		d.h.methodErrors.With(d.acct.ID, d.method, merr.Type).Inc()
+	}
 	d.out = append(d.out, invocation{Name: "error", Args: merr, CallID: callID})
 }
 
@@ -486,7 +572,9 @@ func (d *dispatcher) resolveRef(m map[string]any) (any, *methodErr) {
 }
 
 // jsonPointer resolves an RFC 6901 JSON pointer against a decoded JSON
-// value (RFC 8620 §3.7).
+// value (RFC 8620 §3.7). A whole-segment "*" wildcard matches every
+// value at that level and the reference resolves to the array of the
+// remainder applied to each — the shape `/list/*/id` relies on.
 func jsonPointer(v any, path string) (any, error) {
 	if path == "" {
 		return v, nil
@@ -494,26 +582,65 @@ func jsonPointer(v any, path string) (any, error) {
 	if path[0] != '/' {
 		return nil, fmt.Errorf("pointer %q must start with /", path)
 	}
-	cur := v
-	for _, tok := range splitPointer(path[1:]) {
+	return resolvePointer(v, splitPointer(path[1:]))
+}
+
+func resolvePointer(cur any, toks []string) (any, error) {
+	for i, tok := range toks {
+		if tok == "*" {
+			rest := toks[i+1:]
+			switch node := cur.(type) {
+			case []any:
+				out := make([]any, 0, len(node))
+				for _, item := range node {
+					resolved, err := resolvePointer(item, rest)
+					if err != nil {
+						return nil, err
+					}
+					out = append(out, resolved)
+				}
+				return out, nil
+			case map[string]any:
+				keys := make([]string, 0, len(node))
+				for k := range node {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				out := make([]any, 0, len(node))
+				for _, k := range keys {
+					resolved, err := resolvePointer(node[k], rest)
+					if err != nil {
+						return nil, err
+					}
+					out = append(out, resolved)
+				}
+				return out, nil
+			default:
+				return nil, fmt.Errorf("pointer %q does not resolve", joinPointer(toks))
+			}
+		}
 		switch node := cur.(type) {
 		case map[string]any:
 			next, ok := node[tok]
 			if !ok {
-				return nil, fmt.Errorf("pointer %q does not resolve", path)
+				return nil, fmt.Errorf("pointer %q does not resolve", joinPointer(toks))
 			}
 			cur = next
 		case []any:
 			idx, err := atoi(tok)
 			if err != nil || idx < 0 || idx >= len(node) {
-				return nil, fmt.Errorf("pointer %q does not resolve", path)
+				return nil, fmt.Errorf("pointer %q does not resolve", joinPointer(toks))
 			}
 			cur = node[idx]
 		default:
-			return nil, fmt.Errorf("pointer %q does not resolve", path)
+			return nil, fmt.Errorf("pointer %q does not resolve", joinPointer(toks))
 		}
 	}
 	return cur, nil
+}
+
+func joinPointer(toks []string) string {
+	return "/" + strings.Join(toks, "/")
 }
 
 func splitPointer(s string) []string {

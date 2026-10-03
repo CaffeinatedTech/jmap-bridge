@@ -22,6 +22,7 @@ import (
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/dav"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/metrics"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/oauth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/submit"
@@ -39,6 +40,10 @@ type Config struct {
 	PrefetchWindow time.Duration  // 0 disables prefetch (FR-S.9)
 	Concurrency    int            // hydration workers (FR-S.9 rate limit)
 	SearchBackfill bool           // hydrate text-search candidates in the background (FR-X.5)
+	// Metrics, when non-nil, registers the engine's FR-D.6 gauges and
+	// counters. nil keeps the engine metrics-free for tests and
+	// cache-only deployments.
+	Metrics *metrics.Registry
 }
 
 // Engine runs one account's sync.
@@ -118,6 +123,16 @@ type Engine struct {
 	// /readyz reports not-ready while an account needs re-consent
 	// (FR-D.4, FR-A.7).
 	authFailed atomic.Bool
+
+	// lastPass is the Unix-nano time of the last successful pass; 0
+	// means none yet (FR-D.6 sync lag).
+	lastPass atomic.Int64
+	// tierLabel is the current work connection's tier, or -1 before the
+	// first connect (FR-D.6 tier gauge).
+	tierLabel atomic.Int32
+	// reconnects counts IMAP dials by role; nil when metrics are off
+	// (FR-D.6).
+	reconnects *metrics.CounterVec
 }
 
 // errNotConnected means the work connection is down; the run loop
@@ -141,8 +156,6 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 		cfg:          cfg,
 		st:           st,
 		log:          log,
-		wr:           newWriter(cfg.IMAP, log),
-		rd:           newReader(cfg.IMAP, log),
 		wake:         make(chan string, 8),
 		kick:         make(chan struct{}, 1),
 		flights:      map[string]*flight{},
@@ -151,6 +164,19 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 		idleFolder:   "INBOX",
 		contactsKick: make(chan struct{}, 1),
 	}
+	// -1 means "no tier learned yet": the zero value is TierQResync and
+	// would otherwise advertise the best tier before the first connect.
+	e.tierLabel.Store(-1)
+	if cfg.Metrics != nil {
+		e.reconnects = cfg.Metrics.Counter("jmap_bridge_imap_reconnects_total",
+			"IMAP dials attempted, by account and connection role.", "account", "role")
+		e.registerMetrics(cfg.Metrics)
+	}
+	// The reader and writer count their own dials through the engine's
+	// role-aware helper; they are built after e so the callback can read
+	// e.reconnects.
+	e.wr = newWriter(cfg.IMAP, log, e.countReconnect)
+	e.rd = newReader(cfg.IMAP, log, e.countReconnect)
 	// The store holds one process-wide Ensure/SearchBackfill hook, so a
 	// single-engine process can claim it here. A multi-account process
 	// must install Router after building every engine (cmd/jmap-bridge
@@ -161,6 +187,65 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 		st.SearchBackfill = e.searchBackfill
 	}
 	return e
+}
+
+// registerMetrics wires the FR-D.6 pull gauges for this account. The
+// gauges read atomics and channel lengths at scrape time, so they never
+// block a sync pass and reflect live state.
+func (e *Engine) registerMetrics(reg *metrics.Registry) {
+	account := e.cfg.Account
+	reg.GaugeFunc("jmap_bridge_sync_lag_seconds",
+		"Seconds since this account's last successful sync pass (0 before the first).",
+		func() []metrics.Sample {
+			last := e.lastPass.Load()
+			lag := 0.0
+			if last > 0 {
+				lag = time.Since(time.Unix(0, last)).Seconds()
+			}
+			return []metrics.Sample{{
+				Labels: []metrics.Label{{Name: "account", Value: account}},
+				Value:  lag,
+			}}
+		})
+	reg.GaugeFunc("jmap_bridge_sync_tier",
+		"Current IMAP sync tier for the account (1 for the active tier).",
+		func() []metrics.Sample {
+			t := e.tierLabel.Load()
+			if t < 0 {
+				return nil // no connection yet: absent beats a lying zero
+			}
+			return []metrics.Sample{{
+				Labels: []metrics.Label{
+					{Name: "account", Value: account},
+					{Name: "tier", Value: imapdrv.Tier(t).String()},
+				},
+				Value: 1,
+			}}
+		})
+	reg.GaugeFunc("jmap_bridge_hydration_queue",
+		"Hydration work by state: pending lane, in-flight fetches and prefetch slots.",
+		func() []metrics.Sample {
+			e.flightMu.Lock()
+			inflight := len(e.flights)
+			e.flightMu.Unlock()
+			return []metrics.Sample{
+				{Labels: []metrics.Label{{Name: "account", Value: account}, {Name: "state", Value: "pending"}}, Value: float64(len(e.backfill))},
+				{Labels: []metrics.Label{{Name: "account", Value: account}, {Name: "state", Value: "inflight"}}, Value: float64(inflight)},
+				{Labels: []metrics.Label{{Name: "account", Value: account}, {Name: "state", Value: "prefetch"}}, Value: float64(len(e.prefetchSem))},
+			}
+		})
+}
+
+// reconnectCounter counts one IMAP dial attempt for a connection role;
+// nil disables counting.
+type reconnectCounter func(role string)
+
+// countReconnect increments the FR-D.6 reconnect counter for an IMAP dial
+// role (work, idle, hydrate, write). With metrics off it is a no-op.
+func (e *Engine) countReconnect(role string) {
+	if e.reconnects != nil {
+		e.reconnects.With(e.cfg.Account, role).Inc()
+	}
 }
 
 // Router returns the store's process-wide Ensure and SearchBackfill hooks
@@ -286,6 +371,7 @@ func (e *Engine) Run(ctx context.Context) {
 		}
 		failures = 0
 		e.ready.Store(true)
+		e.lastPass.Store(time.Now().UnixNano())
 		e.authFailed.Store(false)
 	}
 }
@@ -366,12 +452,14 @@ func (e *Engine) connect(ctx context.Context) error {
 	if e.work != nil {
 		return nil
 	}
+	e.countReconnect("work")
 	conn, err := imapdrv.Dial(ctx, e.cfg.IMAP)
 	if err != nil {
 		return err
 	}
 	e.work = conn
 	e.connected = true
+	e.tierLabel.Store(int32(conn.Tier()))
 	e.wr.noteGmail(conn.GmailExt())
 	e.log.Info("sync: connected",
 		"account", e.cfg.Account, "tier", conn.Tier().String(),
