@@ -3,7 +3,9 @@
 **Status:** approved at plan review 2026-10-03, implementation starting as
 **v0.1** work (D-API-8). This file is the plan; nothing here is claimed built
 except where a milestone records it — **M8 (the seam + `imapdrv` adapter)
-landed 2026-10-03**, see §3.1.
+landed 2026-10-03**, **M9 (the REST client) landed 2026-10-03**, and **M10
+(config selection + the read path) landed 2026-10-03** (PLAN §12). API mode is
+read-only in the current tree; writes land with M11–M12.
 The `REQUIREMENTS.md` / `PLAN.md` deltas the implementation must land **in the
 same commit as the code** are listed in §15 (golden rule 7).
 

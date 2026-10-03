@@ -78,7 +78,9 @@ func main() {
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != 200 {
-		fmt.Fprintf(os.Stderr, "token endpoint: %d\n", resp.StatusCode)
+		// The error response carries only an OAuth error code/description,
+		// never a token; surface it so a dead consent is diagnosable.
+		fmt.Fprintf(os.Stderr, "token endpoint: %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
 		os.Exit(1)
 	}
 	s := string(body)

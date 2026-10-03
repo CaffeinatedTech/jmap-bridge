@@ -132,7 +132,6 @@ type sentMessage struct {
 
 // Server is a running fixture Gmail API server.
 type Server struct {
-	t     testing.TB
 	srv   *httptest.Server
 	user  string
 	token string
@@ -159,6 +158,15 @@ type Server struct {
 // Start brings a fixture server up on loopback and stops it on test cleanup.
 func Start(t testing.TB, opts Options) *Server {
 	t.Helper()
+	s := StartServer(opts)
+	t.Cleanup(s.Close)
+	return s
+}
+
+// StartServer brings a fixture server up on loopback for a standalone
+// process (the dev/gate fixture): unlike Start it needs no testing.TB and
+// the caller owns Close.
+func StartServer(opts Options) *Server {
 	if opts.User == "" {
 		opts.User = "fixture@example.test"
 	}
@@ -172,7 +180,6 @@ func Start(t testing.TB, opts Options) *Server {
 		opts.RetryAfter = time.Second
 	}
 	s := &Server{
-		t:             t,
 		user:          opts.User,
 		token:         opts.Token,
 		tier:          opts.Tier,
@@ -186,9 +193,11 @@ func Start(t testing.TB, opts Options) *Server {
 		throttled:     0,
 	}
 	s.srv = httptest.NewServer(s)
-	t.Cleanup(s.srv.Close)
 	return s
 }
+
+// Close stops the fixture server.
+func (s *Server) Close() { s.srv.Close() }
 
 // URL is the base URL to hand to gmailapi.Options.Endpoint (trailing slash).
 func (s *Server) URL() string { return s.srv.URL + "/" }

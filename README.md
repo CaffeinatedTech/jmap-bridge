@@ -74,6 +74,7 @@ rather than failing.
 | Backend | IMAP auth | Sync tier | Send | Contacts |
 |---|---|---|---|---|
 | **Gmail / Google Workspace** | OAuth2 (XOAUTH2) | CONDSTORE (Gmail has no QRESYNC) | SMTP + XOAUTH2 | CardDAV, OAuth2-only, **no contact groups** |
+| **Gmail API mode** (`backend = "gmail_api"`) | OAuth2 (Google) | REST `history.list` | via Gmail API (M11+) | same OAuth token |
 | **Dovecot** (self-hosted) | password | QRESYNC | SMTP | needs a separate CardDAV server |
 | **cPanel mail** (Dovecot-based) | password | QRESYNC (detected) | SMTP | when the host offers CardDAV |
 | **Namecheap Private Email** | password | detected at runtime | SMTP | when the host offers CardDAV |
@@ -444,6 +445,38 @@ still `503` (no account has synced yet). Without it, an ingress that routes only
 to Ready pods would 503 the very endpoint needed to make the account Ready.
 Labels appear as mailboxes, archiving removes Inbox membership only, and
 Gmail's thread grouping drives the client's threads.
+
+### Gmail API mode
+
+An account can instead be served by the Gmail REST API, which exposes Gmail's
+real model (account-global message ids, threads, labels, history) rather than
+IMAP's emulation of it. Add `backend = "gmail_api"` and a `[accounts.gmail_api]`
+block; `[accounts.imap]` and `[accounts.smtp]` become forbidden, and the same
+`[accounts.oauth2]` consent and stored token are reused (no re-consent):
+
+```toml
+[[accounts]]
+id      = "gmail"
+address = "me@gmail.com"
+token   = "…"
+backend = "gmail_api"
+
+  [accounts.oauth2]
+  provider = "google"
+  client_id = "…apps.googleusercontent.com"
+
+  [accounts.gmail_api]
+  # watch = "poll"                 # push (Pub/Sub) arrives with M13
+  # backfill_query = "newer_than:30d"  # optional: bound a large cold start
+  # backfill_limit = 5000
+```
+
+The current tree implements the read path (browse, threads, search, lazy
+hydration, `/changes`, SSE); writes and submission over the API arrive with the
+following milestones. Semantics are documented honestly: a synthetic `All Mail`
+archive with implicit membership, only `$seen`/`$flagged`/`$draft`/`$important`
+keywords (no `$answered`/`$deleted`/custom), and `size` as Gmail's
+`sizeEstimate` until a body is hydrated.
 
 ## Development
 

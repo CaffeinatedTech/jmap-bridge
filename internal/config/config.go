@@ -103,11 +103,52 @@ type Account struct {
 	Token   string `toml:"token"`
 
 	// TokenFile points at a mounted file holding the token (FR-A.2).
-	TokenFile string   `toml:"token_file"`
-	IMAP      *IMAP    `toml:"imap"`
-	SMTP      *SMTP    `toml:"smtp"`
-	CardDAV   *CardDAV `toml:"carddav"`
-	OAuth2    *OAuth2  `toml:"oauth2"`
+	TokenFile string `toml:"token_file"`
+	// Backend selects the mail protocol: "imap" (default) or
+	// "gmail_api" (D-API-1). It is mutually exclusive with the other's
+	// backend block (FR-A.13).
+	Backend  string    `toml:"backend"`
+	IMAP     *IMAP     `toml:"imap"`
+	SMTP     *SMTP     `toml:"smtp"`
+	CardDAV  *CardDAV  `toml:"carddav"`
+	OAuth2   *OAuth2   `toml:"oauth2"`
+	GmailAPI *GmailAPI `toml:"gmail_api"`
+}
+
+// GmailAPI is the Gmail REST API backend block (D-API-1, GMAIL_API_PLAN
+// §2). Its presence marks backend = "gmail_api"; an empty block is
+// valid. Watch/PubSub settings are decoded now so the schema is stable
+// from day one; M13 wires the push endpoint (M10 reads via history with
+// the poll fallback).
+type GmailAPI struct {
+	// Watch is "pubsub" (Pub/Sub push, D-API-3) or "poll" (the
+	// documented fallback). Normalised to a mode-appropriate default.
+	Watch string `toml:"watch"`
+	// PubSubTopic is the Cloud Pub/Sub topic users.watch registers.
+	PubSubTopic string `toml:"pubsub_topic"`
+	// PubSubAudience is the OIDC audience verified on push (M13).
+	PubSubAudience string `toml:"pubsub_audience"`
+	// PushAllowPlain accepts a shared-secret push for loopback rigs
+	// instead of OIDC verification (M13).
+	PushAllowPlain bool `toml:"push_allow_plain"`
+	// QuotaUnitsPerSecond paces API calls; 0 selects the default
+	// (D-API-7 / GMAIL_API_PLAN §4.3).
+	QuotaUnitsPerSecond int `toml:"quota_units_per_second"`
+	// BackfillQuery optionally scopes the initial header walk with Gmail
+	// search syntax (e.g. "newer_than:30d"); "" walks everything.
+	// BackfillLimit caps messages ingested per container (0 = no cap).
+	// Both exist so a large mailbox can be served without a multi-hour
+	// first pass (GMAIL_API_PLAN §14 cold-start risk).
+	BackfillQuery string `toml:"backfill_query"`
+	BackfillLimit int    `toml:"backfill_limit"`
+	// Endpoint overrides the API base URL. It exists for the in-process
+	// fixture gate and self-hosted mocks; production leaves it empty and
+	// uses Google's endpoint. Token is a static bearer accepted only when
+	// Endpoint names a loopback host, so a cloud account still goes
+	// through OAuth2 (FR-A.13, §2.2).
+	Endpoint  string `toml:"endpoint"`
+	Token     string `toml:"token"`
+	TokenFile string `toml:"token_file"`
 }
 
 // IMAP is the inbound backend block.

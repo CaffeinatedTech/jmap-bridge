@@ -21,6 +21,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/auth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/config"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/dav"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/gmailapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/httpapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
@@ -31,6 +32,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/submit"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/sync"
+	"golang.org/x/oauth2"
 )
 
 // version is overridden at build time via -ldflags.
@@ -127,18 +129,33 @@ func run(args []string) error {
 		managers[a.ID] = m
 	}
 
-	// One engine per account that has an IMAP backend; an account
+	// One Gmail API client per account with backend = "gmail_api"
+	// (D-API-2). Built before the engines so every session shares it.
+	gmailClients := map[string]*gmailapi.Client{}
+	for i := range cfg.Accounts {
+		a := &cfg.Accounts[i]
+		if a.Backend != "gmail_api" {
+			continue
+		}
+		client, err := buildGmailClient(ctx, a, managers[a.ID])
+		if err != nil {
+			return err
+		}
+		gmailClients[a.ID] = client
+	}
+
+	// One engine per account that has a usable backend; an account
 	// without one serves whatever the cache holds (log, never lie) and
 	// gets no Backend, so its writes fail instead of pretending.
 	engines := map[string]*sync.Engine{}
 	backends := map[string]jmapapi.Backend{}
 	for i := range cfg.Accounts {
 		a := &cfg.Accounts[i]
-		if a.IMAP == nil {
-			log.Warn("account has no [imap] block; serving cache only", "account", a.ID)
+		if a.Backend != "gmail_api" && a.IMAP == nil {
+			log.Warn("account has no backend; serving cache only", "account", a.ID)
 			continue
 		}
-		eng := sync.New(syncConfig(cfg, a, managers[a.ID], reg), st, log)
+		eng := sync.New(syncConfig(cfg, a, managers[a.ID], gmailClients[a.ID], reg, st, log), st, log)
 		backends[a.ID] = eng
 		engines[a.ID] = eng
 		go eng.Run(ctx)
@@ -201,7 +218,7 @@ func run(args []string) error {
 		"auth_mode", cfg.Auth.Mode,
 		"accounts", accountIDs(cfg),
 		"engines", len(engines),
-		"backend", "sqlite+imap (M1)",
+		"backend", "sqlite",
 	)
 
 	errCh := make(chan error, 1)
@@ -227,33 +244,43 @@ func run(args []string) error {
 // SMTP: it can be read from and written to, but not sent from (FR-J.5).
 // The account's OAuth2 manager, when one exists, is the token provider
 // for both IMAP and SMTP XOAUTH2 (FR-A.7).
-func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager, reg *metrics.Registry) sync.Config {
-	tls := true
-	if a.IMAP.TLS != nil {
-		tls = *a.IMAP.TLS
-	}
-	imapCfg := imapdrv.Config{
-		Host:     a.IMAP.Host,
-		Port:     a.IMAP.Port,
-		TLS:      tls,
-		Username: a.IMAP.Username,
-		Password: a.IMAP.Password,
-	}
-	if a.IMAP.Auth == "oauth2" && mgr != nil {
-		imapCfg.Token = mgr.AccessToken
-	}
+func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager, gclient *gmailapi.Client, reg *metrics.Registry, st *store.Store, log *slog.Logger) sync.Config {
 	out := sync.Config{
-		Account: a.ID,
-		// D-API-2: the engine sees only mailbackend.Backend. The IMAP
-		// factory is supplied here; a backend = "gmail_api" account will
-		// supply the Gmail API factory in its place (M10).
-		NewBackend:     func() mailbackend.Backend { return imapdrv.NewBackend(imapCfg) },
+		Account:        a.ID,
 		Interval:       cfg.Sync.Interval.Std(),
 		BatchSize:      cfg.Sync.BatchSize,
 		PrefetchWindow: cfg.Sync.PrefetchWindow.Std(),
 		Concurrency:    cfg.Search.Concurrency,
 		SearchBackfill: cfg.Search.Backfill,
 		Metrics:        reg,
+	}
+	// D-API-2: the engine sees only mailbackend.Backend. The factory is
+	// chosen per account here; internal/sync names neither provider.
+	if a.Backend == "gmail_api" {
+		ga := a.GmailAPI
+		ni := nativeIndex{st: st, account: a.ID}
+		out.NewBackend = func() mailbackend.Backend {
+			return gmailapi.NewBackend(gmailapi.Config{
+				Account: a.ID, Client: gclient, Native: ni, Logger: log,
+				BackfillQuery: ga.BackfillQuery, BackfillLimit: ga.BackfillLimit,
+			})
+		}
+	} else {
+		tls := true
+		if a.IMAP.TLS != nil {
+			tls = *a.IMAP.TLS
+		}
+		imapCfg := imapdrv.Config{
+			Host:     a.IMAP.Host,
+			Port:     a.IMAP.Port,
+			TLS:      tls,
+			Username: a.IMAP.Username,
+			Password: a.IMAP.Password,
+		}
+		if a.IMAP.Auth == "oauth2" && mgr != nil {
+			imapCfg.Token = mgr.AccessToken
+		}
+		out.NewBackend = func() mailbackend.Backend { return imapdrv.NewBackend(imapCfg) }
 	}
 	if a.CardDAV != nil && a.CardDAV.URL != "" {
 		davCfg := dav.Config{
@@ -285,6 +312,55 @@ func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager, reg *
 		}
 	}
 	return out
+}
+
+// buildGmailClient builds the account's Gmail API client: a static
+// bearer for the loopback fixture endpoint, otherwise the account's OAuth
+// manager (D-API-7). The client is shared by every session the engine
+// opens.
+func buildGmailClient(ctx context.Context, a *config.Account, mgr *oauth.Manager) (*gmailapi.Client, error) {
+	ga := a.GmailAPI
+	opts := gmailapi.Options{
+		Endpoint:            ga.Endpoint,
+		QuotaUnitsPerSecond: ga.QuotaUnitsPerSecond,
+	}
+	switch {
+	case ga.Token != "":
+		opts.HTTPClient = oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: ga.Token}))
+	case mgr != nil:
+		opts.TokenSource = gmailapi.TokenSourceFromManager(mgr)
+	default:
+		return nil, fmt.Errorf("account %s: gmail_api needs [accounts.oauth2] or a loopback endpoint + token", a.ID)
+	}
+	return gmailapi.New(ctx, opts)
+}
+
+// nativeIndex adapts the store's native_ids table to the gmailapi
+// package's NativeIndex, binding the account so the adapter never sees a
+// store type (D-API-2).
+type nativeIndex struct {
+	st      *store.Store
+	account string
+}
+
+func (n nativeIndex) NativeUID(ctx context.Context, native string) (uint32, bool, error) {
+	return n.st.NativeUID(ctx, n.account, native)
+}
+
+func (n nativeIndex) AllocNativeUIDs(ctx context.Context, natives []string) (map[string]uint32, error) {
+	return n.st.AllocNativeUIDs(ctx, n.account, natives)
+}
+
+func (n nativeIndex) NativeByUID(ctx context.Context, uid uint32) (string, bool, error) {
+	return n.st.NativeByUID(ctx, n.account, uid)
+}
+
+func (n nativeIndex) NativeByUIDs(ctx context.Context, uids []uint32) (map[uint32]string, error) {
+	return n.st.NativeByUIDs(ctx, n.account, uids)
+}
+
+func (n nativeIndex) KnownMemberUIDs(ctx context.Context, container string, uids []uint32) (map[uint32]bool, error) {
+	return n.st.KnownMemberUIDs(ctx, n.account, container, uids)
 }
 
 // oauthConfig lifts the [accounts.oauth2] block into the oauth package's

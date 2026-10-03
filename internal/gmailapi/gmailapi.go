@@ -159,18 +159,37 @@ func (c *Client) listLabels(ctx context.Context) (*gmail.ListLabelsResponse, err
 }
 
 func (c *Client) listMessages(ctx context.Context, query string, labelIDs []string, max int64, pageToken string) (*gmail.ListMessagesResponse, error) {
+	return c.listMessagesPage(ctx, listOpts{
+		Query: query, LabelIDs: labelIDs, Max: max, PageToken: pageToken,
+	})
+}
+
+// listOpts is the full messages.list parameter set; the adapter uses
+// IncludeSpamTrash so the synthetic All Mail container is truthful.
+type listOpts struct {
+	Query            string
+	LabelIDs         []string
+	Max              int64
+	PageToken        string
+	IncludeSpamTrash bool
+}
+
+func (c *Client) listMessagesPage(ctx context.Context, o listOpts) (*gmail.ListMessagesResponse, error) {
 	call := c.svc.Users.Messages.List(userMe).Context(ctx)
-	if query != "" {
-		call = call.Q(query)
+	if o.Query != "" {
+		call = call.Q(o.Query)
 	}
-	if len(labelIDs) > 0 {
-		call = call.LabelIds(labelIDs...)
+	if len(o.LabelIDs) > 0 {
+		call = call.LabelIds(o.LabelIDs...)
 	}
-	if max > 0 {
-		call = call.MaxResults(max)
+	if o.Max > 0 {
+		call = call.MaxResults(o.Max)
 	}
-	if pageToken != "" {
-		call = call.PageToken(pageToken)
+	if o.PageToken != "" {
+		call = call.PageToken(o.PageToken)
+	}
+	if o.IncludeSpamTrash {
+		call = call.IncludeSpamTrash(true)
 	}
 	return invoke(ctx, c, CostMessagesList, call)
 }

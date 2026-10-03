@@ -124,6 +124,21 @@ func (c *Config) validate() error {
 func (c *Config) normalize() {
 	for i := range c.Accounts {
 		a := &c.Accounts[i]
+		if a.Backend == "" {
+			a.Backend = "imap"
+		}
+		if a.GmailAPI != nil {
+			if a.GmailAPI.Watch == "" {
+				if a.GmailAPI.PubSubTopic != "" && strings.HasPrefix(c.BaseURL, "https") {
+					a.GmailAPI.Watch = "pubsub"
+				} else {
+					a.GmailAPI.Watch = "poll"
+				}
+			}
+			if a.GmailAPI.QuotaUnitsPerSecond == 0 {
+				a.GmailAPI.QuotaUnitsPerSecond = 100
+			}
+		}
 		if a.IMAP != nil {
 			if a.IMAP.Auth == "" {
 				a.IMAP.Auth = "password"
@@ -228,9 +243,27 @@ func (c *Config) validateAccount(i int, a *Account) error {
 		if a.CardDAV != nil && a.CardDAV.Auth == "oauth2" {
 			backendAuth = "carddav.auth"
 		}
-		if backendAuth != "" {
-			return errKey(fmt.Sprintf("accounts[%d].oauth2", i), "required when %s = \"oauth2\"", backendAuth)
+		if a.Backend == "gmail_api" && (a.GmailAPI == nil || (a.GmailAPI.Endpoint == "" && a.GmailAPI.Token == "")) {
+			backendAuth = "backend = \"gmail_api\""
 		}
+		if backendAuth != "" {
+			return errKey(fmt.Sprintf("accounts[%d].oauth2", i), "required when %s", backendAuth)
+		}
+	}
+	// FR-A.13 / D-API-1: one account, one backend. The two blocks are
+	// mutually exclusive and each requires its own shape.
+	switch a.Backend {
+	case "imap":
+		if a.GmailAPI != nil {
+			return errKey(fmt.Sprintf("accounts[%d].gmail_api", i),
+				`must not be set when backend = "imap" (set accounts[%d].backend = "gmail_api" to use it)`, i)
+		}
+	case "gmail_api":
+		if err := validateGmailAPI(i, a); err != nil {
+			return err
+		}
+	default:
+		return errKey(fmt.Sprintf("accounts[%d].backend", i), `must be "imap" or "gmail_api"`)
 	}
 	// FR-A.10: an oauth2 account has no password fallback. A configured
 	// password next to auth = "oauth2" is a misconfiguration, not a
@@ -321,6 +354,60 @@ func validateSMTP(key string, s *SMTP) error {
 	case "oauth2":
 	default:
 		return errKey(key+".auth", `must be "password" or "oauth2"`)
+	}
+	return nil
+}
+
+// validateGmailAPI enforces the API-mode shape (FR-A.13,
+// GMAIL_API_PLAN §2.2): no IMAP or SMTP block, a Google OAuth2 client,
+// an address, and a usable push configuration when watch = "pubsub".
+func validateGmailAPI(i int, a *Account) error {
+	acct := fmt.Sprintf("accounts[%d]", i)
+	if a.IMAP != nil {
+		return errKey(acct+".imap", `must not be set when backend = "gmail_api"`)
+	}
+	if a.SMTP != nil {
+		return errKey(acct+".smtp", `must not be set when backend = "gmail_api" (submission goes through the API)`)
+	}
+	if a.GmailAPI == nil {
+		return errKey(acct+".gmail_api", `required when backend = "gmail_api"`)
+	}
+	if a.Address == "" {
+		return errKey(acct+".address", "required when backend = \"gmail_api\" (Identity/get and the send From)")
+	}
+	if a.OAuth2 == nil {
+		if a.GmailAPI.Endpoint == "" || a.GmailAPI.Token == "" {
+			return errKey(acct+".oauth2", `required when backend = "gmail_api" (unless a loopback gmail_api.endpoint + token are used)`)
+		}
+	} else if a.GmailAPI.Endpoint == "" && a.OAuth2.Provider != "google" {
+		return errKey(acct+".oauth2.provider", `must be "google" when backend = "gmail_api" (the API client is Google-shaped)`)
+	}
+	if a.GmailAPI.Endpoint != "" {
+		if err := validateAbsoluteURL(a.GmailAPI.Endpoint, "endpoint must be an absolute URL"); err != nil {
+			return errKey(acct+".gmail_api.endpoint", "%s", err)
+		}
+	}
+	if a.GmailAPI.Token != "" && a.GmailAPI.Endpoint == "" {
+		return errKey(acct+".gmail_api.token", "requires a loopback gmail_api.endpoint (a static token cannot outlive a cloud session)")
+	}
+	if a.GmailAPI.QuotaUnitsPerSecond < 0 {
+		return errKey(acct+".gmail_api.quota_units_per_second", "must not be negative")
+	}
+	if a.GmailAPI.BackfillLimit < 0 {
+		return errKey(acct+".gmail_api.backfill_limit", "must not be negative")
+	}
+	switch a.GmailAPI.Watch {
+	case "poll":
+	case "pubsub":
+		if a.GmailAPI.PubSubTopic == "" {
+			return errKey(acct+".gmail_api.pubsub_topic", `required when watch = "pubsub"`)
+		}
+		if !a.GmailAPI.PushAllowPlain && a.GmailAPI.PubSubAudience == "" {
+			return errKey(acct+".gmail_api.pubsub_audience",
+				`required when watch = "pubsub" unless push_allow_plain = true`)
+		}
+	default:
+		return errKey(acct+".gmail_api.watch", `must be "pubsub" or "poll"`)
 	}
 	return nil
 }

@@ -209,6 +209,37 @@ CREATE INDEX email_mailbox_thread ON email_mailbox(mailbox_uid, removed_modseq, 
 CREATE INDEX email_content_unhydrated ON email_content(hydrated_at);
 ALTER TABLE email_content ADD COLUMN fts_rowid INTEGER;
 `,
+	// v7 (M10): native provider ids for the Gmail API backend
+	// (D-API-9, GMAIL_API_PLAN §5). The engine's store path is keyed by
+	// (folder, uidvalidity, uid); the Gmail API's opaque message ids
+	// cannot be that uid, so the adapter allocates a stable synthetic
+	// numeric handle per native id and keeps the mapping here. `kind`
+	// discriminates message/label/thread so a future Graph backend reuses
+	// the table rather than adding a third. `jmap_id` is filled where the
+	// native object has a JMAP counterpart (writes, M11). mailboxes gains
+	// the label id so a path resolves back to its Gmail label without a
+	// discovery round trip.
+	`
+CREATE TABLE native_ids (
+  account   TEXT NOT NULL,
+  kind      TEXT NOT NULL,      -- 'message' | 'label' | 'thread'
+  native_id TEXT NOT NULL,      -- Gmail message/label/thread id
+  uid       INTEGER NOT NULL DEFAULT 0,
+  jmap_id   TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (account, kind, native_id)
+);
+CREATE INDEX native_ids_uid ON native_ids(account, kind, uid);
+CREATE INDEX native_ids_jmap ON native_ids(account, kind, jmap_id);
+
+CREATE TABLE gmail_drafts (
+  account  TEXT NOT NULL,
+  jmap_id  TEXT NOT NULL,       -- the Email id
+  draft_id TEXT NOT NULL,
+  PRIMARY KEY (account, jmap_id)
+);
+
+ALTER TABLE mailboxes ADD COLUMN native_id TEXT;
+`,
 }
 
 // migrate applies every not-yet-applied migration and refuses a database

@@ -44,3 +44,37 @@ never-ending loop. (An unattended watcher did exactly that and was removed
 `go build -o /tmp/opencode/gmailtoken ./test/live/gmailtoken`) to mint
 a fresh access token from the sealed refresh token into a 0600 file for
 the independent IMAP client.
+
+# Gmail API mode (M10)
+
+The read path is proven two ways; neither touches existing mail.
+
+## Fixture gate (no Google account)
+
+    bash dev/gate/gmailapi-fixture-start.sh
+    # bridge: http://127.0.0.1:8081/gapi  (token dev-token-gapi-local-only-0123456789)
+
+Starts `dev/gate/gmailfixture` (the in-process Gmail API fixture with a
+seeded INBOX/Sent/Drafts/Trash/Spam + user label + two messages) and a
+bridge with `backend = "gmail_api"` pointed at it. Then, from the
+jmap-tui repo:
+
+    JMAP_TUI_TEST_URL=http://127.0.0.1:8081/gapi \
+    JMAP_TUI_TEST_USER=any \
+    JMAP_TUI_TEST_PASSWORD=dev-token-gapi-local-only-0123456789 \
+      go test ./internal/jmapclient/ -run TestLiveSessionAndMailboxes -v
+
+## Live read-only gate
+
+    python3 dev/gate/gmailapi-live-gate.py
+
+Uses the user's real Gmail account on 127.0.0.1:8080 (the registered OAuth
+redirect URI). It reuses the stored refresh token; if Google revoked it the
+script prints the consent URL and exits — approve that once, then re-run.
+It creates one test label + message (never touching existing mail), proves
+the bridge discovers roles and browses them through the API backend, stars
+the message out-of-band via the Gmail API and observes it through history
+incremental, then deletes exactly the test message and label. Backfill is
+scoped with `backfill_query` to the test label so the gate caches a handful
+of messages, not the mailbox.
+

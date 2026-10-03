@@ -134,6 +134,12 @@ go run ./cmd/jmap-tui smoke --config /tmp/no-such-config.toml \
 The dev token lives in `dev/config.toml` (loopback throwaway only): read it
 from there, never echo it into logs or commits. Unset env ⇒ tests skip.
 
+Gmail **API mode** (M10) has its own fixture rig with no Google account:
+`bash dev/gate/gmailapi-fixture-start.sh` serves a `backend = "gmail_api"`
+bridge on `http://127.0.0.1:8081/gapi` backed by `dev/gate/gmailfixture`; point
+jmap-tui's `TestLiveSessionAndMailboxes` at it the same way. The live API gate
+is `python3 dev/gate/gmailapi-live-gate.py` (read-only; see `dev/gate/README.md`).
+
 ## Live provider rules of engagement
 
 When testing against a real mailbox the user provides:

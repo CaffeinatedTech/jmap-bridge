@@ -66,6 +66,10 @@ type Folder struct {
 	Delim rune
 	// Role is the JMAP role derived by the backend ("" when unrole'd).
 	Role string
+	// NativeID is the backend's own container identifier when it differs
+	// from the visible path (the Gmail label id); "" when the path is the
+	// identifier (IMAP).
+	NativeID string
 	// NoSelect marks a hierarchy container with no messages.
 	NoSelect bool
 	// Implicit marks a container whose membership the server owns
@@ -145,6 +149,15 @@ type Header struct {
 	Structure    *convert.Part
 	// ThreadHint seeds thread ids ahead of Message-ID (Gmail thrid).
 	ThreadHint uint64
+	// ThreadKey, when set, is a fully-formed store thread-registry key
+	// ("g:<sha1(native thread id)>") that outranks header-chain
+	// derivation. The Gmail API's threadId is an opaque string with no
+	// numeric X-GM-THRID equivalent, so the adapter supplies the key.
+	ThreadKey string
+	// Preview is server-side preview text when the provider includes it
+	// in the header fetch (Gmail's snippet); the engine stores it at
+	// ingest instead of a second preview round trip.
+	Preview string
 }
 
 // FlagChange is one message's flag state as the provider reported it.

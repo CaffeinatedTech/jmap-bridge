@@ -105,6 +105,19 @@ requirements are `NFR-<n>`.
 - **FR-A.12** All of the above fail closed: any authentication ambiguity (missing
   header, unknown token, wrong path/account pairing) results in no credentials
   being used and no data being served.
+- **FR-A.13** Account `backend` selection: `backend = "imap"` (default) or
+  `"gmail_api"`, mutually exclusive with the other's block. Validation (strict,
+  naming the key): an unknown value is an error; `imap` forbids
+  `[accounts.gmail_api]`; `gmail_api` forbids `[accounts.imap]` and
+  `[accounts.smtp]`, requires `address`, requires `[accounts.oauth2]` with
+  `provider = "google"` (unless a loopback `endpoint` + static `token` are used
+  for the fixture gate), and requires `pubsub_topic` (+ audience unless
+  `push_allow_plain`) when `watch = "pubsub"`, defaulting `watch` to `pubsub`
+  when a topic and an https `base_url` are present and `poll` otherwise.
+  `quota_units_per_second`/`backfill_query`/`backfill_limit` are optional and
+  bounded. Switching a Google account between backends is a config change; the
+  stored OAuth token is reused and no re-consent is needed when the existing
+  scope covers the API (D-API-1, D-API-7).
 
 ## 3. FR-S — Synchronisation
 
@@ -155,6 +168,23 @@ requirements are `NFR-<n>`.
   or untagged `BYE`, no tight retry loops, and a grace window before treating an
   absent result as a deletion for changes we ourselves just wrote (Gmail's
   eventual consistency).
+- **FR-S.13** Gmail API synchronisation (D-API-2, D-API-9): an account with
+  `backend = "gmail_api"` is synced through the Gmail REST API behind the same
+  `mailbackend` seam. Discovery maps `labels.list` to mailboxes (system labels to
+  roles, `CATEGORY_*`/user labels as real membership, `IMPORTANT`/`STARRED`/
+  `UNREAD` as keywords, `CHAT` excluded) plus a synthetic `All Mail` archive with
+  implicit membership (D-API-11); the initial header backfill uses
+  `messages.list` + batched `messages.get(format=metadata)` and never downloads a
+  body (D-2); incremental sync walks `history.list` (advancing a per-account
+  `historyId` only after the whole page set commits, golden rule 5) and a `404`
+  on an expired history triggers a full resync that re-lists and tombstones
+  without recycling ids; body hydration uses `messages.get(format=raw)` through
+  the existing parser; `threadId` seeds stable `g:` thread keys; `Email/get`,
+  `Email/query`, `Thread/get` and `/changes` read the same store and state
+  strings as the IMAP path, so a client cannot tell the backend apart. Size is
+  Gmail's `sizeEstimate` until hydration (exact thereafter, D-API-10). Reads are
+  paced by a per-account quota token bucket honouring `Retry-After`
+  (FR-S.12).
 
 ## 4. FR-M — Mail
 
@@ -469,6 +499,7 @@ requirements are `NFR-<n>`.
 | FR-X.1–.8, FR-S.11, NFR-1, NFR-2, NFR-8 | M5 | search correctness + 100k soak |
 | FR-P.1–.13 | M6 | contacts live suite green against real CardDAV |
 | FR-M.19, FR-J.9–.10, FR-D.2–.12, NFR-3–.7, NFR-9–.10 | M7 | documented install works; JMAP-TestSuite subset for the implemented surface green (deliberate gaps enumerated in PLAN §12) |
+| FR-A.13, FR-S.13, FR-M.1–.8 | M10 | Gmail API read path: jmap-tui browses a fixture Gmail account in API mode; live read-only Gmail gate (roles/labels/counts/threads correct; a web-UI flag change appears) |
 
 *(If PLAN.md's traceability column ever disagrees with this table, this table
 wins. This table maps requirements to milestones only — completion state is

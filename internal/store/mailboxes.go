@@ -22,6 +22,9 @@ type Folder struct {
 	// Role is the JMAP role derived from SPECIAL-USE attributes, or ""
 	// when the server assigned none.
 	Role string
+	// NativeID is the backend's own container id when it differs from
+	// the path (Gmail label id); "" for IMAP.
+	NativeID string
 	// NoSelect marks a hierarchy container the server refuses to select.
 	NoSelect bool
 	// Implicit marks a mailbox whose membership the server manages: on
@@ -49,7 +52,7 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 		}
 		existing := map[string]*mailboxRow{}
 		rows, err := tx.QueryContext(ctx,
-			`SELECT rowid, id, name, parent_id, role, sort_order, uidvalidity, deleted
+			`SELECT rowid, id, name, parent_id, role, sort_order, uidvalidity, deleted, native_id
 			 FROM mailboxes WHERE account = ?`, account)
 		if err != nil {
 			return fmt.Errorf("store: list mailboxes: %w", err)
@@ -57,13 +60,15 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 		for rows.Next() {
 			var r mailboxRow
 			var parent, role sql.NullString
+			var native sql.NullString
 			var uv sql.NullInt64
 			var deleted sql.NullInt64
-			if err := rows.Scan(&r.RowID, &r.ID, &r.Name, &parent, &role, &r.SortOrder, &uv, &deleted); err != nil {
+			if err := rows.Scan(&r.RowID, &r.ID, &r.Name, &parent, &role, &r.SortOrder, &uv, &deleted, &native); err != nil {
 				_ = rows.Close()
 				return err
 			}
 			r.ParentID, r.Role = parent.String, role.String
+			r.NativeID = native.String
 			r.UIDValidity = uint32(uv.Int64)
 			r.Deleted = deleted.Valid
 			existing[r.Name] = &r
@@ -103,13 +108,13 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 					return err
 				}
 				if _, err := tx.ExecContext(ctx,
-					`INSERT INTO mailboxes(id, account, parent_id, role, name, sort_order,
+					`INSERT INTO mailboxes(id, account, parent_id, role, name, native_id, sort_order,
 					   uidvalidity, uidnext, highestmodseq, implicit,
 					   may_read_items, may_add_items, may_remove_items, may_create_child,
 					   may_rename, may_delete,
 					   created_modseq, updated_modseq, updated_not_counts_modseq)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?, ?, 0)`,
-					id, account, nullStr(parent), nullStr(role), f.Name, sortOrder[f.Name],
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?, ?, 0)`,
+					id, account, nullStr(parent), nullStr(role), f.Name, nullStr(f.NativeID), sortOrder[f.Name],
 					int64(f.UIDValidity), int64(f.UIDNext), int64(f.HighestModSeq),
 					boolInt(f.Implicit),
 					boolInt(true), boolInt(mayAdd), boolInt(mayRemove),
@@ -118,7 +123,7 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 				}
 				existing[f.Name] = &mailboxRow{
 					ID: id, Name: f.Name, ParentID: parent,
-					Role: role, SortOrder: sortOrder[f.Name],
+					Role: role, NativeID: f.NativeID, SortOrder: sortOrder[f.Name],
 				}
 				continue
 			}
@@ -138,11 +143,11 @@ func (s *Store) SyncFolders(ctx context.Context, account string, folders []Folde
 			// Update whatever drifted. Counts are untouched here: they
 			// move with membership, not with discovery.
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE mailboxes SET parent_id = ?, role = ?, sort_order = ?,
+				`UPDATE mailboxes SET parent_id = ?, role = ?, native_id = ?, sort_order = ?,
 				   uidvalidity = ?, uidnext = ?, highestmodseq = ?, implicit = ?,
 				   may_add_items = ?, may_remove_items = ?, deleted = NULL, updated_modseq = ?
 				 WHERE id = ? AND account = ?`,
-				nullStr(parent), nullStr(role), sortOrder[f.Name],
+				nullStr(parent), nullStr(role), nullStr(f.NativeID), sortOrder[f.Name],
 				int64(f.UIDValidity), int64(f.UIDNext), int64(f.HighestModSeq),
 				boolInt(f.Implicit), boolInt(mayAdd), boolInt(mayRemove), seq, row.ID, account); err != nil {
 				return fmt.Errorf("store: update mailbox %q: %w", f.Name, err)
@@ -272,6 +277,7 @@ type mailboxRow struct {
 	Name        string
 	ParentID    string
 	Role        string
+	NativeID    string
 	SortOrder   int
 	UIDValidity uint32
 	Deleted     bool

@@ -39,6 +39,10 @@ type MessageRec struct {
 	// GmThrid is Gmail's X-GM-THRID when the server reported one; it
 	// seeds thread ids ahead of Message-ID/References (FR-S.10).
 	GmThrid uint64
+	// ThreadKey is a precomputed thread-registry key ("g:…") from a
+	// provider whose thread id is an opaque string (Gmail API); it
+	// outranks header-chain derivation like GmThrid does.
+	ThreadKey string
 
 	// Canonical JMAP header object and its lowercase query mirrors.
 	HeadersJSON string
@@ -194,6 +198,7 @@ func createMessage(ctx context.Context, tx *sql.Tx, account string, mailboxUID i
 		InReplyTo:  rec.InReplyTo,
 		Subject:    rec.Subject,
 		GmThrid:    rec.GmThrid,
+		ThreadKey:  rec.ThreadKey,
 	}, seq)
 	if err != nil {
 		return "", err

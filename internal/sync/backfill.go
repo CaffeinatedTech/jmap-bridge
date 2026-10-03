@@ -57,6 +57,7 @@ func (e *Engine) discoverWith(ctx context.Context, backend mb.Backend, record bo
 		statuses[f.Name] = st
 		folders = append(folders, store.Folder{
 			Name: f.Name, Delim: f.Delim, Role: f.Role, NoSelect: f.NoSelect,
+			NativeID:    f.NativeID,
 			Implicit:    f.Implicit,
 			UIDValidity: st.Version, UIDNext: st.Next, HighestModSeq: st.ModSeq,
 		})
@@ -288,6 +289,8 @@ func (e *Engine) ingest(ctx context.Context, folder string, uv uint32, headers [
 		rec.Flags = h.Flags
 		rec.SharedUIDs = shared
 		rec.GmThrid = h.ThreadHint
+		rec.ThreadKey = h.ThreadKey
+		rec.Preview = h.Preview
 		recs = append(recs, rec)
 	}
 	return e.st.PutMessages(ctx, e.cfg.Account, folder, recs)

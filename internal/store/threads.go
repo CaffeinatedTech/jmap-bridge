@@ -24,6 +24,9 @@ type ThreadInput struct {
 	InReplyTo  []string
 	Subject    string
 	GmThrid    uint64
+	// ThreadKey is a fully-formed registry key ("g:…") the provider
+	// already computed; it joins candidates and binds like GmThrid.
+	ThreadKey string
 }
 
 // replyPrefixes are stripped (repeatedly, case-insensitively) when
@@ -169,6 +172,12 @@ func threadKeys(in ThreadInput) threadKeySet {
 		// shows (FR-S.10). Registered as an rfc-strength key so it both
 		// joins candidates and binds later arrivals.
 		out.rfc = append(out.rfc, "g:"+hashKey(fmt.Sprintf("%d", in.GmThrid)))
+	}
+	if in.ThreadKey != "" {
+		// The Gmail API's thread id is an opaque string; the adapter
+		// already encoded it as "g:<sha1(id)>" (gmailapi.ThreadKey), so
+		// use it verbatim as the grouping key (D-API-9).
+		out.rfc = append(out.rfc, in.ThreadKey)
 	}
 	add(in.MessageID)
 	for _, r := range in.References {

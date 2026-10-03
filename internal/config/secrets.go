@@ -85,6 +85,13 @@ func (c *Config) resolveSecrets() error {
 			}
 			a.OAuth2.ClientSecret = sec
 		}
+		if a.GmailAPI != nil {
+			tok, err := resolveSecret(a.ID, "gmail_api.token", fmt.Sprintf("accounts[%d].gmail_api.token", i), a.GmailAPI.Token, a.GmailAPI.TokenFile)
+			if err != nil {
+				return err
+			}
+			a.GmailAPI.Token = tok
+		}
 	}
 	return nil
 }

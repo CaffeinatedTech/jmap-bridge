@@ -51,7 +51,11 @@ func (e *Engine) idleOnce(ctx context.Context, backend mb.Backend) error {
 		return err
 	}
 	if notes == nil {
-		return nil // push unsupported: poll fallback
+		// Push unsupported: the run loop's poll ticker is the path. Park
+		// the session until ctx ends rather than returning, so the loop
+		// does not reconnect a stateless backend every second.
+		<-ctx.Done()
+		return ctx.Err()
 	}
 	e.idleWatching.Store(true)
 	defer e.idleWatching.Store(false)
