@@ -148,6 +148,22 @@ func invoke[T any, C apiCall[T]](ctx context.Context, c *Client, cost int, call 
 	}
 }
 
+// invokeOnce paces and classifies one call without retrying. Send uses it:
+// a retried send can duplicate a message whose response was lost, so an
+// ambiguous outcome is reconciled by Message-ID instead (GMAIL_API_PLAN
+// §8.1).
+func invokeOnce[T any, C apiCall[T]](ctx context.Context, c *Client, cost int, call C) (T, error) {
+	var zero T
+	if err := c.pacer.Wait(ctx, cost); err != nil {
+		return zero, err
+	}
+	v, err := call.Do()
+	if err != nil {
+		return zero, classify(err)
+	}
+	return v, nil
+}
+
 // --- thin typed operations (unexported: generated types stay in this package) ---
 
 func (c *Client) profile(ctx context.Context) (*gmail.Profile, error) {

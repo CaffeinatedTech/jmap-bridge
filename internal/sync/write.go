@@ -196,17 +196,33 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 		current[c.MailboxID] = true
 	}
 
+	cur, err := e.st.EmailKeywords(ctx, account, emailID)
+	if err != nil {
+		return err
+	}
 	kwAdd, kwRemove := p.KeywordAdd, p.KeywordRemove
 	if p.ReplaceKeywords {
-		cur, err := e.st.EmailKeywords(ctx, account, emailID)
-		if err != nil {
-			return err
-		}
 		kwRemove = nil
 		for k := range cur {
 			if !contains(kwAdd, k) {
 				kwRemove = append(kwRemove, k)
 			}
+		}
+	}
+	// Effective keyword deltas: a keyword already set is not added, and an
+	// absent one is not removed. The server call must see the effective set
+	// — Gmail refuses to remove a label the message does not carry (e.g.
+	// DRAFT once a submission has consumed the draft), while a redundant
+	// remove is a no-op on IMAP.
+	var kwAddSet, kwRemoveSet []string
+	for _, k := range kwAdd {
+		if !cur[k] {
+			kwAddSet = append(kwAddSet, k)
+		}
+	}
+	for _, k := range kwRemove {
+		if cur[k] {
+			kwRemoveSet = append(kwRemoveSet, k)
 		}
 	}
 	mbAdd, mbRemove := p.MailboxAdd, p.MailboxRemove
@@ -257,14 +273,14 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 			return jmapapi.ErrWouldLeaveEmpty
 		}
 	}
-	if len(kwAdd) > 0 || len(kwRemove) > 0 {
+	if len(kwAddSet) > 0 || len(kwRemoveSet) > 0 {
 		if len(copies) == 0 {
 			// Nothing addressable to STORE into; the mapping arrives
 			// with the next sync pass.
 			return jmapapi.ErrNoLocation
 		}
 	}
-	if len(kwAdd) == 0 && len(kwRemove) == 0 && len(addSet) == 0 && len(remSet) == 0 {
+	if len(kwAddSet) == 0 && len(kwRemoveSet) == 0 && len(addSet) == 0 && len(remSet) == 0 {
 		return nil // a patch whose effective delta is empty still succeeds
 	}
 
@@ -279,8 +295,8 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 		return err
 	}
 
-	if len(kwAdd) > 0 || len(kwRemove) > 0 {
-		if err := e.storeFlagsFor(ctx, copies, kwAdd, kwRemove); err != nil {
+	if len(kwAddSet) > 0 || len(kwRemoveSet) > 0 {
+		if err := e.storeFlagsFor(ctx, copies, kwAddSet, kwRemoveSet); err != nil {
 			return err
 		}
 	}
@@ -289,9 +305,9 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 		return err
 	}
 
-	kwChanged, err := e.st.CommitPatch(ctx, account, emailID, kwAdd, kwRemove, adds, remSet)
+	kwChanged, err := e.st.CommitPatch(ctx, account, emailID, kwAddSet, kwRemoveSet, adds, remSet)
 	e.log.Debug("sync: email patch committed",
-		"email", emailID, "kwAdd", kwAdd, "kwRemove", kwRemove,
+		"email", emailID, "kwAdd", kwAddSet, "kwRemove", kwRemoveSet,
 		"addedMailboxes", len(adds), "removedMailboxes", len(remSet),
 		"keywordsChanged", kwChanged, "copies", len(copies))
 	return err

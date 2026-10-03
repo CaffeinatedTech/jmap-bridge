@@ -300,6 +300,39 @@ type Backend interface {
 	HierarchyDelim(ctx context.Context) (rune, error)
 }
 
+// SendRequest is one provider-side submission (GMAIL_API_PLAN §8.1): the
+// RFC 5322 bytes to relay, Bcc already stripped, plus the bridge-generated
+// Message-ID used to reconcile an ambiguous outcome. Copies lets the
+// provider recognise a message it already holds as its own draft (Gmail
+// drafts.send) instead of sending a fresh copy.
+type SendRequest struct {
+	Raw        []byte
+	MessageID  string
+	From       string
+	Recipients []string
+	Copies     []Copy
+}
+
+// SendResult is what a provider-side submission produced. Ref addresses
+// the message the provider itself filed in Sent (a synthetic handle in
+// API mode, D-API-9); Keywords are its stored flags in IMAP-flag spelling.
+// DraftConsumed marks an existing provider draft the send consumed, so the
+// engine moves the known email instead of creating a second one.
+type SendResult struct {
+	Ref           Ref
+	Keywords      []string
+	DraftConsumed bool
+}
+
+// Sender is implemented by a backend whose provider submits over its own
+// API (Gmail API, §8.1) rather than SMTP. internal/sync falls back to
+// SMTP when the backend does not implement it. Sending is never retried
+// blindly: the implementation reconciles an ambiguous outcome by the
+// Message-ID before reporting failure (golden rule 1).
+type Sender interface {
+	Send(ctx context.Context, req SendRequest) (SendResult, error)
+}
+
 // ErrThrottled is the provider asking the engine to back off. The IMAP
 // driver maps OK [THROTTLED] and rate-limit errors here; the Gmail API
 // maps 429/403 rateLimitExceeded. It is backend-neutral so the engine's

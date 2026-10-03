@@ -509,11 +509,15 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 // canSend reports whether this account may be offered submission
-// (FR-J.5): it needs an SMTP server to send through *and* an IMAP
-// backend, because the engine that submits is the same one that files
-// the sent message and applies the caller's patches — an account with
-// SMTP but no IMAP has no engine behind it (main skips those).
+// (FR-J.5). IMAP mode needs an SMTP server to send through *and* an IMAP
+// backend, because the engine that submits is the same one that files the
+// sent message and applies the caller's patches — an account with SMTP but
+// no IMAP has no engine behind it (main skips those). Gmail API mode
+// submits through the provider API and needs no SMTP block (D-API-6).
 func canSend(acct *config.Account) bool {
+	if acct.Backend == "gmail_api" {
+		return true
+	}
 	return acct.SMTP != nil && acct.IMAP != nil
 }
 

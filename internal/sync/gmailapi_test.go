@@ -46,6 +46,10 @@ func (n storeNative) SaveDraft(ctx context.Context, uid uint32, draftID string) 
 	return n.st.SaveDraft(ctx, n.account, uid, draftID)
 }
 
+func (n storeNative) DraftID(ctx context.Context, uid uint32) (string, error) {
+	return n.st.DraftIDByUID(ctx, n.account, uid)
+}
+
 func TestGmailAPIEngineBackfillAndForeignFlag(t *testing.T) {
 	fx := fixturegmail.Start(t, fixturegmail.Options{})
 	fx.SeedLabel(fixturegmail.LabelInbox, "INBOX", "system")

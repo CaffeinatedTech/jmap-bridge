@@ -47,6 +47,9 @@ type NativeIndex interface {
 	// so a later submission can send exactly the draft that was created
 	// (M11; consumed by M12).
 	SaveDraft(ctx context.Context, uid uint32, draftID string) error
+	// DraftID resolves the Gmail draft handle for a synthetic message uid,
+	// "" when the uid is not a known draft (M12 submission).
+	DraftID(ctx context.Context, uid uint32) (string, error)
 }
 
 // Config wires one Gmail API backend session.
@@ -81,9 +84,10 @@ type bfState struct {
 	done   bool
 }
 
-// Backend adapts the Gmail REST API to mailbackend.Backend (D-API-2).
-// M10 is read-only: discovery, metadata backfill, history incremental and
-// hydration. Writes land in M11.
+// Backend adapts the Gmail REST API to mailbackend.Backend (D-API-2):
+// discovery, metadata backfill, history incremental and hydration (M10),
+// the write surface (M11) and provider-side submission (M12, also
+// implementing mailbackend.Sender).
 type Backend struct {
 	cfg Config
 	log *slog.Logger
@@ -938,6 +942,91 @@ func (b *Backend) DeleteMailbox(ctx context.Context, path string) error {
 
 // HierarchyDelim is Gmail's label path separator.
 func (b *Backend) HierarchyDelim(context.Context) (rune, error) { return '/', nil }
+
+// sendReconcileWait is how long an ambiguous send waits before its
+// Message-ID search is re-tried once: Gmail's indexes can lag the send
+// response by a moment (GMAIL_API_PLAN §8.1).
+const sendReconcileWait = 2 * time.Second
+
+// Send relays a message through the Gmail API instead of SMTP (D-API-6,
+// GMAIL_API_PLAN §8.1). A message the account already holds as a draft is
+// sent with drafts.send, so Gmail consumes the draft and files Sent in one
+// step; anything else is messages.send. Gmail files its own Sent copy, so
+// the bridge never APPENDs one. On an ambiguous failure the send is
+// reconciled by the bridge-generated Message-ID before being reported,
+// because a message may have been accepted even though no response came
+// back (golden rule 1).
+func (b *Backend) Send(ctx context.Context, req mb.SendRequest) (mb.SendResult, error) {
+	if err := b.refreshLabels(ctx); err != nil {
+		return mb.SendResult{}, err
+	}
+	draftID := b.draftIDFor(ctx, req.Copies)
+	var msg *gmail.Message
+	var err error
+	if draftID != "" {
+		msg, err = b.cfg.Client.sendDraft(ctx, draftID)
+	} else {
+		msg, err = b.cfg.Client.sendMessage(ctx, req.Raw)
+	}
+	if err != nil {
+		if req.MessageID == "" || !IsAmbiguous(err) {
+			return mb.SendResult{}, err
+		}
+		found, rerr := b.reconcileSend(ctx, req.MessageID)
+		if rerr != nil || found == "" {
+			return mb.SendResult{}, err
+		}
+		msg = &gmail.Message{Id: found}
+	}
+	return b.sendResult(ctx, msg, draftID != "")
+}
+
+// draftIDFor returns the Gmail draft handle behind any of the message's
+// copies, "" when the message is not a known draft.
+func (b *Backend) draftIDFor(ctx context.Context, copies []mb.Copy) string {
+	for _, c := range copies {
+		uid, ok := c.Ref.UID()
+		if !ok || uid == 0 {
+			continue
+		}
+		if id, err := b.cfg.Native.DraftID(ctx, uid); err == nil && id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// reconcileSend searches for a message by its Message-ID, waiting once
+// after a first miss: Gmail's list index can trail the send acceptance.
+func (b *Backend) reconcileSend(ctx context.Context, msgid string) (string, error) {
+	id, err := b.cfg.Client.findByRFC822MessageID(ctx, msgid)
+	if err != nil || id != "" {
+		return id, err
+	}
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-time.After(sendReconcileWait):
+	}
+	return b.cfg.Client.findByRFC822MessageID(ctx, msgid)
+}
+
+// sendResult turns a sent Gmail message into the neutral result: the
+// message's synthetic uid and its stored keywords.
+func (b *Backend) sendResult(ctx context.Context, msg *gmail.Message, draftConsumed bool) (mb.SendResult, error) {
+	if msg == nil || msg.Id == "" {
+		return mb.SendResult{}, fmt.Errorf("gmailapi: send returned no message id")
+	}
+	uidMap, err := b.cfg.Native.AllocNativeUIDs(ctx, []string{msg.Id})
+	if err != nil {
+		return mb.SendResult{}, err
+	}
+	return mb.SendResult{
+		Ref:           mb.NewRef("Sent", apiUIDValidity, uidMap[msg.Id]),
+		Keywords:      keyword.ToIMAP(KeywordsFromLabels(msg.LabelIds)),
+		DraftConsumed: draftConsumed,
+	}, nil
+}
 
 // --- write helpers ---
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"strings"
 
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/googleapi"
@@ -76,4 +77,34 @@ func (c *Client) patchLabel(ctx context.Context, id, name string) (*gmail.Label,
 // deleteLabel removes a user label.
 func (c *Client) deleteLabel(ctx context.Context, id string) error {
 	return invokeErr(ctx, c, CostLabelsDelete, c.svc.Users.Labels.Delete(userMe, id).Context(ctx))
+}
+
+// sendMessage relays raw RFC 5322 bytes as a new message; Gmail files its
+// own Sent copy. It does not retry (invokeOnce): an ambiguous failure is
+// reconciled by Message-ID by the caller.
+func (c *Client) sendMessage(ctx context.Context, raw []byte) (*gmail.Message, error) {
+	msg := &gmail.Message{Raw: base64.RawURLEncoding.EncodeToString(raw)}
+	return invokeOnce(ctx, c, CostMessagesSend, c.svc.Users.Messages.Send(userMe, msg).Context(ctx))
+}
+
+// sendDraft sends an existing Gmail draft (drafts.send): Gmail consumes the
+// draft handle and files Sent. Like sendMessage it is single-shot.
+func (c *Client) sendDraft(ctx context.Context, draftID string) (*gmail.Message, error) {
+	draft := &gmail.Draft{Id: draftID}
+	return invokeOnce(ctx, c, CostDraftsSend, c.svc.Users.Drafts.Send(userMe, draft).Context(ctx))
+}
+
+// findByRFC822MessageID resolves the message id of the message whose
+// Message-ID header is msgid, or "" when none is indexed yet. It is the
+// reconciliation read for an ambiguous send (GMAIL_API_PLAN §8.1).
+func (c *Client) findByRFC822MessageID(ctx context.Context, msgid string) (string, error) {
+	q := "rfc822msgid:" + strings.Trim(strings.TrimSpace(msgid), "<>")
+	resp, err := c.listMessages(ctx, q, nil, 1, "")
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Messages) == 0 {
+		return "", nil
+	}
+	return resp.Messages[0].Id, nil
 }

@@ -59,7 +59,7 @@ second protocol to every client, run one bridge:
 |---|---|---|
 | `urn:ietf:params:jmap:core` (RFC 8620) | session resource, `POST /jmap` (batched, result references), `/changes`, upload/download, error taxonomy | v0.1 |
 | `urn:ietf:params:jmap:mail` (RFC 8621) | `Mailbox/get\|query\|changes\|set`, `Email/get\|query\|changes\|set\|import`, `Thread/get`, `Identity/get` | v0.1 |
-| `urn:ietf:params:jmap:submission` | `EmailSubmission/set` (create → SMTP) | v0.1 |
+| `urn:ietf:params:jmap:submission` | `EmailSubmission/set` (create → SMTP, or the provider API in Gmail API mode) | v0.1 |
 | `urn:ietf:params:jmap:contacts` (RFC 9610) | `AddressBook/get\|changes`, `ContactCard/get\|changes\|set` | v0.1 |
 | push (RFC 8620 §7.3) | EventSource `/{account}/eventsource` (SSE) | v0.1 |
 | roadmap | `Email/queryChanges`, `Email/copy`, `Email/parse`, `Thread/changes`, `ContactCard/query`, `AddressBook/set`, `Identity/set`, `EmailSubmission/get\|query`, `SearchSnippet/get`, `PushSubscription` | later |
@@ -74,7 +74,7 @@ rather than failing.
 | Backend | IMAP auth | Sync tier | Send | Contacts |
 |---|---|---|---|---|
 | **Gmail / Google Workspace** | OAuth2 (XOAUTH2) | CONDSTORE (Gmail has no QRESYNC) | SMTP + XOAUTH2 | CardDAV, OAuth2-only, **no contact groups** |
-| **Gmail API mode** (`backend = "gmail_api"`) | OAuth2 (Google) | REST `history.list` | via Gmail API (M11+) | same OAuth token |
+| **Gmail API mode** (`backend = "gmail_api"`) | OAuth2 (Google) | REST `history.list` | Gmail API (`drafts.send`/`messages.send`, files Sent itself) | same OAuth token |
 | **Dovecot** (self-hosted) | password | QRESYNC | SMTP | needs a separate CardDAV server |
 | **cPanel mail** (Dovecot-based) | password | QRESYNC (detected) | SMTP | when the host offers CardDAV |
 | **Namecheap Private Email** | password | detected at runtime | SMTP | when the host offers CardDAV |
@@ -472,9 +472,12 @@ backend = "gmail_api"
 ```
 
 The tree implements the read path (browse, threads, search, lazy hydration,
-`/changes`, SSE) and the write path (triage, label moves, archive, draft
-create, `Mailbox/set`); submission over the API arrives with M12 and Pub/Sub
-push with M13. Semantics are documented honestly: a synthetic `All Mail`
+`/changes`, SSE), the write path (triage, label moves, archive, draft
+create, `Mailbox/set`) and submission over the API (`drafts.send` for a
+Gmail draft, otherwise `messages.send`; Gmail files its own Sent copy, so
+the bridge never APPENDs a second one, and an ambiguous send is reconciled
+by Message-ID before it is reported as failed). Pub/Sub push arrives with
+M13. Semantics are documented honestly: a synthetic `All Mail`
 archive with implicit membership, only `$seen`/`$flagged`/`$draft`/`$important`
 keywords (no `$answered`/`$deleted`/custom), `size` as Gmail's `sizeEstimate`
 until a body is hydrated, `onDestroyRemoveEmails=true` refused (a label never

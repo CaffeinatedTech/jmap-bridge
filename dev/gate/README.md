@@ -107,3 +107,31 @@ create/rename/delete; `onDestroyRemoveEmails=true` refused (`invalidProperties`)
 draft create; permanent destroy — every claim re-read independently through the
 Gmail API, then only the gate's objects cleaned up.
 
+## Submission (M12)
+
+API-mode submission (`drafts.send`/`messages.send`, Gmail files its own Sent
+copy, ambiguous sends reconciled by Message-ID) is proven two ways:
+
+- **Fixture gate (no Google account):** `bash dev/gate/gmailapi-fixture-start.sh`
+  then the bridge's own JMAP surface — compose a draft, submit it with
+  `onSuccessUpdateEmail` moving it to Sent, and read the Sent mailbox back.
+  The in-process gate is `TestGmailAPISubmissionComposeSendFilesSent`,
+  `TestGmailAPISubmissionWithoutPatchStillFilesSent` and
+  `TestGmailAPISubmissionAmbiguousReconciles` (`internal/sync`), plus the
+  adapter tests `TestAdapterSend*` (`internal/gmailapi`); the prompt that
+  drives the standalone rig is the compose→submit→Email/query sequence in the
+  README's API-mode section.
+- **Live send gate:** `python3 dev/gate/gmailapi-send-gate.py` — the
+  **self-send** variant on the M10/M11 rig. It composes one draft through the
+  bridge, submits it with a caller's `onSuccessUpdateEmail` (Drafts→Sent), and
+  re-reads the Gmail API **independently** to prove exactly one `SENT` copy,
+  an `INBOX` delivery (the sink is the account's own address), and no `DRAFT`;
+  it also checks the bridge's read-your-writes Sent state. It only touches
+  messages whose subject it mints and aborts on the first `429`.
+
+**Gate green 2026-10-04** against the user's Gmail account: one `SENT` copy,
+`INBOX` delivery, no draft, bridge Sent state correct — and it caught a real
+bug: the implicit patch tried to remove Gmail's `DRAFT` label after
+`drafts.send` had consumed the draft (`Invalid label: DRAFT`); the engine now
+computes effective keyword deltas before any provider call.
+

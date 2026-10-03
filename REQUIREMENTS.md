@@ -258,6 +258,14 @@ requirements are `NFR-<n>`.
   a successful submission is ever reported as a failed create (the client
   would send twice). `onSuccessDestroyEmail` is rejected with
   `invalidProperties` (client-side fallback exists in jmap-tui).
+  **Gmail API mode** (`backend = "gmail_api"`, FR-A.13) submits through the
+  provider instead: `drafts.send` when the Email is a Gmail draft, otherwise
+  `messages.send`. Gmail files its own Sent copy, so the bridge **never**
+  `APPEND`s a second one; it records the accepted message in the cache. An
+  ambiguous outcome (timeout/reset/5xx after dispatch) is reconciled by a
+  `rfc822msgid:` search for the bridge-generated `Message-ID` before the
+  create may be reported as failed, so an accepted message is neither
+  reported as failed nor retried into a duplicate.
 - **FR-M.16 Blob upload** (`POST /{account}/upload/`, the session's
   `{accountId}` expanding into the account path prefix) accepts a body up to
   the configured cap, rejects unsupported/oversized content with RFC 8620

@@ -97,6 +97,12 @@ func (f *fakeNative) SaveDraft(_ context.Context, uid uint32, draftID string) er
 	return nil
 }
 
+func (f *fakeNative) DraftID(_ context.Context, uid uint32) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.drafts[uid], nil
+}
+
 func (f *fakeNative) markMember(container, native string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

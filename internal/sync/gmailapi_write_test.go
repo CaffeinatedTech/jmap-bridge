@@ -26,6 +26,14 @@ type gapiEnv struct {
 
 func newGmailAPIEnv(t *testing.T, fx *fixturegmail.Server) *gapiEnv {
 	t.Helper()
+	return newGmailAPIEnvWrapped(t, fx, nil)
+}
+
+// newGmailAPIEnvWrapped is newGmailAPIEnv with an optional wrapper around
+// every backend session the engine builds (tests that need to observe a
+// specific provider call).
+func newGmailAPIEnvWrapped(t *testing.T, fx *fixturegmail.Server, wrap func(mb.Backend) mb.Backend) *gapiEnv {
+	t.Helper()
 	st, err := store.Open(context.Background(), store.Options{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -46,7 +54,11 @@ func newGmailAPIEnv(t *testing.T, fx *fixturegmail.Server) *gapiEnv {
 	cfg := Config{
 		Account: "gapi",
 		NewBackend: func() mb.Backend {
-			return gmailapi.NewBackend(gmailapi.Config{Account: "gapi", Client: client, Native: ni})
+			b := mb.Backend(gmailapi.NewBackend(gmailapi.Config{Account: "gapi", Client: client, Native: ni}))
+			if wrap != nil {
+				b = wrap(b)
+			}
+			return b
 		},
 		Interval:    150 * time.Millisecond,
 		BatchSize:   50,

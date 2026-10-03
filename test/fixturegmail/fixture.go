@@ -9,11 +9,14 @@
 //
 // It keeps its own small model with hand-written JSON shapes so the fixture
 // does not depend on the generated Gmail types; wire correctness is proven by
-// the client decoding these responses.
+// the client decoding these responses. From M12 it also models an
+// **ambiguous send** (TierAmbiguousSend): the message is accepted and filed
+// but the response is a 500, so the bridge must reconcile by Message-ID.
 package fixturegmail
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -22,6 +25,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +50,10 @@ const (
 	TierEventualVisibility
 	// TierUnauthorized refuses every request with 401.
 	TierUnauthorized
+	// TierAmbiguousSend accepts messages.send/drafts.send (filing the
+	// message and its history) but answers 500, modelling an ambiguous
+	// outcome whose acceptance must be reconciled by Message-ID.
+	TierAmbiguousSend
 )
 
 // Options configures a fixture server.
@@ -369,6 +377,10 @@ func (s *Server) putMessageLocked(m SeedMessage) string {
 	if internal == 0 {
 		internal = time.Now().UnixMilli()
 	}
+	headers := append([]Header(nil), m.Headers...)
+	if len(headers) == 0 && len(m.Raw) > 0 {
+		headers = parseRawHeaders(m.Raw)
+	}
 	if _, ok := s.messages[m.ID]; !ok {
 		s.messageOrder = append(s.messageOrder, m.ID)
 	}
@@ -380,11 +392,28 @@ func (s *Server) putMessageLocked(m SeedMessage) string {
 		sizeEstimate:  size,
 		snippet:       m.Snippet,
 		raw:           append([]byte(nil), m.Raw...),
-		headers:       append([]Header(nil), m.Headers...),
+		headers:       headers,
 		hasAttachment: m.HasAttachment,
 		historyID:     s.historyID,
 	}
 	return m.ID
+}
+
+// parseRawHeaders reads a message's top-level headers so a message stored
+// from raw bytes (send, drafts.create) is searchable by metadata and
+// rfc822msgid exactly like a seeded one.
+func parseRawHeaders(raw []byte) []Header {
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return nil
+	}
+	out := make([]Header, 0, len(msg.Header))
+	for name, values := range msg.Header {
+		for _, v := range values {
+			out = append(out, Header{Name: name, Value: v})
+		}
+	}
+	return out
 }
 
 func (s *Server) newHistoryLocked() historyRecord {
@@ -809,7 +838,14 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	rec.added = append(rec.added, id)
 	s.appendHistoryLocked(rec)
 	m := s.messages[id]
+	ambiguous := s.tier == TierAmbiguousSend
 	s.mu.Unlock()
+	if ambiguous {
+		// The message was accepted (and filed) but the response is lost:
+		// the bridge must reconcile by Message-ID rather than retry.
+		writeError(w, http.StatusInternalServerError, "Backend Error", "backendError")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "threadId": m.threadID, "labelIds": m.labelIDs})
 }
 
@@ -941,9 +977,14 @@ func (s *Server) handleDrafts(w http.ResponseWriter, r *http.Request, segs []str
 			s.sent = append(s.sent, sentMessage{Raw: m.raw})
 		}
 		delete(s.drafts, body.ID)
+		ambiguous := s.tier == TierAmbiguousSend
 		s.mu.Unlock()
 		if m == nil {
 			writeError(w, http.StatusNotFound, "Requested entity was not found.", "notFound")
+			return
+		}
+		if ambiguous {
+			writeError(w, http.StatusInternalServerError, "Backend Error", "backendError")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"id": msgID, "threadId": m.threadID, "labelIds": m.labelIDs})
@@ -1154,8 +1195,9 @@ func matchesQuery(m *message, q string) bool {
 				return false
 			}
 		case strings.HasPrefix(term, "rfc822msgid:"):
-			want := strings.TrimPrefix(term, "rfc822msgid:")
-			if !strings.EqualFold(header(m.headers, "Message-ID"), want) {
+			want := strings.Trim(strings.TrimPrefix(term, "rfc822msgid:"), "<>")
+			got := strings.Trim(header(m.headers, "Message-ID"), "<>")
+			if !strings.EqualFold(got, want) {
 				return false
 			}
 		default:

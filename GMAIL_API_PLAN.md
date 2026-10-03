@@ -4,10 +4,11 @@
 **v0.1** work (D-API-8). This file is the plan; nothing here is claimed built
 except where a milestone records it — **M8 (the seam + `imapdrv` adapter)
 landed 2026-10-03**, **M9 (the REST client) landed 2026-10-03**, **M10
-(config selection + the read path) landed 2026-10-03**, and **M11 (the write
-path + drafts + `Mailbox/set`) is ✅ done 2026-10-03** (PLAN §12), its live
-write gate green against the user's Gmail account. API mode reads and writes
-mail; submission lands with M12 and push with M13. The `REQUIREMENTS.md` / `PLAN.md` deltas the implementation must land **in the
+(config selection + the read path) landed 2026-10-03**, **M11 (the write
+path + drafts + `Mailbox/set`) is ✅ done 2026-10-03**, and **M12 (API
+submission §8.1) is ✅ done 2026-10-04** (PLAN §12), its live self-send
+gate green against the user's Gmail account. API mode reads, writes and
+sends mail; push lands with M13. The `REQUIREMENTS.md` / `PLAN.md` deltas the implementation must land **in the
 same commit as the code** are listed in §15 (golden rule 7).
 
 **Goal:** let a Google account be served by the **Gmail REST API** instead of
@@ -604,7 +605,13 @@ origin.
   courtesy-spaced writes). The M10 read-only gate is
   `dev/gate/gmailapi-live-gate.py`; the M11 write gate is
   `dev/gate/gmailapi-write-gate.py`, **green 2026-10-03** against the user's
-  Gmail account (as the M10 gate was).
+  Gmail account (as the M10 gate was); the M12 send gate is
+  `dev/gate/gmailapi-send-gate.py` (self-send), **green 2026-10-04** — one
+  `SENT` copy + `INBOX` delivery, no draft, every claim re-read through the
+  Gmail API. The M12 run caught a real bug: a redundant keyword delta reached
+  Gmail as a label removal the message did not carry (`Invalid label: DRAFT`
+  after `drafts.send`), fixed by computing effective deltas in
+  `ApplyEmailPatch`.
 
 ---
 
@@ -622,7 +629,7 @@ pure refactor; M9–M14 mirror the M1–M4 gating style.
 | **M9** | Gmail REST client on the official `google.golang.org/api/gmail/v1` package + `x/oauth2` bridge, pinned; hand-rolled batch, quota pacer, error taxonomy; `test/fixturegmail` skeleton + golden pairs — **landed 2026-10-03 (PLAN §12 gate ✅ done)** | fixture-backed client tests green incl. quota/backoff and batch correlation; cost table verified against Google's docs (corrected `messages.get` to 20) | (groundwork) |
 | **M10** | Config `backend`/`[accounts.gmail_api]` + validation; discovery, initial backfill, incremental history, hydration, `/changes` — **landed 2026-10-03 (PLAN §12 gate ✅ done)** | jmap-tui browses a fixture Gmail account in API mode (`dev/gate/gmailapi-fixture-start.sh`); **live read-only** gate (`dev/gate/gmailapi-live-gate.py`, user's real account, backfill scoped to a test label) — folders/labels/counts/threads correct; an out-of-band Gmail-API flag change appears through `history.list` | FR-A.13, FR-S.13 (new), FR-M.1–.8 |
 | **M11** | Write path §8; drafts; `Mailbox/set` (incl. refusing `onDestroyRemoveEmails=true`, §16.4) — **✅ done 2026-10-03 (PLAN §12)** | fixture-backed adapter + engine write tests green (`internal/gmailapi/write_test.go`, `internal/sync/gmailapi_write_test.go`); **live write gate green 2026-10-03** (`dev/gate/gmailapi-write-gate.py`, user's Gmail account, abort on first `429`): star, read, archive, move, `Mailbox/set` create/rename/delete, `onDestroyRemoveEmails=true` refused, draft create, destroy; every claim re-read from the Gmail API independently | FR-M.9–.13, FR-M.20 |
-| **M12** | Submission §8.1 | compose → send → exactly one Sent copy + delivery to a test sink; ambiguous-send reconciliation proven (simulated timeout) | FR-M.14–.17 |
+| **M12** | Submission §8.1 — **✅ done 2026-10-04 (PLAN §12)** | compose → send → exactly one Sent copy + delivery to a test sink; ambiguous-send reconciliation proven (simulated timeout) — **live self-send gate green 2026-10-04** (`dev/gate/gmailapi-send-gate.py`, user's Gmail account: one SENT copy + INBOX delivery independently re-read through the Gmail API, no draft, bridge read-your-writes; caught and fixed the effective-keyword-delta bug). Fixture gate: `internal/sync/gmailapi_submit_test.go`, `internal/gmailapi/send_test.go` (compose+send, patch and patch-less filing, `TierAmbiguousSend` reconciliation) | FR-M.14–.17 |
 | **M13** | Pub/Sub push: `users.watch` + renewal + stop, `/gmail/push/{account}`, `idtoken` verification, `watch="poll"` fallback | live foreign change visible ≤2 s through push; watch renewal survives an expiry-simulation; forged push rejected; poll fallback works with no Pub/Sub | FR-S.14 (new), NFR-2 |
 | **M14** | Docs (README API mode + Pub/Sub setup), config-migration note, and a **re-run of M7's packaging/conformance with API mode included** | documented install works end to end from README on a clean host; `JMAP-TestSuite` subset green incl. API mode; all gates green | FR-D.14 (new), NFR-3–.7 |
 

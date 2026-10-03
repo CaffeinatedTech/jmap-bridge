@@ -28,6 +28,22 @@ func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) }
 // IsThrottled reports whether err is the backend-neutral throttle sentinel.
 func IsThrottled(err error) bool { return errors.Is(err, mailbackend.ErrThrottled) }
 
+// IsAmbiguous reports whether a failed call left the server's acceptance
+// undetermined. A send that times out or is answered 5xx may already have
+// been processed, so the caller must reconcile by Message-ID before
+// reporting failure (GMAIL_API_PLAN §8.1). A definite refusal — a rejection,
+// an auth failure, or a 404 — is not ambiguous: the server answered.
+func IsAmbiguous(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrNotFound) || errors.Is(err, mailbackend.ErrAuth) {
+		return false
+	}
+	var rejected *mailbackend.RejectedError
+	return !errors.As(err, &rejected)
+}
+
 // retryableError marks a transport failure or a 5xx that is worth retrying.
 type retryableError struct{ err error }
 

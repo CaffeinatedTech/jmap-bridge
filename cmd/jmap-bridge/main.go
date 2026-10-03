@@ -367,6 +367,10 @@ func (n nativeIndex) SaveDraft(ctx context.Context, uid uint32, draftID string) 
 	return n.st.SaveDraft(ctx, n.account, uid, draftID)
 }
 
+func (n nativeIndex) DraftID(ctx context.Context, uid uint32) (string, error) {
+	return n.st.DraftIDByUID(ctx, n.account, uid)
+}
+
 // oauthConfig lifts the [accounts.oauth2] block into the oauth package's
 // view; HasCardDAV names the contacts scope for provider = "google"
 // (FR-A.9 — M6 fills contacts, the scope rides along now).

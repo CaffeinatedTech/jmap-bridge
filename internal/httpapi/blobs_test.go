@@ -231,7 +231,66 @@ func TestDownloadRefusesATypeItCannotSend(t *testing.T) {
 	}
 }
 
+// gmailAPIConfig is an account served by the Gmail API: no IMAP and no
+// SMTP block (config validation rejects both), so submission must be
+// offered on the provider backend alone (M12, D-API-6).
+const gmailAPIConfig = `
+listen = "127.0.0.1:8080"
+base_url = "http://127.0.0.1:8080"
+data_dir = "/tmp/jmap-bridge-test"
+
+[[accounts]]
+id = "gapi"
+name = "Gmail API"
+address = "me@example.test"
+token = "tok-gapi-0123456789abcdef"
+backend = "gmail_api"
+
+  [accounts.gmail_api]
+  endpoint = "http://127.0.0.1:9999/"
+  token = "fixture-token"
+`
+
 // --- FR-J.5 / FR-M.14: submission is advertised only when configured ---
+
+// TestSessionAdvertisesSubmissionWithGmailAPI pins that a backend =
+// "gmail_api" account is offered submission (and Identity/get) even
+// though it has no [accounts.smtp] block.
+func TestSessionAdvertisesSubmissionWithGmailAPI(t *testing.T) {
+	s := newTestServerCfg(t, gmailAPIConfig)
+	sess := decodeJSON(t, s.do(t, http.MethodGet, "/gapi/.well-known/jmap", "alice", "tok-gapi-0123456789abcdef", "", ""))
+
+	accounts, _ := sess["accounts"].(map[string]any)
+	pa, _ := accounts["gapi"].(map[string]any)
+	acctCaps, _ := pa["accountCapabilities"].(map[string]any)
+	if _, ok := acctCaps["urn:ietf:params:jmap:submission"]; !ok {
+		t.Fatalf("accountCapabilities = %v, want submission for a Gmail API account", acctCaps)
+	}
+
+	resp := s.do(t, http.MethodPost, "/gapi/jmap", "alice", "tok-gapi-0123456789abcdef", "application/json",
+		`{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail","urn:ietf:params:jmap:submission"],
+		"methodCalls":[["Identity/get",{"accountId":"gapi"},"c1"]]}`)
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST /gapi/jmap = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	responses := responsesAsList(t, decodeJSON(t, resp))
+	if len(responses) != 1 || responses[0][0] != "Identity/get" {
+		t.Fatalf("responses = %v", responses)
+	}
+	raw, _ := json.Marshal(responses[0][1])
+	var id struct {
+		List []struct {
+			Email string `json:"email"`
+		} `json:"list"`
+	}
+	if err := json.Unmarshal(raw, &id); err != nil {
+		t.Fatal(err)
+	}
+	if len(id.List) != 1 || id.List[0].Email != "me@example.test" {
+		t.Fatalf("identity = %+v", id.List)
+	}
+}
 
 func TestSessionAdvertisesSubmissionWithSMTP(t *testing.T) {
 	s := newTestServerCfg(t, submitConfig)

@@ -33,9 +33,6 @@ func (e *Engine) SubmitEmail(ctx context.Context, account string, spec jmapapi.S
 	if account != e.cfg.Account {
 		return nil, fmt.Errorf("sync: submit for foreign account %q", account)
 	}
-	if e.cfg.SMTP == nil {
-		return nil, jmapapi.ErrNoSubmissionBackend
-	}
 	emails, _, notFound, err := e.st.EmailsByID(ctx, account, []string{spec.EmailID}, false)
 	if err != nil {
 		return nil, err
@@ -51,6 +48,17 @@ func (e *Engine) SubmitEmail(ctx context.Context, account string, spec jmapapi.S
 	if err != nil {
 		return nil, err
 	}
+	if e.cfg.SMTP == nil {
+		// API mode has no SMTP block (config validation rejects it); the
+		// backend submits over its own provider API (GMAIL_API_PLAN §8.1).
+		return e.submitViaProvider(ctx, account, spec, raw, env)
+	}
+	return e.submitViaSMTP(ctx, account, spec, raw, env)
+}
+
+// submitViaSMTP is the IMAP-path submission: the message is relayed over
+// SMTP and the Sent copy is filed afterwards (PLAN §7.2).
+func (e *Engine) submitViaSMTP(ctx context.Context, account string, spec jmapapi.SubmissionSpec, raw []byte, env submit.Envelope) (*jmapapi.CreatedSubmission, error) {
 	// The id is minted before the send: after SMTP has accepted the
 	// message there is no error left that the caller may be told about,
 	// because "not created" would make it send the message twice.
@@ -112,6 +120,172 @@ func (e *Engine) SubmitEmail(ctx context.Context, account string, spec jmapapi.S
 		IdentityID: spec.IdentityID,
 		UndoStatus: "final", // relayed already: there is nothing to undo (FR-M.15)
 	}, nil
+}
+
+// submitViaProvider relays the message through the backend's own provider
+// API (Gmail API, GMAIL_API_PLAN §8.1). Gmail files its own Sent copy, so
+// the bridge never APPENDs one; it records the accepted message in the
+// cache so a read right after the submission sees it (FR-M.13) instead of
+// waiting for the next sync pass. The submission id is minted before the
+// send for the same reason as the SMTP path: once Gmail has it, no error
+// may be reported to the caller.
+func (e *Engine) submitViaProvider(ctx context.Context, account string, spec jmapapi.SubmissionSpec, raw []byte, env submit.Envelope) (*jmapapi.CreatedSubmission, error) {
+	id, err := e.st.MintID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	copies, err := e.st.EmailCopies(ctx, account, spec.EmailID)
+	if err != nil {
+		return nil, err
+	}
+	msgid, err := e.st.EmailMessageID(ctx, account, spec.EmailID)
+	if err != nil {
+		return nil, err
+	}
+	var res mb.SendResult
+	if err := e.wr.withBackend(ctx, func(b mb.Backend) error {
+		s, ok := b.(mb.Sender)
+		if !ok {
+			return jmapapi.ErrNoSubmissionBackend
+		}
+		var e2 error
+		res, e2 = s.Send(ctx, mb.SendRequest{
+			Raw:        convert.StripBcc(raw),
+			MessageID:  msgid,
+			From:       env.From,
+			Recipients: env.Recipients,
+			Copies:     backendCopies(copies),
+		})
+		return e2
+	}); err != nil {
+		return nil, err
+	}
+	// The message exists out there; a recording failure is logged, never
+	// reported as a failed create (the client would send twice).
+	if err := e.recordProviderSent(ctx, account, spec.EmailID, res, raw); err != nil {
+		e.log.Warn("sync: provider sent copy not recorded",
+			"email", spec.EmailID, "err", err)
+	}
+	e.log.Debug("sync: submitted via provider",
+		"email", spec.EmailID, "submission", id, "rcpt", len(env.Recipients),
+		"draftConsumed", res.DraftConsumed)
+	return &jmapapi.CreatedSubmission{
+		ID:         id,
+		EmailID:    spec.EmailID,
+		IdentityID: spec.IdentityID,
+		UndoStatus: "final",
+	}, nil
+}
+
+// recordProviderSent mirrors an accepted provider send into the cache. A
+// consumed draft keeps its identity and only changes membership; a fresh
+// message becomes a new Sent record sharing the submitted bytes.
+func (e *Engine) recordProviderSent(ctx context.Context, account, emailID string, res mb.SendResult, raw []byte) error {
+	if res.DraftConsumed {
+		return e.moveDraftToSent(ctx, account, emailID, res)
+	}
+	return e.commitSentCopy(ctx, account, emailID, res, raw)
+}
+
+// moveDraftToSent retires the local draft and files it in Sent, matching
+// what Gmail did server-side. It is a no-op when the message is already in
+// Sent (the caller's patch usually got there first).
+func (e *Engine) moveDraftToSent(ctx context.Context, account, emailID string, res mb.SendResult) error {
+	sentID, err := e.st.MailboxIDByRole(ctx, account, "sent")
+	if err != nil {
+		return err
+	}
+	if sentID == "" {
+		return errors.New(`sync: account has no mailbox with the "sent" role`)
+	}
+	draftID, err := e.st.MailboxIDByRole(ctx, account, "drafts")
+	if err != nil {
+		return err
+	}
+	copies, err := e.st.EmailCopies(ctx, account, emailID)
+	if err != nil {
+		return err
+	}
+	var add *store.MembershipAdd
+	uid, _ := res.Ref.UID()
+	version := res.Ref.VersionNum()
+	for _, c := range copies {
+		if c.MailboxID == sentID {
+			return nil // already recorded
+		}
+		if draftID != "" && c.MailboxID == draftID {
+			a := store.MembershipAdd{MailboxID: sentID, UID: c.UID, UIDValidity: c.UIDValidity}
+			add = &a
+			version = c.UIDValidity
+			uid = c.UID
+		}
+	}
+	if add == nil {
+		if uid == 0 {
+			return nil
+		}
+		add = &store.MembershipAdd{MailboxID: sentID, UID: uid, UIDValidity: version}
+	}
+	removes := []string{}
+	if draftID != "" && containsMailbox(copies, draftID) {
+		removes = append(removes, draftID)
+	}
+	_, err = e.st.CommitPatch(ctx, account, emailID, []string{"$seen"}, []string{"$draft"},
+		[]store.MembershipAdd{*add}, removes)
+	return err
+}
+
+// commitSentCopy records a provider-sent message as a new Sent email. The
+// record carries the synthetic uid the adapter allocated, so cache and
+// server agree from the first read; the copy shares the submitted bytes'
+// blob rather than storing them twice.
+func (e *Engine) commitSentCopy(ctx context.Context, account, emailID string, res mb.SendResult, raw []byte) error {
+	uid, _ := res.Ref.UID()
+	if uid == 0 {
+		return errors.New("sync: provider send result carries no message uid")
+	}
+	sentID, err := e.st.MailboxIDByRole(ctx, account, "sent")
+	if err != nil {
+		return err
+	}
+	if sentID == "" {
+		return errors.New(`sync: account has no mailbox with the "sent" role`)
+	}
+	folder, err := e.st.MailboxPath(ctx, account, sentID)
+	if err != nil {
+		return err
+	}
+	rec, err := convert.SummaryFromRaw(raw, time.Now())
+	if err != nil {
+		return err
+	}
+	rec.UID = uid
+	rec.UIDValidity = res.Ref.VersionNum()
+	rec.Flags = res.Keywords
+	if len(rec.Flags) == 0 {
+		rec.Flags = []string{`\Seen`}
+	}
+	created, err := e.st.CommitAppend(ctx, account, folder, rec)
+	if err != nil {
+		return err
+	}
+	if blobID, err := e.st.RawBlobID(ctx, account, emailID); err == nil && blobID != "" {
+		if err := e.st.LinkRawBlob(ctx, account, created.ID, blobID); err != nil {
+			e.log.Warn("sync: sent copy raw link failed", "email", created.ID, "err", err)
+		}
+	}
+	e.log.Debug("sync: provider sent copy recorded", "folder", folder, "email", created.ID)
+	return nil
+}
+
+// containsMailbox reports whether any copy lives in the named mailbox.
+func containsMailbox(copies []store.Copy, mailboxID string) bool {
+	for _, c := range copies {
+		if c.MailboxID == mailboxID {
+			return true
+		}
+	}
+	return false
 }
 
 // rawForSubmission returns the message's RFC 5322 bytes: from the blob
