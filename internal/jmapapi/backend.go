@@ -86,6 +86,11 @@ var (
 	ErrMailboxHasChild = errors.New("jmapapi: mailbox has children")
 	// ErrMailboxHasEmail → RFC 8621 §2.5 mailboxHasEmail.
 	ErrMailboxHasEmail = errors.New("jmapapi: mailbox has emails")
+	// ErrOnDestroyRemoveEmails: the account's provider cannot honour
+	// onDestroyRemoveEmails=true (Gmail labels never own their messages),
+	// so the request is refused with invalidProperties naming it rather
+	// than half-performed (FR-M.20).
+	ErrOnDestroyRemoveEmails = errors.New("jmapapi: onDestroyRemoveEmails is not supported by this backend")
 	// ErrWouldLeaveEmpty: the patch would leave the email in no mailbox,
 	// which the mail store may never do (RFC 8621 §4.1).
 	ErrWouldLeaveEmpty = errors.New("jmapapi: email would belong to no mailbox")

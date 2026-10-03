@@ -99,14 +99,20 @@ type LabelMutation struct {
 }
 
 // MapKeywords translates JMAP keyword add/remove sets into Gmail label
-// add/remove sets. $seen inverts to UNREAD; $flagged, $draft and $important map
-// straight across. A keyword present in both sets is treated as a removal
-// (the last operation wins, matching patch order).
+// add/remove sets. $seen is the *inverse* of Gmail's UNREAD label: adding
+// $seen removes UNREAD and removing $seen adds it (GMAIL_API_PLAN §8).
+// $flagged, $draft and $important map straight across. A keyword present
+// in both sets is treated as a removal (the last operation wins, matching
+// patch order).
 func MapKeywords(add, remove []string) LabelMutation {
 	var m LabelMutation
 	removed := map[string]bool{}
 	for _, kw := range remove {
 		removed[kw] = true
+		if kw == KeywordSeen {
+			m.Add = append(m.Add, LabelUnread)
+			continue
+		}
 		if label, ok := keywordLabel(kw); ok {
 			m.Remove = append(m.Remove, label)
 		} else {
@@ -115,6 +121,10 @@ func MapKeywords(add, remove []string) LabelMutation {
 	}
 	for _, kw := range add {
 		if removed[kw] {
+			continue
+		}
+		if kw == KeywordSeen {
+			m.Remove = append(m.Remove, LabelUnread)
 			continue
 		}
 		if label, ok := keywordLabel(kw); ok {
@@ -126,12 +136,10 @@ func MapKeywords(add, remove []string) LabelMutation {
 	return m
 }
 
-// keywordLabel maps one JMAP keyword to its Gmail label, reporting false for
-// anything Gmail cannot store.
+// keywordLabel maps one JMAP keyword to its directly-corresponding Gmail
+// label; $seen is not here because it is inverted (see MapKeywords).
 func keywordLabel(keyword string) (string, bool) {
 	switch keyword {
-	case KeywordSeen:
-		return LabelUnread, true // $seen's Gmail form is the inverse label
 	case KeywordFlagged:
 		return LabelStarred, true
 	case KeywordDraft:

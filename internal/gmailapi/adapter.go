@@ -2,7 +2,6 @@ package gmailapi
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/mail"
@@ -44,6 +43,10 @@ type NativeIndex interface {
 	NativeByUID(ctx context.Context, uid uint32) (string, bool, error)
 	NativeByUIDs(ctx context.Context, uids []uint32) (map[uint32]string, error)
 	KnownMemberUIDs(ctx context.Context, container string, uids []uint32) (map[uint32]bool, error)
+	// SaveDraft records the Gmail draft handle for a synthetic message uid
+	// so a later submission can send exactly the draft that was created
+	// (M11; consumed by M12).
+	SaveDraft(ctx context.Context, uid uint32, draftID string) error
 }
 
 // Config wires one Gmail API backend session.
@@ -87,6 +90,7 @@ type Backend struct {
 
 	labels     map[string]labelInfo // path → info
 	labelsByID map[string]labelInfo
+	labelOrder []labelInfo
 	bf         map[string]*bfState
 }
 
@@ -139,34 +143,54 @@ func (b *Backend) Ping(context.Context) error { return nil }
 // Release is a no-op for a stateless backend.
 func (b *Backend) Release(context.Context) error { return nil }
 
-// Folders maps Gmail labels into mailboxes (GMAIL_API_PLAN §6.1) and adds
-// the synthetic All Mail archive.
-func (b *Backend) Folders(ctx context.Context) ([]mb.Folder, error) {
+// refreshLabels lists Gmail's labels and rebuilds the path/index maps.
+// Both discovery (Folders) and every write call it: the write session is
+// separate from the work session, so it cannot assume the work session
+// already loaded them, and a label created through Mailbox/set must be
+// visible to the rename/delete that follows. labels.list costs 1 unit.
+func (b *Backend) refreshLabels(ctx context.Context) error {
 	resp, err := b.cfg.Client.listLabels(ctx)
 	if err != nil {
-		return nil, mapErr(err)
+		return mapErr(err)
 	}
-	b.labels = make(map[string]labelInfo, len(resp.Labels)+1)
-	b.labelsByID = make(map[string]labelInfo, len(resp.Labels)+1)
-	out := make([]mb.Folder, 0, len(resp.Labels)+1)
+	labels := make(map[string]labelInfo, len(resp.Labels)+1)
+	byID := make(map[string]labelInfo, len(resp.Labels)+1)
+	order := make([]labelInfo, 0, len(resp.Labels)+1)
 	for _, l := range resp.Labels {
 		name, role, ok := mapLabel(l)
 		if !ok {
 			continue
 		}
 		info := labelInfo{ID: l.Id, Name: name, Role: role, Total: l.MessagesTotal, Unread: l.MessagesUnread}
-		b.labels[name] = info
-		b.labelsByID[l.Id] = info
-		out = append(out, mb.Folder{
-			Container: name, Name: name, Delim: '/', Role: role, NativeID: l.Id,
-		})
+		labels[name] = info
+		byID[l.Id] = info
+		order = append(order, info)
 	}
 	all := labelInfo{Name: allMailName, Role: "archive", Implicit: true}
-	b.labels[allMailName] = all
-	out = append(out, mb.Folder{
-		Container: allMailName, Name: allMailName, Delim: 0,
-		Role: "archive", Implicit: true,
-	})
+	labels[allMailName] = all
+	order = append(order, all)
+	b.labels, b.labelsByID, b.labelOrder = labels, byID, order
+	return nil
+}
+
+// Folders maps Gmail labels into mailboxes (GMAIL_API_PLAN §6.1) and adds
+// the synthetic All Mail archive.
+func (b *Backend) Folders(ctx context.Context) ([]mb.Folder, error) {
+	if err := b.refreshLabels(ctx); err != nil {
+		return nil, err
+	}
+	out := make([]mb.Folder, 0, len(b.labelOrder))
+	for _, info := range b.labelOrder {
+		delim := rune('/')
+		if info.Implicit {
+			// The synthetic All Mail container is flat (D-API-11).
+			delim = 0
+		}
+		out = append(out, mb.Folder{
+			Container: info.Name, Name: info.Name, Delim: delim, Role: info.Role,
+			NativeID: info.ID, Implicit: info.Implicit,
+		})
+	}
 	b.log.Debug("gmailapi: labels mapped", "account", b.cfg.Account, "labels", len(out))
 	return out, nil
 }
@@ -735,42 +759,258 @@ func (b *Backend) FetchRawBatch(ctx context.Context, container string, refs []mb
 
 // --- write surface (M11) ---
 
-// errWriteUnsupported is returned by every mutation in M10; the read-only
-// milestone advertises no write capability and refuses rather than
-// pretending (golden rule 4).
-var errWriteUnsupported = errors.New("gmail_api: write support lands with M11")
-
-// StoreKeywords is not available in M10.
-func (b *Backend) StoreKeywords(context.Context, []mb.Copy, []string, []string) error {
-	return errWriteUnsupported
+// StoreKeywords maps JMAP keywords to Gmail labels and applies them to the
+// one native message every copy addresses (labels are per message, not per
+// copy, so a single modify covers the whole set — FR-S.10). A keyword
+// Gmail cannot store fails the write naming it, never silently (D-API-5,
+// FR-M.8).
+func (b *Backend) StoreKeywords(ctx context.Context, copies []mb.Copy, add, remove []string) error {
+	if len(copies) == 0 || (len(add) == 0 && len(remove) == 0) {
+		return nil
+	}
+	mutation := MapKeywords(add, remove)
+	if len(mutation.Unsupported) > 0 {
+		return &mb.UnsupportedKeywordsError{Keywords: dedupe(mutation.Unsupported)}
+	}
+	if len(mutation.Add) == 0 && len(mutation.Remove) == 0 {
+		return nil
+	}
+	if err := b.refreshLabels(ctx); err != nil {
+		return err
+	}
+	native, _, ok := b.nativeOfRefs(ctx, copyRefs(copies))
+	if !ok {
+		return fmt.Errorf("gmailapi: no native message for the keyword write")
+	}
+	_, err := b.cfg.Client.modifyMessage(ctx, native, mutation.Add, mutation.Remove)
+	return err
 }
 
-// SetMembership is not available in M10.
-func (b *Backend) SetMembership(context.Context, mb.Message, []mb.Copy, []mb.Mailbox, []mb.Mailbox) ([]mb.Copy, []mb.Ref, error) {
-	return nil, nil, errWriteUnsupported
+// SetMembership changes label membership (GMAIL_API_PLAN §8): adds and
+// removes fold into one messages.modify. The synthetic All Mail container
+// is implicit — adding it is a local no-op and removing it is refused.
+func (b *Backend) SetMembership(ctx context.Context, _ mb.Message, copies []mb.Copy, add, remove []mb.Mailbox) ([]mb.Copy, []mb.Ref, error) {
+	if err := b.refreshLabels(ctx); err != nil {
+		return nil, nil, err
+	}
+	native, uid, haveNative := b.nativeOfRefs(ctx, copyRefs(copies))
+	var addLabels, removeLabels []string
+	added := make([]mb.Copy, 0, len(add))
+	for _, m := range add {
+		if m.Implicit {
+			added = append(added, mb.Copy{MailboxID: m.ID, Ref: mb.NewRef(m.Path, apiUIDValidity, uid)})
+			continue
+		}
+		id, ok := b.labelIDForPath(m.Path)
+		if !ok {
+			return nil, nil, fmt.Errorf("gmailapi: unknown mailbox %q", m.Path)
+		}
+		addLabels = append(addLabels, id)
+		added = append(added, mb.Copy{MailboxID: m.ID, Ref: mb.NewRef(m.Path, apiUIDValidity, uid)})
+	}
+	for _, m := range remove {
+		if m.Implicit {
+			// All Mail holds everything; no label write can remove it
+			// (D-API-11), and the API cannot express it.
+			return nil, nil, &mb.RejectedError{Text: "membership in " + m.Path + " is managed by the server and cannot be removed"}
+		}
+		id, ok := b.labelIDForPath(m.Path)
+		if !ok {
+			return nil, nil, fmt.Errorf("gmailapi: unknown mailbox %q", m.Path)
+		}
+		removeLabels = append(removeLabels, id)
+	}
+	if len(addLabels) == 0 && len(removeLabels) == 0 {
+		return added, nil, nil
+	}
+	if !haveNative {
+		return nil, nil, fmt.Errorf("gmailapi: no native message for the membership write")
+	}
+	if _, err := b.cfg.Client.modifyMessage(ctx, native, addLabels, removeLabels); err != nil {
+		return nil, nil, err
+	}
+	// Touch every copy so the grace window spares membership the API has
+	// not surfaced yet (FR-S.12).
+	return added, copyRefs(copies), nil
 }
 
-// Destroy is not available in M10.
-func (b *Backend) Destroy(context.Context, []mb.Ref, string) ([]mb.Ref, error) {
-	return nil, errWriteUnsupported
+// Destroy permanently deletes the message (FR-M.10). Gmail has one message
+// object, so one messages.delete covers every label copy; a 404 means the
+// message is already gone, which is a no-op success.
+func (b *Backend) Destroy(ctx context.Context, copies []mb.Ref, _ string) ([]mb.Ref, error) {
+	if len(copies) == 0 {
+		return nil, nil
+	}
+	native, _, ok := b.nativeOfRefs(ctx, copies)
+	if !ok {
+		// No native mapping means we cannot honestly claim the server
+		// deleted anything: fail rather than tombstone a message that may
+		// still exist (golden rule 1).
+		return nil, fmt.Errorf("gmailapi: no native message for destroy")
+	}
+	if err := b.cfg.Client.deleteMessage(ctx, native); err != nil {
+		if IsNotFound(err) {
+			return copies, nil
+		}
+		return nil, err
+	}
+	return copies, nil
 }
 
-// Append is not available in M10.
-func (b *Backend) Append(context.Context, string, []byte, []string, *time.Time) (mb.Ref, []string, error) {
-	return mb.Ref{}, nil, errWriteUnsupported
+// Append stores raw RFC 5322 bytes as a Gmail draft (GMAIL_API_PLAN §8). It
+// is the engine's draft-create path; v0.1 has no API equivalent for
+// importing into arbitrary mailboxes, so any other container is refused
+// rather than mis-filed.
+func (b *Backend) Append(ctx context.Context, container string, raw []byte, keywords []string, _ *time.Time) (mb.Ref, []string, error) {
+	if err := b.refreshLabels(ctx); err != nil {
+		return mb.Ref{}, nil, err
+	}
+	info, ok := b.labels[container]
+	if !ok || info.Role != "drafts" {
+		return mb.Ref{}, nil, &mb.RejectedError{Text: "gmail_api: APPEND is draft-only in v0.1; Email/import into arbitrary mailboxes is not supported"}
+	}
+	mutation := MapKeywords(keywords, nil)
+	if len(mutation.Unsupported) > 0 {
+		return mb.Ref{}, nil, &mb.UnsupportedKeywordsError{Keywords: dedupe(mutation.Unsupported)}
+	}
+	labelIDs := append([]string{}, mutation.Add...)
+	if !containsString(labelIDs, LabelDraft) {
+		labelIDs = append(labelIDs, LabelDraft)
+	}
+	draft, err := b.cfg.Client.createDraft(ctx, raw, labelIDs)
+	if err != nil {
+		return mb.Ref{}, nil, err
+	}
+	if draft.Message == nil || draft.Message.Id == "" {
+		return mb.Ref{}, nil, fmt.Errorf("gmailapi: drafts.create returned no message id")
+	}
+	uidMap, err := b.cfg.Native.AllocNativeUIDs(ctx, []string{draft.Message.Id})
+	if err != nil {
+		return mb.Ref{}, nil, err
+	}
+	uid := uidMap[draft.Message.Id]
+	if err := b.cfg.Native.SaveDraft(ctx, uid, draft.Id); err != nil {
+		return mb.Ref{}, nil, err
+	}
+	return mb.NewRef(container, apiUIDValidity, uid), keyword.ToIMAP(truthSet(keywords)), nil
 }
 
-// CreateMailbox is not available in M10.
-func (b *Backend) CreateMailbox(context.Context, string) error { return errWriteUnsupported }
+// CreateMailbox creates a user label; "/" in the path nests it.
+func (b *Backend) CreateMailbox(ctx context.Context, path string) error {
+	if err := b.refreshLabels(ctx); err != nil {
+		return err
+	}
+	_, err := b.cfg.Client.createLabel(ctx, path)
+	return err
+}
 
-// RenameMailbox is not available in M10.
-func (b *Backend) RenameMailbox(context.Context, string, string) error { return errWriteUnsupported }
+// RenameMailbox renames (and, via "/", reparents) a user label, keeping its
+// id — and therefore its cached mailbox identity — stable.
+func (b *Backend) RenameMailbox(ctx context.Context, from, to string) error {
+	if err := b.refreshLabels(ctx); err != nil {
+		return err
+	}
+	id, ok := b.labelIDForPath(from)
+	if !ok {
+		return &mb.RejectedError{Text: "gmailapi: no label named " + from}
+	}
+	_, err := b.cfg.Client.patchLabel(ctx, id, to)
+	return err
+}
 
-// DeleteMailbox is not available in M10.
-func (b *Backend) DeleteMailbox(context.Context, string) error { return errWriteUnsupported }
+// DeleteMailbox removes a user label. A label already gone is a no-op.
+func (b *Backend) DeleteMailbox(ctx context.Context, path string) error {
+	if err := b.refreshLabels(ctx); err != nil {
+		return err
+	}
+	id, ok := b.labelIDForPath(path)
+	if !ok {
+		return &mb.RejectedError{Text: "gmailapi: no label named " + path}
+	}
+	if err := b.cfg.Client.deleteLabel(ctx, id); err != nil {
+		if IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
 
 // HierarchyDelim is Gmail's label path separator.
 func (b *Backend) HierarchyDelim(context.Context) (rune, error) { return '/', nil }
+
+// --- write helpers ---
+
+// nativeOfRefs resolves the single native message id every copy addresses
+// and the synthetic uid behind it. The Gmail API has one message object
+// with N labels, so all copies share one synthetic uid; the first
+// resolvable ref wins.
+func (b *Backend) nativeOfRefs(ctx context.Context, refs []mb.Ref) (string, uint32, bool) {
+	for _, r := range refs {
+		uid, ok := r.UID()
+		if !ok || uid == 0 {
+			continue
+		}
+		if native, found, err := b.cfg.Native.NativeByUID(ctx, uid); err == nil && found {
+			return native, uid, true
+		}
+	}
+	return "", 0, false
+}
+
+// labelIDForPath maps a mailbox path to its Gmail label id; the synthetic
+// All Mail archive has no id and is never addressable as a label write.
+func (b *Backend) labelIDForPath(path string) (string, bool) {
+	if path == allMailName {
+		return "", false
+	}
+	info, ok := b.labels[path]
+	if !ok || info.ID == "" {
+		return "", false
+	}
+	return info.ID, true
+}
+
+// copyRefs extracts the refs from a copy set.
+func copyRefs(copies []mb.Copy) []mb.Ref {
+	out := make([]mb.Ref, 0, len(copies))
+	for _, c := range copies {
+		out = append(out, c.Ref)
+	}
+	return out
+}
+
+// truthSet turns a keyword list into the map form keyword.ToIMAP wants.
+func truthSet(keywords []string) map[string]bool {
+	out := make(map[string]bool, len(keywords))
+	for _, k := range keywords {
+		out[k] = true
+	}
+	return out
+}
+
+// dedupe trims the ordering noise from the unsupported-keyword report.
+func dedupe(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
 
 // --- helpers ---
 

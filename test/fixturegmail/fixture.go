@@ -151,6 +151,7 @@ type Server struct {
 	throttled      int
 	attachments    map[string][]byte
 	sent           []sentMessage
+	labelSeq       int
 	draftSeq       int
 	drafts         map[string]string // draft id -> message id
 }
@@ -306,6 +307,41 @@ func (s *Server) CurrentHistoryID() uint64 {
 	return s.historyID
 }
 
+// MessageLabels returns a message's current label ids, false when it is
+// gone. Write tests use it to verify a mutation landed.
+func (s *Server) MessageLabels(id string) ([]string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.messages[id]
+	if m == nil {
+		return nil, false
+	}
+	return append([]string(nil), m.labelIDs...), true
+}
+
+// DraftIDs returns the live draft ids.
+func (s *Server) DraftIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.drafts))
+	for id := range s.drafts {
+		out = append(out, id)
+	}
+	return out
+}
+
+// LabelIDByName returns the id of the label with the given display name.
+func (s *Server) LabelIDByName(name string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range s.labelOrder {
+		if l := s.labels[id]; l != nil && l.name == name {
+			return id, true
+		}
+	}
+	return "", false
+}
+
 // --- model helpers (callers hold the lock) ---
 
 func (s *Server) putLabelLocked(id, name, typ string) {
@@ -393,6 +429,15 @@ func (s *Server) removeOrderLocked(id string) {
 	for i, v := range s.messageOrder {
 		if v == id {
 			s.messageOrder = append(s.messageOrder[:i], s.messageOrder[i+1:]...)
+			return
+		}
+	}
+}
+
+func (s *Server) removeLabelOrderLocked(id string) {
+	for i, v := range s.labelOrder {
+		if v == id {
+			s.labelOrder = append(s.labelOrder[:i], s.labelOrder[i+1:]...)
 			return
 		}
 	}
@@ -510,8 +555,9 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request, segs []str
 			writeError(w, http.StatusBadRequest, "Invalid label name", "invalidArgument")
 			return
 		}
-		id := "Label_" + strconv.Itoa(len(s.labels)+1)
 		s.mu.Lock()
+		s.labelSeq++
+		id := "Label_" + strconv.Itoa(s.labelSeq)
 		s.putLabelLocked(id, body.Name, "user")
 		l := s.labels[id]
 		s.mu.Unlock()
@@ -545,6 +591,7 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request, segs []str
 		s.mu.Lock()
 		_, ok := s.labels[segs[0]]
 		delete(s.labels, segs[0])
+		s.removeLabelOrderLocked(segs[0])
 		s.mu.Unlock()
 		if !ok {
 			writeError(w, http.StatusNotFound, "Not Found", "notFound")

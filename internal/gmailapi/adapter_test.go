@@ -19,6 +19,7 @@ type fakeNative struct {
 	byNative map[string]uint32
 	byUID    map[uint32]string
 	members  map[string]map[uint32]bool
+	drafts   map[uint32]string
 }
 
 func newFakeNative() *fakeNative {
@@ -26,6 +27,7 @@ func newFakeNative() *fakeNative {
 		byNative: map[string]uint32{},
 		byUID:    map[uint32]string{},
 		members:  map[string]map[uint32]bool{},
+		drafts:   map[uint32]string{},
 	}
 }
 
@@ -86,6 +88,13 @@ func (f *fakeNative) KnownMemberUIDs(_ context.Context, container string, uids [
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeNative) SaveDraft(_ context.Context, uid uint32, draftID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.drafts[uid] = draftID
+	return nil
 }
 
 func (f *fakeNative) markMember(container, native string) {

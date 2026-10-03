@@ -183,6 +183,40 @@ func (s *Store) NativeByUIDs(ctx context.Context, account string, uids []uint32)
 	return out, nil
 }
 
+// SaveDraft records the Gmail draft handle for a synthetic message uid
+// (M11). It is idempotent: a re-created draft for the same message updates
+// the handle rather than failing.
+func (s *Store) SaveDraft(ctx context.Context, account string, uid uint32, draftID string) error {
+	if uid == 0 || draftID == "" {
+		return nil
+	}
+	return s.tx(ctx, "", false, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO gmail_drafts(account, uid, draft_id) VALUES (?, ?, ?)
+			 ON CONFLICT(account, uid) DO UPDATE SET draft_id = excluded.draft_id`,
+			account, uid, draftID); err != nil {
+			return fmt.Errorf("store: save draft: %w", err)
+		}
+		return nil
+	})
+}
+
+// DraftIDByUID resolves the Gmail draft id for a synthetic message uid,
+// "" when the uid is not a known draft.
+func (s *Store) DraftIDByUID(ctx context.Context, account string, uid uint32) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT draft_id FROM gmail_drafts WHERE account = ? AND uid = ?`,
+		account, uid).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: draft id: %w", err)
+	}
+	return id, nil
+}
+
 // KnownMemberUIDs reports which of uids already sit live in the named
 // container. The Gmail API backfill uses it to skip re-fetching metadata
 // for messages a restart has already ingested.

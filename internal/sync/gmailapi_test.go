@@ -42,6 +42,10 @@ func (n storeNative) KnownMemberUIDs(ctx context.Context, container string, uids
 	return n.st.KnownMemberUIDs(ctx, n.account, container, uids)
 }
 
+func (n storeNative) SaveDraft(ctx context.Context, uid uint32, draftID string) error {
+	return n.st.SaveDraft(ctx, n.account, uid, draftID)
+}
+
 func TestGmailAPIEngineBackfillAndForeignFlag(t *testing.T) {
 	fx := fixturegmail.Start(t, fixturegmail.Options{})
 	fx.SeedLabel(fixturegmail.LabelInbox, "INBOX", "system")

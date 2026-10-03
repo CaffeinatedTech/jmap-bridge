@@ -333,6 +333,30 @@ func IsRejected(err error) bool {
 	return errors.As(err, &r)
 }
 
+// UnsupportedKeywordsError reports that a provider cannot store the named
+// JMAP keywords (Gmail API mode has no $answered, no $deleted and no
+// arbitrary keywords — D-API-5). It is distinct from a generic refusal so
+// the engine can turn it into the RFC 8621 keyword SetError that names
+// each offending keyword (FR-M.8).
+type UnsupportedKeywordsError struct {
+	Keywords []string
+}
+
+func (e *UnsupportedKeywordsError) Error() string {
+	return "mailbackend: unsupported keyword(s): " + joinComma(e.Keywords)
+}
+
+func joinComma(list []string) string {
+	out := ""
+	for i, s := range list {
+		if i > 0 {
+			out += ", "
+		}
+		out += s
+	}
+	return out
+}
+
 // RejectText returns the provider's refusal text, "" when not a refusal.
 func RejectText(err error) string {
 	var r *RejectedError

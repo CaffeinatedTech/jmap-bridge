@@ -81,3 +81,29 @@ incremental, then deletes exactly the test message and label. Backfill is
 scoped with `backfill_query` to the test label so the gate caches a handful
 of messages, not the mailbox.
 
+## Live write gate (M11)
+
+    python3 dev/gate/gmailapi-write-gate.py
+
+Same rig and token handling as the read-only gate, but it drives the **write**
+surface through the bridge's JMAP API and re-reads every claim independently
+through the Gmail API: star (`$flagged`), mark read (`$seen`), archive (drop
+INBOX), move to a label, `Mailbox/set` create/rename/delete, refuse
+`onDestroyRemoveEmails=true` (`invalidProperties`), create a draft, and
+permanent destroy. It mints only `jmap-bridge-test*` labels and one
+`<m11-gate-…@jmap-bridge.test>` message, and cleans up everything it created.
+
+The plan calls for a **dedicated throwaway account**; the script is safe on
+any account but a throwaway is preferred, and it **aborts on the first `429`**
+(and on any rate/quota SetError) rather than retrying, so a run can never
+deepen a throttle. Cleanup removes only what the gate minted: `jmap-bridge-test*`
+labels, its one `<m11-gate-…@jmap-bridge.test>` message, and drafts whose
+subject carries the `jmap-bridge M11 draft gate` prefix — never any other
+draft, message or label.
+
+**Gate green 2026-10-03** against the user's Gmail account (same rig as the
+M10 read gate): session over API mode; star, read, archive, move; `Mailbox/set`
+create/rename/delete; `onDestroyRemoveEmails=true` refused (`invalidProperties`);
+draft create; permanent destroy — every claim re-read independently through the
+Gmail API, then only the gate's objects cleaned up.
+

@@ -240,6 +240,24 @@ CREATE TABLE gmail_drafts (
 
 ALTER TABLE mailboxes ADD COLUMN native_id TEXT;
 `,
+	// v8 (M11): the Gmail API draft handle. v7 keyed gmail_drafts by the
+	// JMAP Email id, but the adapter learns the draft id at Append time —
+	// before the engine has minted the Email id — and the uid is the one
+	// handle both sides hold then. v0.1 does not edit draft content, so
+	// Gmail never replaces the message id under us (GMAIL_API_PLAN §9);
+	// keying by the stable synthetic uid is therefore sufficient and lets
+	// a future submission resolve draft → send honestly. The table is
+	// empty at this point (M10 is read-only), so recreating it loses
+	// nothing.
+	`
+DROP TABLE gmail_drafts;
+CREATE TABLE gmail_drafts (
+  account  TEXT NOT NULL,
+  uid      INTEGER NOT NULL,   -- synthetic message uid (native_ids)
+  draft_id TEXT NOT NULL,      -- Gmail draft id
+  PRIMARY KEY (account, uid)
+);
+`,
 }
 
 // migrate applies every not-yet-applied migration and refuses a database

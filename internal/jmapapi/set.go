@@ -146,6 +146,9 @@ func setErrFor(err error, property string) SetError {
 		return NewSetError("mailboxHasChild", nil, "")
 	case errors.Is(err, ErrMailboxHasEmail):
 		return NewSetError("mailboxHasEmail", nil, "")
+	case errors.Is(err, ErrOnDestroyRemoveEmails):
+		return NewSetError("invalidProperties", []string{"onDestroyRemoveEmails"},
+			"this account's provider cannot delete a mailbox's messages with it; delete the messages explicitly first")
 	case errors.Is(err, ErrUnknownMailbox):
 		return NewSetError("invalidProperties", []string{propertyOr(property, "mailboxIds")},
 			"the mailbox does not exist in this account")

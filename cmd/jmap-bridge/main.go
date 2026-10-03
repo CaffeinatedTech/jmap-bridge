@@ -363,6 +363,10 @@ func (n nativeIndex) KnownMemberUIDs(ctx context.Context, container string, uids
 	return n.st.KnownMemberUIDs(ctx, n.account, container, uids)
 }
 
+func (n nativeIndex) SaveDraft(ctx context.Context, uid uint32, draftID string) error {
+	return n.st.SaveDraft(ctx, n.account, uid, draftID)
+}
+
 // oauthConfig lifts the [accounts.oauth2] block into the oauth package's
 // view; HasCardDAV names the contacts scope for provider = "google"
 // (FR-A.9 — M6 fills contacts, the scope rides along now).

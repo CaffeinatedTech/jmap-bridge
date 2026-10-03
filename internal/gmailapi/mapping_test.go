@@ -35,11 +35,13 @@ func TestMapKeywords(t *testing.T) {
 	if len(m.Unsupported) != 0 {
 		t.Fatalf("unexpected unsupported: %v", m.Unsupported)
 	}
-	if !equalSet(m.Add, []string{LabelUnread, LabelStarred}) {
-		t.Fatalf("add = %v, want [UNREAD STARRED]", m.Add)
+	// Adding $seen marks read → remove UNREAD; adding $flagged → STARRED;
+	// removing $draft → remove DRAFT.
+	if !equalSet(m.Add, []string{LabelStarred}) {
+		t.Fatalf("add = %v, want [STARRED]", m.Add)
 	}
-	if !equalSet(m.Remove, []string{LabelDraft}) {
-		t.Fatalf("remove = %v, want [DRAFT]", m.Remove)
+	if !equalSet(m.Remove, []string{LabelUnread, LabelDraft}) {
+		t.Fatalf("remove = %v, want [UNREAD DRAFT]", m.Remove)
 	}
 }
 
@@ -56,9 +58,11 @@ func TestMapKeywordsRefusesUnsupported(t *testing.T) {
 }
 
 func TestMapKeywordsRemovalWins(t *testing.T) {
+	// A keyword in both sets is removed: removing $seen un-reads the
+	// message, which is the inverse label add.
 	m := MapKeywords([]string{KeywordSeen}, []string{KeywordSeen})
-	if len(m.Add) != 0 || !equalSet(m.Remove, []string{LabelUnread}) {
-		t.Fatalf("add/remove = %v/%v, want none/[UNREAD]", m.Add, m.Remove)
+	if !equalSet(m.Add, []string{LabelUnread}) || len(m.Remove) != 0 {
+		t.Fatalf("add/remove = %v/%v, want [UNREAD]/[]", m.Add, m.Remove)
 	}
 }
 

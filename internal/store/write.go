@@ -413,6 +413,16 @@ func (s *Store) CommitAppend(ctx context.Context, account, folder string, rec Me
 			return err
 		}
 		out.ID = id
+		// Backend-neutral native link (M11): for a Gmail API account the
+		// synthetic uid has a native_ids row and this records the JMAP id
+		// beside it; for IMAP there is no row and it is a no-op.
+		if rec.UID != 0 {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE native_ids SET jmap_id = ? WHERE account = ? AND kind = ? AND uid = ?`,
+				id, account, kindMessage, rec.UID); err != nil {
+				return fmt.Errorf("store: link native jmap id: %w", err)
+			}
+		}
 		if err := tx.QueryRowContext(ctx,
 			`SELECT thread_id, size FROM emails WHERE id = ? AND account = ?`,
 			id, account).Scan(&out.ThreadID, &out.Size); err != nil {

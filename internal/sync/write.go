@@ -352,10 +352,19 @@ func (e *Engine) storeFlagsFor(ctx context.Context, copies []store.Copy, kwAdd, 
 	err := e.wr.withBackend(ctx, func(b mb.Backend) error {
 		return b.StoreKeywords(ctx, backendCopies(copies), kwAdd, kwRemove)
 	})
-	if err != nil && mb.IsRejected(err) && len(custom) > 0 {
-		// FR-M.8: a keyword the server will not store fails the write,
-		// naming it — never dropped silently.
-		return &jmapapi.KeywordError{Keywords: custom}
+	if err != nil {
+		// A backend that names the keywords it cannot store (the Gmail
+		// API's fixed keyword set) reports exactly those (FR-M.8 amended
+		// to be backend-conditional, D-API-5).
+		var unsupported *mb.UnsupportedKeywordsError
+		if errors.As(err, &unsupported) {
+			return &jmapapi.KeywordError{Keywords: unsupported.Keywords}
+		}
+		if mb.IsRejected(err) && len(custom) > 0 {
+			// FR-M.8: a keyword the server will not store fails the write,
+			// naming it — never dropped silently.
+			return &jmapapi.KeywordError{Keywords: custom}
+		}
 	}
 	return err
 }
@@ -777,6 +786,13 @@ func (e *Engine) DestroyMailbox(ctx context.Context, account, id string, removeE
 		if other.ParentID == id {
 			return jmapapi.ErrMailboxHasChild
 		}
+	}
+	// A Gmail label never owns its messages, so onDestroyRemoveEmails=true
+	// cannot be honoured without permanently deleting mail the label API
+	// never asked us to touch. Refuse it by name rather than acknowledge a
+	// bulk destroy we cannot perform (GMAIL_API_PLAN §16.4, FR-M.20).
+	if removeEmails && e.wr.gmail() {
+		return jmapapi.ErrOnDestroyRemoveEmails
 	}
 	if mbx.TotalEmails > 0 {
 		if !removeEmails {

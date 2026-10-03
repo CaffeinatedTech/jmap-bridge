@@ -220,6 +220,9 @@ requirements are `NFR-<n>`.
   permitting). Unknown server flags surface as JMAP keywords; unknown JMAP
   keywords are stored if the server allows custom keywords, otherwise the write
   fails with `invalidArguments` naming the keyword — never silently dropped.
+  In Gmail API mode the writable keyword set is fixed — `$seen`, `$flagged`,
+  `$draft`, `$important` only — and any other keyword is refused with
+  `invalidArguments` naming it rather than dropped (D-API-5).
 - **FR-M.9 `Email/set update`** applies `keywords/<kw>` (true/false/null) and
   `mailboxIds/<id>` (true/null) patches, **IMAP-first** (D-14): the local
   commit, modseq bump and SSE notification happen only after the server accepts.
@@ -277,6 +280,18 @@ requirements are `NFR-<n>`.
   and per-member `notCreated`. A missing blob or unknown mailbox is
   `invalidProperties`; `ifInState` mismatch is `stateMismatch`. The bytes are
   linked as the message's raw blob so `Email/get` answers `blobId`.
+- **FR-M.20 Gmail API mail semantics**: in API mode mailbox membership is Gmail
+  label membership — adding/removing a mailbox id is `messages.modify` on the
+  labels, archiving removes `INBOX` only, and the synthetic `All Mail` archive
+  (`may_remove_items=false`) holds every message implicitly. Destroy is
+  permanent (`messages.delete`; a already-gone message is a no-op success).
+  Only `$seen`/`$flagged`/`$draft`/`$important` are writable keywords (FR-M.8
+  amended); drafts are a Gmail draft resource created via `drafts.create`.
+  `Mailbox/set` maps to label create/rename/delete, and
+  `onDestroyRemoveEmails=true` is refused with `invalidProperties` naming it
+  (a label never owns its messages, so the API cannot express it). Providers
+  that accept a write but surface it late must not make FR-M.9/FR-M.10 report
+  failure (the FR-S.12 grace window applies).
 
 ## 5. FR-P — Contacts (CardDAV backend)
 
@@ -500,6 +515,7 @@ requirements are `NFR-<n>`.
 | FR-P.1–.13 | M6 | contacts live suite green against real CardDAV |
 | FR-M.19, FR-J.9–.10, FR-D.2–.12, NFR-3–.7, NFR-9–.10 | M7 | documented install works; JMAP-TestSuite subset for the implemented surface green (deliberate gaps enumerated in PLAN §12) |
 | FR-A.13, FR-S.13, FR-M.1–.8 | M10 | Gmail API read path: jmap-tui browses a fixture Gmail account in API mode; live read-only Gmail gate (roles/labels/counts/threads correct; a web-UI flag change appears) |
+| FR-M.9–.13, FR-M.20 | M11 | Gmail API write path: fixture-backed `Email/set`/destroy/draft/`Mailbox/set` tests; live write gate on a throwaway account (label both ways, archive, star, move, draft, destroy; `onDestroyRemoveEmails=true` refused) |
 
 *(If PLAN.md's traceability column ever disagrees with this table, this table
 wins. This table maps requirements to milestones only — completion state is

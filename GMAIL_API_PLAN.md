@@ -3,10 +3,11 @@
 **Status:** approved at plan review 2026-10-03, implementation starting as
 **v0.1** work (D-API-8). This file is the plan; nothing here is claimed built
 except where a milestone records it — **M8 (the seam + `imapdrv` adapter)
-landed 2026-10-03**, **M9 (the REST client) landed 2026-10-03**, and **M10
-(config selection + the read path) landed 2026-10-03** (PLAN §12). API mode is
-read-only in the current tree; writes land with M11–M12.
-The `REQUIREMENTS.md` / `PLAN.md` deltas the implementation must land **in the
+landed 2026-10-03**, **M9 (the REST client) landed 2026-10-03**, **M10
+(config selection + the read path) landed 2026-10-03**, and **M11 (the write
+path + drafts + `Mailbox/set`) is ✅ done 2026-10-03** (PLAN §12), its live
+write gate green against the user's Gmail account. API mode reads and writes
+mail; submission lands with M12 and push with M13. The `REQUIREMENTS.md` / `PLAN.md` deltas the implementation must land **in the
 same commit as the code** are listed in §15 (golden rule 7).
 
 **Goal:** let a Google account be served by the **Gmail REST API** instead of
@@ -42,7 +43,7 @@ now).
 | D-API-2 | **A `mailbackend` interface** in a new `internal/mailbackend` package is the sync engine's only view of a provider. `internal/imapdrv` and a new `internal/gmailapi` implement it. This preserves D-7/D-21: go-imap library types still never leave `internal/imapdrv`, and the new REST types never leave `internal/gmailapi`. | 2026-10-03 |
 | D-API-3 | **Change notification is Cloud Pub/Sub** (`users.watch` → topic → bridge HTTPS push endpoint), because FR-S.7/NFR-2 demand ≤2 s visibility and history polling cannot promise it. A `watch = "poll"` mode is kept for self-hosted/loopback setups and for fixture tests, with FR-S.7 explicitly scoped to the push mode. | 2026-10-03 |
 | D-API-4 | **Gmail API only, generic seam.** `internal/mailbackend` is protocol-neutral (no Gmail or IMAP nouns); Microsoft Graph is a later package implementing the same interface, gated by a future REQUIREMENTS entry. | 2026-10-03 |
-| D-API-5 | **Unsupported keywords are rejected**, never dropped: Gmail has no `\Answered`/`$answered`, no `\Deleted` state (deletion is permanent or a label move), and no arbitrary IMAP keywords. Only `$seen`, `$flagged`, `$draft` and `$important` are writable. Any other keyword write fails with `invalidProperties` naming it (FR-M.8's never-silently-drop rule, capability honesty). | 2026-10-03 |
+| D-API-5 | **Unsupported keywords are rejected**, never dropped: Gmail has no `\Answered`/`$answered`, no `\Deleted` state (deletion is permanent or a label move), and no arbitrary IMAP keywords. Only `$seen`, `$flagged`, `$draft` and `$important` are writable. Any other keyword write fails with `invalidArguments` naming it (the JMAP keyword SetError FR-M.8 specifies; `mailbackend.UnsupportedKeywordsError` carries the names, capability honesty). | 2026-10-03 |
 | D-API-6 | **Submission uses the Gmail API** (`drafts.send` for an email that is a Gmail draft, `messages.send` otherwise); the account's `[accounts.smtp]` block is rejected in API mode. Gmail files the Sent copy, so the bridge never `APPEND`s a second one. | 2026-10-03 |
 | D-API-7 | **Google's official Go packages, pinned.** Use `google.golang.org/api/gmail/v1` (generated client), `google.golang.org/api/option`, and `google.golang.org/api/idtoken` (Pub/Sub push OIDC verification), bridging the existing `internal/oauth.Manager` into `golang.org/x/oauth2`. Pin **exact** versions in `go.mod` so CVE watching and upgrades are deliberate: `google.golang.org/api v0.300.0`, `golang.org/x/oauth2 v0.37.0` at drafting time (2026-10-03). Hand-roll only what the official client lacks: the Gmail **batch** endpoint (the Go client has no batch support — google-api-go-client #179), the quota pacer, error classification/backoff, and the provider adapter. | 2026-10-03 |
 | D-API-8 | **API mode is v0.1, starting now.** M7 is near-complete; the API track (milestones **M8–M14**, formerly A0–A6) is v0.1 and begins in parallel with M7's remaining verification. The v0.1 tag waits for both tracks, and M14 re-runs M7's packaging/conformance with API mode included. | 2026-10-03 |
@@ -294,14 +295,20 @@ CREATE TABLE native_ids (
 );
 CREATE INDEX native_ids_jmap ON native_ids(jmap_id);
 
--- Gmail drafts are a second handle on a message (draft.id) whose message.id
--- changes when the draft is replaced; the mapping must survive that.
+-- Gmail drafts are a second handle on a message (draft.id). Keyed by the
+-- synthetic message uid: the adapter learns draft.id at Append time,
+-- before the engine has minted the JMAP Email id, and the uid is the one
+-- handle both sides hold. v0.1 does not edit draft content, so Gmail
+-- never replaces the message.id under us (schema v8; §9).
 CREATE TABLE gmail_drafts (
   account   TEXT NOT NULL,
-  jmap_id   TEXT NOT NULL,      -- the Email id
+  uid       INTEGER NOT NULL,   -- synthetic message uid (native_ids)
   draft_id  TEXT NOT NULL,
-  PRIMARY KEY (account, jmap_id)
+  PRIMARY KEY (account, uid)
 );
+
+-- native_ids.jmap_id is filled by CommitAppend once the Email id exists,
+-- so a future draft send can go native → JMAP without a fresh sync.
 
 -- Per-account API sync bookkeeping lives in the existing sync_state JSON:
 --   scope='account': {"historyId":"…","watchExpiry":unix,"watchTopic":"…"}
@@ -466,11 +473,12 @@ backfill: all unchanged — they read the store, and the store is fed the same w
 | `keywords/$flagged` | add/remove `STARRED` | |
 | `keywords/$draft` | `DRAFT` label (guarded) | content edits on a draft go via `drafts.update`; v0.1 keeps the IMAP parity rule that a draft's body is immutable — see §9 |
 | `keywords/$important` | add/remove `IMPORTANT` | Gmail-specific, surfaced |
-| `keywords/$answered`, `$deleted`, custom | **refused** `invalidProperties` | D-API-5 |
+| `keywords/$answered`, `$deleted`, custom | **refused** `invalidProperties` | D-API-5 (surfaced as `invalidArguments` naming each, matching FR-M.8) |
 | destroy | `messages.delete` (permanent) | `404` = already gone = no-op success (FR-M.10); bulk via `messages.batchDelete` |
-| create draft | `drafts.create{message.raw}` | store both `message.id` and `draft.id`; MIME built by `internal/convert/build.go` |
+| create draft | `drafts.create{message.raw}` | store `message.id` (in `native_ids`) and `draft.id` (in `gmail_drafts`, keyed by the synthetic uid); MIME built by `internal/convert/build.go` |
 | `Mailbox/set` create/rename/delete | `labels.create` / `labels.patch` / `labels.delete` | nesting via `/` names; role/isSubscribed re-derived, refused as today |
 | `Mailbox/set` destroy `onDestroyRemoveEmails` | see below | |
+| `Email/import` | *(not supported in v0.1)* | `messages.insert` is out of the M11 scope (§12 fixture subset); a draft-targeted `Append` works, any other target is refused rather than mis-filed |
 
 - **`onDestroyRemoveEmails`:** deleting a Gmail label never deletes messages, so
   `onDestroyRemoveEmails = true` cannot be honoured without permanently deleting
@@ -586,9 +594,17 @@ origin.
 - **Interface parity**: the existing `internal/sync` fixture suites run against
   the IMAP adapter after M8 (regression net); a parallel subset runs against the
   Gmail fixture in M10+ via the same interface.
-- **Live gates** follow the M4 lesson (dedicated throwaway Gmail account, never
-  the personal one; abort on the first `429`; bounded, courtesy-spaced writes).
-  `dev/gate/gmailapi-gate.py` is the API sibling of `m4gate.py`.
+- **Write tests (M11)**: `internal/gmailapi/write_test.go` covers
+  `StoreKeywords` (incl. `$seen` inversion and the unsupported-keyword refusal),
+  `SetMembership` (label modify, implicit-All-Mail remove refusal), `Destroy`
+  (permanent + `404` no-op), `Append` (draft create; non-draft refusal) and
+  label create/rename/delete. `internal/sync/gmailapi_write_test.go` drives the
+  same surface through the engine against `test/fixturegmail`.
+- **Live gates** follow the M4 lesson (abort on the first `429`; bounded,
+  courtesy-spaced writes). The M10 read-only gate is
+  `dev/gate/gmailapi-live-gate.py`; the M11 write gate is
+  `dev/gate/gmailapi-write-gate.py`, **green 2026-10-03** against the user's
+  Gmail account (as the M10 gate was).
 
 ---
 
@@ -605,7 +621,7 @@ pure refactor; M9–M14 mirror the M1–M4 gating style.
 | **M8** | `internal/mailbackend` seam; `imapdrv` adapter; sync engine depends only on the interface; `ErrThrottled`/auth errors made backend-neutral — **landed 2026-10-03 (PLAN §12 gate ✅ done)** | **no behaviour change**: every existing test green; jmap-tui live suite over loopback still green; go-imap types still confined to `imapdrv` | none new (refactor) |
 | **M9** | Gmail REST client on the official `google.golang.org/api/gmail/v1` package + `x/oauth2` bridge, pinned; hand-rolled batch, quota pacer, error taxonomy; `test/fixturegmail` skeleton + golden pairs — **landed 2026-10-03 (PLAN §12 gate ✅ done)** | fixture-backed client tests green incl. quota/backoff and batch correlation; cost table verified against Google's docs (corrected `messages.get` to 20) | (groundwork) |
 | **M10** | Config `backend`/`[accounts.gmail_api]` + validation; discovery, initial backfill, incremental history, hydration, `/changes` — **landed 2026-10-03 (PLAN §12 gate ✅ done)** | jmap-tui browses a fixture Gmail account in API mode (`dev/gate/gmailapi-fixture-start.sh`); **live read-only** gate (`dev/gate/gmailapi-live-gate.py`, user's real account, backfill scoped to a test label) — folders/labels/counts/threads correct; an out-of-band Gmail-API flag change appears through `history.list` | FR-A.13, FR-S.13 (new), FR-M.1–.8 |
-| **M11** | Write path §8; drafts; `Mailbox/set` (incl. refusing `onDestroyRemoveEmails=true`, §16.4) | live write gate (dedicated account, abort on first `429`): label both ways, archive, star, move, `Mailbox/set`, draft create, destroy; every claim re-read from the Gmail web/API independently | FR-M.9–.13, FR-M.20 (new) |
+| **M11** | Write path §8; drafts; `Mailbox/set` (incl. refusing `onDestroyRemoveEmails=true`, §16.4) — **✅ done 2026-10-03 (PLAN §12)** | fixture-backed adapter + engine write tests green (`internal/gmailapi/write_test.go`, `internal/sync/gmailapi_write_test.go`); **live write gate green 2026-10-03** (`dev/gate/gmailapi-write-gate.py`, user's Gmail account, abort on first `429`): star, read, archive, move, `Mailbox/set` create/rename/delete, `onDestroyRemoveEmails=true` refused, draft create, destroy; every claim re-read from the Gmail API independently | FR-M.9–.13, FR-M.20 |
 | **M12** | Submission §8.1 | compose → send → exactly one Sent copy + delivery to a test sink; ambiguous-send reconciliation proven (simulated timeout) | FR-M.14–.17 |
 | **M13** | Pub/Sub push: `users.watch` + renewal + stop, `/gmail/push/{account}`, `idtoken` verification, `watch="poll"` fallback | live foreign change visible ≤2 s through push; watch renewal survives an expiry-simulation; forged push rejected; poll fallback works with no Pub/Sub | FR-S.14 (new), NFR-2 |
 | **M14** | Docs (README API mode + Pub/Sub setup), config-migration note, and a **re-run of M7's packaging/conformance with API mode included** | documented install works end to end from README on a clean host; `JMAP-TestSuite` subset green incl. API mode; all gates green | FR-D.14 (new), NFR-3–.7 |

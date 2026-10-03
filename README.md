@@ -471,12 +471,14 @@ backend = "gmail_api"
   # backfill_limit = 5000
 ```
 
-The current tree implements the read path (browse, threads, search, lazy
-hydration, `/changes`, SSE); writes and submission over the API arrive with the
-following milestones. Semantics are documented honestly: a synthetic `All Mail`
+The tree implements the read path (browse, threads, search, lazy hydration,
+`/changes`, SSE) and the write path (triage, label moves, archive, draft
+create, `Mailbox/set`); submission over the API arrives with M12 and Pub/Sub
+push with M13. Semantics are documented honestly: a synthetic `All Mail`
 archive with implicit membership, only `$seen`/`$flagged`/`$draft`/`$important`
-keywords (no `$answered`/`$deleted`/custom), and `size` as Gmail's
-`sizeEstimate` until a body is hydrated.
+keywords (no `$answered`/`$deleted`/custom), `size` as Gmail's `sizeEstimate`
+until a body is hydrated, `onDestroyRemoveEmails=true` refused (a label never
+owns its messages), and `Email/import` not yet supported in API mode.
 
 ## Development
 
