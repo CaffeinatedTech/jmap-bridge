@@ -1,7 +1,8 @@
 # Security Hardening Plan — JMAP endpoints
 
-Status: edge layer landed and verified live 2026-10-02; app-side A1–A8 landed.
-F9 (OAuth bootstrap throttle) and F10 (opaque server errors) deferred — see §10.
+Status: edge layer landed 2026-10-02; OAuth edge rate limit attached
+2026-10-03; app-side A1–A8 landed. F10 (opaque server errors) deferred — see
+§10.
 Owner: (assign)
 Related: `REQUIREMENTS.md` NFR-5 (security), `PLAN.md` §9 (auth), §11
 (observability), §13 (risk register). Golden rules 4, 7 and 8 in `AGENTS.md`
@@ -14,9 +15,10 @@ demonstrated.
 Close the gaps found in the JMAP endpoint review, in priority order, and make
 the advertised limits true. Two layers of defence:
 
-1. **Edge (Traefik)** — volumetric abuse: per-source request rate and
-   in-flight connection caps, applied before the app. Unauthenticated, shape
-   agnostic.
+1. **Edge (Traefik)** — volumetric abuse: a stricter request rate for the
+   unauthenticated OAuth bootstrap only, applied before the app. Shape
+   agnostic. Authenticated JMAP traffic is deliberately not edge-limited
+   (2026-10-03).
 2. **Application (Go)** — credential-aware protection: per-account failed-auth
    lockout, token entropy, concurrency the session advertises, SSE caps. The
    edge cannot see whether a 401 was a wrong password, so this half must live
@@ -187,43 +189,23 @@ ticker; reject anything that would overflow `time.Duration`. Guard
 
 ## 5. Edge layer — Traefik (k8s)
 
-**Yes, Traefik supports this natively.** Two CRD middlewares cover it:
-`RateLimit` (requests per source over time) and `InFlightReq` (concurrent
-requests per source). No plugin needed on Traefik v2.5+/v3.
+Traefik covers this natively with CRD middlewares: `RateLimit` (requests per
+source over time) and `InFlightReq` (concurrent requests per source). No plugin
+needed on Traefik v2.5+/v3.
+
+**Only the unauthenticated OAuth bootstrap is limited at the edge.** An edge
+limit cannot see the client token, so on the authenticated JMAP surface it
+punishes exactly the clients that did authenticate: marking a mailbox read, a
+first `/changes` sync or a reconnect storm is legitimately many requests. Both
+the general `jmap-ratelimit` and the `jmap-inflight` concurrency cap were
+therefore removed (2026-10-03); the main Ingress now carries only the HTTP ->
+HTTPS redirect. The app's credential-aware lockout (A1/A2) is unaffected and
+still owns abuse of authenticated traffic.
 
 `deploy/k8s/middleware-ratelimit.yaml` (v3 API group; on v2 use
 `traefik.containo.us/v1alpha1`):
 
 ```yaml
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: jmap-ratelimit
-  namespace: jmap-bridge
-spec:
-  rateLimit:
-    average: 20          # requests/second per source
-    burst: 40
-    period: 1s
-    sourceCriterion:
-      ipStrategy:
-        # If a cloud LB sits in front of Traefik, list its ranges here and/or
-        # use depth to skip hops from the right. With Traefik as the edge,
-        # the default (connection remote address) is already the client.
-        excludedIPs: []
----
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: jmap-inflight
-  namespace: jmap-bridge
-spec:
-  inFlightReq:
-    amount: 64           # comfortably above max SSE streams + normal requests
-    sourceCriterion:
-      ipStrategy:
-        excludedIPs: []
----
 # Stricter budget for the unauthenticated OAuth bootstrap.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -236,24 +218,21 @@ spec:
     burst: 5
     period: 10s
     sourceCriterion:
-      ipStrategy:
-        excludedIPs: []
+      requestHeaderName: CF-Connecting-IP
 ```
 
-Attach them with the existing annotation style (add to
-`deploy/k8s/ingress.yaml`):
+The main Ingress (`deploy/k8s/ingress.yaml`) attaches only the redirect:
 
 ```yaml
 annotations:
   traefik.ingress.kubernetes.io/router.middlewares: >-
-    jmap-bridge-jmap-ratelimit@kubernetescrd,
-    jmap-bridge-jmap-inflight@kubernetescrd,
     default-default-redirect-https@kubernetescrd
 ```
 
-For the stricter `/oauth/` budget, add a second Ingress for the same host with
-`path: /oauth` (Traefik routes by longest matching rule) carrying
-`jmap-bridge-jmap-oauth-ratelimit@kubernetescrd`. Add both middleware files to
+The `/oauth/` budget is a second Ingress for the same host with `path: /oauth`
+(Traefik routes by longest matching rule) carrying
+`jmap-bridge-jmap-oauth-ratelimit@kubernetescrd` — see
+`deploy/k8s/ingress-oauth.yaml`. Add the middleware and Ingress files to
 `deploy/k8s/kustomization.yaml` under `resources`.
 
 ### Traefik caveats (must be in the plan, not just the manifest)
@@ -266,13 +245,12 @@ For the stricter `/oauth/` budget, add a second Ingress for the same host with
   `ipStrategy.excludedIPs`/`depth` to the real client, or all traffic groups
   as one source and the limit becomes global. This is the same trust decision
   as `trusted_proxies` in A1 — document it once.
-- **SSE vs `InFlightReq`.** Every long-lived eventsource stream holds an
-  in-flight slot. Set `amount` above the expected concurrent streams, or
-  legitimate clients get `429` on reconnect. `RateLimit` also counts each SSE
-  as one request, which is correct.
+- **SSE.** EventSource streams are long-lived; the edge no longer caps
+  concurrency or rate-limits them (2026-10-03), so reconnect storms (jmap-tui's
+  60s poll fallback) cannot be throttled. The app-level SSE caps (A4) still
+  bound them.
 - **Buffering/timeouts.** The ingress comment already notes Traefik streams
-  SSE without buffering; keep `average`/`burst` generous enough that normal
-  reconnect storms (jmap-tui's 60s poll fallback) are not throttled.
+  SSE without buffering.
 - **Traefik version.** k3s ships Traefik v2 in some releases, v3 in others.
   Confirm `kubectl -n kube-system get deploy traefik -o jsonpath='{.spec.template.spec.containers[0].image}'`
   and pick the matching API group.
@@ -324,8 +302,8 @@ Unit / fixture tests (no real network), per AGENTS.md:
 - `internal/config`: token entropy rejects weak tokens but never prints the
   value; `[rate]` defaults and validation.
 - Traefik: not unit-testable here. Verify on the docker-capable host (or the
-  user's cluster) that a burst above `average`/`burst` returns `429`, and that
-  an SSE stream is not cut off by `InFlightReq`.
+  user's cluster) that a burst above the OAuth `average`/`burst` returns `429`,
+  and that authenticated traffic is not throttled.
 
 Gates before commit (AGENTS.md): `go build ./...`, `go vet ./...`,
 `gofumpt -l -w .`, `golangci-lint run`, `go test ./... -race`,
@@ -350,7 +328,10 @@ and `PLAN.md` changes ship together.
 - Minimum token entropy threshold (proposed 32 bytes / ≥ 24 chars).
 - Whether to add `golang.org/x/time/rate` or keep the stdlib bucket (D-22).
 - Whether the edge `RateLimit` should be enabled by default in the shipped
-  kustomize stack, or left commented as an opt-in.
+  kustomize stack, or left commented as an opt-in. **Resolved 2026-10-03:**
+  the general limit was removed (it punished authenticated bulk operations
+  it could not see); only the OAuth bootstrap is edge-rate-limited in the
+  shipped stack.
 
 ## 10. Progress (2026-10-02)
 
@@ -372,15 +353,19 @@ Landed:
 - **A8** EventSource `ping` clamped against `time.Duration` overflow.
 - **F11** `nosniff`/CSP/`X-Frame-Options`/`Referrer-Policy` on every response.
 - **F12** JSON-pointer index length-bounded.
-- **Traefik** `RateLimit`/`InFlightReq` middlewares, keyed on
-  `CF-Connecting-IP`; live-verified (burst → `429`, `retry-after`).
+- **Traefik** OAuth `RateLimit` middleware keyed on `CF-Connecting-IP`;
+  live-verified (burst → `429`, `retry-after`).
+- **F9** OAuth `/start` throttle — `jmap-oauth-ratelimit` (1/10s, burst 5)
+  attached to a dedicated `/oauth` Ingress (`deploy/k8s/ingress-oauth.yaml`),
+  2026-10-03. The general `jmap-ratelimit` and `jmap-inflight` middlewares were
+  removed the same day: authenticated JMAP traffic is not edge-limited (see
+  §5).
 
 Deferred (P2, not blocking):
 
-- **F9** OAuth `/start` throttle — the `jmap-oauth-ratelimit` Traefik middleware
-  exists but is not attached; needs a second `/oauth` Ingress.
 - **F10** opaque `serverFail` responses — the client still sees the wrapped
   server error string; logging the detail behind a correlation id is a
   follow-up.
-- App-side general request-rate limiting is intentionally absent (D-22): the
-  proxy owns volume.
+- App-side general request-rate limiting is intentionally absent (D-22, amended
+  2026-10-03): the edge rate-limits only the OAuth bootstrap, and the
+  credential-aware lockout (A1/A2) covers the authenticated surface.

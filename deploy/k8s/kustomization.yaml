@@ -16,6 +16,7 @@ resources:
   - issuer.yaml
   - middleware-ratelimit.yaml
   - ingress.yaml
+  - ingress-oauth.yaml
 # Bump the release tag without editing the Deployment:
 # images:
 #   - name: ghcr.io/caffeinatedtech/jmap-bridge

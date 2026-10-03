@@ -1,0 +1,34 @@
+# Separate Ingress for the unauthenticated OAuth bootstrap only. Traefik
+# routes by longest prefix, so /oauth/... matches here instead of the main
+# jmap-bridge Ingress and picks up the stricter jmap-oauth-ratelimit
+# middleware. Everything else (authenticated JMAP traffic) stays unthrottled:
+# one client action can legitimately be many requests, and Traefik cannot see
+# the client token. Both Ingresses share the host and TLS secret.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jmap-bridge-oauth
+  labels:
+    app.kubernetes.io/name: jmap-bridge
+  annotations:
+    # No cert-manager.io/issuer here: ingress.yaml owns the Certificate for
+    # jmap-bridge-tls. This Ingress only references the same secret so Traefik
+    # builds a websecure router for it.
+    traefik.ingress.kubernetes.io/router.middlewares: jmap-bridge-jmap-oauth-ratelimit@kubernetescrd,default-default-redirect-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - jmap.example.com
+      secretName: jmap-bridge-tls
+  rules:
+    - host: jmap.example.com
+      http:
+        paths:
+          - path: /oauth
+            pathType: Prefix
+            backend:
+              service:
+                name: jmap-bridge
+                port:
+                  name: http

@@ -17,11 +17,14 @@ metadata:
     # Namespaced Issuer from issuer.yaml (not a ClusterIssuer: it could not
     # read cloudflare-api-token-secret from its own namespace).
     cert-manager.io/issuer: "le-issuer-cloudflare"
-    # Middlewares are applied in order. The rate limit and in-flight caps
-    # live in this namespace (middleware-ratelimit.yaml); the HTTP -> HTTPS
-    # redirect lives in `default`. Each is referenced by its fully-qualified
-    # CRD name (<namespace>-<name>@kubernetescrd).
-    traefik.ingress.kubernetes.io/router.middlewares: jmap-bridge-jmap-ratelimit@kubernetescrd,jmap-bridge-jmap-inflight@kubernetescrd,default-default-redirect-https@kubernetescrd
+    # Middlewares are applied in order. Only the HTTP -> HTTPS redirect is
+    # attached here; it lives in `default` and is referenced by its
+    # fully-qualified CRD name (<namespace>-<name>@kubernetescrd).
+    #
+    # No edge rate/concurrency limit on purpose: authenticated JMAP traffic is
+    # not throttled (one client action can legitimately be many requests). The
+    # /oauth rate limit is attached to ingress-oauth.yaml instead.
+    traefik.ingress.kubernetes.io/router.middlewares: default-default-redirect-https@kubernetescrd
 spec:
   ingressClassName: traefik
   tls:

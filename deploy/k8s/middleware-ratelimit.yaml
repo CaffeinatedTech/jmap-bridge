@@ -1,8 +1,12 @@
-# Traefik rate limiting for the jmap-bridge ingress (Traefik v3, CRD group
-# traefik.io/v1alpha1). This is the edge layer only: it bounds volume per
-# client. It cannot tell a wrong token from a valid one, so the app-level
-# failed-auth lockout (SECURITY-PLAN.md Workstream A2) is separate and still
-# required.
+# Traefik edge middleware for jmap-bridge (Traefik v3, CRD group
+# traefik.io/v1alpha1).
+#
+# The only edge limit is for the unauthenticated OAuth bootstrap. Authenticated
+# JMAP traffic is deliberately not rate-limited or concurrency-capped: a single
+# client action (marking a mailbox read, a first /changes sync) is legitimately
+# many requests, and Traefik cannot see the client token, so an edge limit
+# punishes exactly the clients that authenticated. The app-level failed-auth
+# lockout (SECURITY-PLAN.md Workstream A2) is separate and still required.
 #
 # Source identity: this origin sits behind the Cloudflare proxy, so the TCP
 # peer Traefik sees is a Cloudflare edge IP, not the user. Cloudflare sets
@@ -11,40 +15,6 @@
 # origin is ever reachable directly (bypassing Cloudflare) that traffic has no
 # such header and falls into one shared bucket; keep 192.168.0.200 firewalled
 # to Cloudflare's ranges if that matters.
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: jmap-ratelimit
-  namespace: jmap-bridge
-  labels:
-    app.kubernetes.io/name: jmap-bridge
-spec:
-  rateLimit:
-    average: 10          # sustained requests/second per client
-    burst: 30            # short spike allowance (session + parallel gets)
-    period: 1s
-    sourceCriterion:
-      requestHeaderName: CF-Connecting-IP
----
-# Cap concurrent in-flight requests per client. Keep this comfortably above
-# the number of long-lived EventSource streams plus the app's
-# maxConcurrentRequests, or legitimate clients get 429 on reconnect.
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: jmap-inflight
-  namespace: jmap-bridge
-  labels:
-    app.kubernetes.io/name: jmap-bridge
-spec:
-  inFlightReq:
-    amount: 128
-    sourceCriterion:
-      requestHeaderName: CF-Connecting-IP
----
-# Stricter budget for the unauthenticated OAuth bootstrap. Provided here but
-# NOT attached by default: wire it to a second Ingress for the same host with
-# path /oauth (Traefik routes by longest prefix) if you want it enforced.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
