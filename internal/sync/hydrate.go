@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/convert"
-	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
+	mb "github.com/CaffeinatedTech/jmap-bridge/internal/mailbackend"
 )
 
 // errNotHydrated means the backend fetch for a body did not produce
@@ -115,12 +115,16 @@ func (e *Engine) hydrateBatch(ctx context.Context, ids []string) error {
 			return ctx.Err()
 		}
 		// Hydrate on the dedicated session (FR-X.6): a sync pass holds
-		// the work connection for a whole backfill, so reading through
-		// it would starve this request.
-		var bodies map[uint32][]byte
-		err := e.rd.withConn(ctx, func(conn *imapdrv.Conn) error {
+		// the work session for a whole backfill, so reading through it
+		// would starve this request.
+		refs := make([]mb.Ref, 0, len(uids))
+		for uid := range uids {
+			refs = append(refs, mb.NewRef(folder, 0, uid))
+		}
+		var bodies map[mb.Ref][]byte
+		err := e.rd.withBackend(ctx, func(b mb.Backend) error {
 			var ferr error
-			bodies, ferr = conn.FetchBodies(ctx, folder, uidKeys(uids))
+			bodies, ferr = b.FetchRawBatch(ctx, folder, refs)
 			return ferr
 		})
 		if err != nil {
@@ -131,7 +135,7 @@ func (e *Engine) hydrateBatch(ctx context.Context, ids []string) error {
 		}
 		e.hydrateFetches.Add(int64(len(bodies)))
 		for uid, id := range uids {
-			raw, ok := bodies[uid]
+			raw, ok := bodies[mb.NewRef(folder, 0, uid)]
 			if !ok {
 				fails[id] = fmt.Errorf("%w: %s not in fetch response", errNotHydrated, id)
 				continue
@@ -168,14 +172,6 @@ func wanted(want []string, id string) bool {
 		}
 	}
 	return false
-}
-
-func uidKeys(m map[uint32]string) []uint32 {
-	out := make([]uint32, 0, len(m))
-	for uid := range m {
-		out = append(out, uid)
-	}
-	return out
 }
 
 func firstErrOf(fails map[string]error) error {
@@ -287,14 +283,10 @@ func (e *Engine) fetchRawBody(id string) ([]byte, error) {
 	opCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	var raw []byte
-	err = e.rd.withConn(opCtx, func(conn *imapdrv.Conn) error {
-		if _, err := conn.Examine(opCtx, loc.Folder, nil); err != nil {
-			return err
-		}
-		if raw, err = conn.FetchBody(opCtx, loc.UID); err != nil {
-			return err
-		}
-		return conn.Unselect(opCtx)
+	err = e.rd.withBackend(opCtx, func(b mb.Backend) error {
+		var ferr error
+		raw, ferr = b.FetchRaw(opCtx, mb.NewRef(loc.Folder, 0, loc.UID))
+		return ferr
 	})
 	if err != nil {
 		return nil, err
@@ -309,43 +301,32 @@ func (e *Engine) fetchPreviews(ctx context.Context, ids []string) error {
 	if err != nil {
 		return err
 	}
-	byFolder := map[string][]uint32{}
+	refs := make([]mb.Ref, 0, len(ids))
+	byRef := map[mb.Ref]string{}
 	for _, id := range ids {
 		if loc, ok := locs[id]; ok {
-			byFolder[loc.Folder] = append(byFolder[loc.Folder], loc.UID)
+			r := mb.NewRef(loc.Folder, 0, loc.UID)
+			refs = append(refs, r)
+			byRef[r] = id
 		}
 	}
-	if len(byFolder) == 0 {
+	if len(refs) == 0 {
 		return nil
 	}
 	// Previews run on the dedicated session too (FR-X.6), so listing a
-	// folder never waits out a backfill on the work connection.
-	return e.rd.withConn(ctx, func(conn *imapdrv.Conn) error {
-		defer func() { _ = conn.Unselect(context.Background()) }()
-		for folder, uids := range byFolder {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if _, err := conn.Examine(ctx, folder, nil); err != nil {
-				return err
-			}
-			previews, err := conn.FetchPreviews(ctx, uids)
-			if err != nil {
-				return err
-			}
-			byID := map[string]string{}
-			for _, id := range ids {
-				if loc, ok := locs[id]; ok && loc.Folder == folder {
-					if p, ok := previews[loc.UID]; ok && p != "" {
-						byID[id] = p
-					}
-				}
-			}
-			if err := e.st.SetPreviews(ctx, e.cfg.Account, byID); err != nil {
-				return err
+	// folder never waits out a backfill on the work session.
+	return e.rd.withBackend(ctx, func(b mb.Backend) error {
+		previews, err := b.FetchPreviews(ctx, refs)
+		if err != nil {
+			return err
+		}
+		byID := map[string]string{}
+		for r, p := range previews {
+			if p != "" {
+				byID[byRef[r]] = p
 			}
 		}
-		return nil
+		return e.st.SetPreviews(ctx, e.cfg.Account, byID)
 	})
 }
 

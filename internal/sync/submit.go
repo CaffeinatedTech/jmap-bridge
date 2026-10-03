@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/convert"
-	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	mb "github.com/CaffeinatedTech/jmap-bridge/internal/mailbackend"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/submit"
 )
@@ -73,8 +73,9 @@ func (e *Engine) SubmitEmail(ctx context.Context, account string, spec jmapapi.S
 			return nil, err
 		}
 		if draft != nil {
-			if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-				return conn.ExpungeUIDs(ctx, draft.Folder, []uint32{draft.UID})
+			if err := e.wr.withBackend(ctx, func(b mb.Backend) error {
+				_, e2 := b.Destroy(ctx, []mb.Ref{mb.NewRef(draft.Folder, draft.UIDValidity, draft.UID)}, "")
+				return e2
 			}); err != nil {
 				return nil, err
 			}
@@ -224,15 +225,16 @@ func (e *Engine) fileSentCopy(ctx context.Context, account, emailID string, raw 
 	if err != nil {
 		return err
 	}
-	var uid, uidValidity uint32
-	if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
+	var ref mb.Ref
+	if err := e.wr.withBackend(ctx, func(b mb.Backend) error {
 		var err error
-		uid, uidValidity, err = conn.AppendMessage(ctx, folder, raw, []string{`\Seen`}, &rec.ReceivedAt)
+		ref, _, err = b.Append(ctx, folder, raw, []string{"$seen"}, &rec.ReceivedAt)
 		return err
 	}); err != nil {
 		return err
 	}
-	rec.UID, rec.UIDValidity = uid, uidValidity
+	rec.UID, _ = ref.UID()
+	rec.UIDValidity = ref.VersionNum()
 	rec.Flags = []string{`\Seen`}
 	created, err := e.st.CommitAppend(ctx, account, folder, rec)
 	if err != nil {

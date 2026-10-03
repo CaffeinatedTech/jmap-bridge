@@ -208,7 +208,7 @@ func TestLiveSoak100k(t *testing.T) {
 	runEngine := func() (cancel context.CancelFunc) {
 		eng := bridgesync.New(bridgesync.Config{
 			Account:        "soak",
-			IMAP:           cfg,
+			NewBackend:     liveBackend(cfg),
 			Interval:       time.Hour,
 			BatchSize:      500,
 			PrefetchWindow: 0, // bodies only via explicit hydration: NFR-8 stays measurable

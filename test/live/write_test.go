@@ -281,7 +281,7 @@ func TestLiveWriteTriageRoundTrips(t *testing.T) {
 	defer func() { _ = st.Close() }()
 
 	eng := bridgesync.New(bridgesync.Config{
-		Account: "livetest", IMAP: cfg,
+		Account: "livetest", NewBackend: liveBackend(cfg),
 		Interval: time.Hour, BatchSize: 200, PrefetchWindow: 0, Concurrency: 2,
 	}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	engCtx, engCancel := context.WithCancel(ctx)

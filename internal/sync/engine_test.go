@@ -12,9 +12,16 @@ import (
 	"github.com/CaffeinatedTech/go-imap"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	mb "github.com/CaffeinatedTech/jmap-bridge/internal/mailbackend"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	"github.com/CaffeinatedTech/jmap-bridge/test/fixtureimap"
 )
+
+// backendFactory builds the IMAP backend factory tests wire into
+// sync.Config; the engine itself depends only on mailbackend.
+func backendFactory(cfg imapdrv.Config) func() mb.Backend {
+	return func() mb.Backend { return imapdrv.NewBackend(cfg) }
+}
 
 type testEnv struct {
 	fx      *fixtureimap.Server
@@ -50,10 +57,10 @@ func newEnv(t *testing.T, tier fixtureimap.Tier, tweak func(*Config)) *testEnv {
 	host, port := splitAddr(t, fx.Addr())
 	cfg := Config{
 		Account: "acct",
-		IMAP: imapdrv.Config{
+		NewBackend: backendFactory(imapdrv.Config{
 			Host: host, Port: port, Username: "test", Password: "test-pass",
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
+		}),
 		Interval:       time.Hour, // poll is not the delivery path under test
 		BatchSize:      100,
 		PrefetchWindow: 0,
@@ -233,10 +240,10 @@ func TestRestartResumesBackfill(t *testing.T) {
 	host, port := splitAddr(t, fx.Addr())
 	cfg := Config{
 		Account: "acct", Interval: time.Hour, BatchSize: 1,
-		IMAP: imapdrv.Config{
+		NewBackend: backendFactory(imapdrv.Config{
 			Host: host, Port: port, Username: "test", Password: "test-pass",
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
+		}),
 	}
 
 	// First run: stop after one batch of the three-message backfill.

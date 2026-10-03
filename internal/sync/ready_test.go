@@ -6,8 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CaffeinatedTech/go-imap"
-	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
+	mb "github.com/CaffeinatedTech/jmap-bridge/internal/mailbackend"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/oauth"
 	"github.com/CaffeinatedTech/jmap-bridge/test/fixtureimap"
 )
@@ -18,10 +17,9 @@ func TestIsAuthFailure(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{"imap auth failed code", &imap.Error{Code: imap.CodeAuthenticationFailed}, true},
-		{"imap authz failed code", &imap.Error{Code: imap.CodeAuthorizationFailed}, true},
-		{"imap NO with no code", &imap.Error{Type: imap.ErrorTypeNo}, false},
-		{"throttled is not auth", fmt.Errorf("wrapped: %w", imapdrv.ErrThrottled), false},
+		{"backend auth sentinel", mb.ErrAuth, true},
+		{"wrapped backend auth", fmt.Errorf("imapdrv: %w", mb.ErrAuth), true},
+		{"throttled is not auth", fmt.Errorf("wrapped: %w", mb.ErrThrottled), false},
 		{"oauth reauth sentinel", oauth.ErrReauthNeeded, true},
 		{"oauth no-credentials sentinel", fmt.Errorf("dial: %w", oauth.ErrNoCredentials), true},
 		{"plain transport error", errors.New("connection refused"), false},

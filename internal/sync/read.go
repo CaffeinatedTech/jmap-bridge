@@ -6,26 +6,26 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
+	mb "github.com/CaffeinatedTech/jmap-bridge/internal/mailbackend"
 )
 
-// reader owns one account's dedicated hydration session: a second IMAP
-// connection, behind its own mutex, never shared with the sync pass. A
-// pass holds the work connection for a whole backfill, and without a
-// separate session every Email/get that needed a preview or body would
+// reader owns one account's dedicated hydration session: a second
+// backend session, behind its own mutex, never shared with the sync
+// pass. A pass holds the work session for a whole backfill, and without
+// a separate session every Email/get that needed a preview or body would
 // queue behind it and time out (FR-S.8, FR-X.6, NFR-1). It mirrors
-// writer: one connection, dialed lazily, ping-checked, dropped on a
+// writer: one session, dialed lazily, ping-checked, dropped on a
 // transport failure.
 type reader struct {
-	mu    sync.Mutex
-	cfg   imapdrv.Config
-	log   *slog.Logger
-	conn  *imapdrv.Conn
-	count reconnectCounter // nil disables the FR-D.6 reconnect count
+	mu         sync.Mutex
+	newBackend func() mb.Backend
+	log        *slog.Logger
+	backend    mb.Backend
+	count      reconnectCounter // nil disables the FR-D.6 reconnect count
 }
 
-func newReader(cfg imapdrv.Config, log *slog.Logger, count reconnectCounter) *reader {
-	return &reader{cfg: cfg, log: log, count: count}
+func newReader(newBackend func() mb.Backend, log *slog.Logger, count reconnectCounter) *reader {
+	return &reader{newBackend: newBackend, log: log, count: count}
 }
 
 func (r *reader) close() {
@@ -35,31 +35,29 @@ func (r *reader) close() {
 }
 
 func (r *reader) dropLocked() {
-	if r.conn != nil {
-		_ = r.conn.Close()
-		r.conn = nil
+	if r.backend != nil {
+		_ = r.backend.Close()
+		r.backend = nil
 	}
 }
 
-// withConn runs fn on a healthy hydration connection. Reads are
+// withBackend runs fn on a healthy hydration session. Reads are
 // idempotent, so a transport failure drops the socket and retries once
 // on a fresh one; a server refusal is returned as is. The caller's
 // context bounds each attempt, so a request that goes away stops waiting
 // rather than holding the session.
-func (r *reader) withConn(ctx context.Context, fn func(*imapdrv.Conn) error) error {
+func (r *reader) withBackend(ctx context.Context, fn func(mb.Backend) error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for attempt := 0; ; attempt++ {
-		conn, err := r.ensureLocked(ctx)
+		backend, err := r.ensureLocked(ctx)
 		if err != nil {
 			return err
 		}
-		err = fn(conn)
-		if err == nil || imapdrv.ServerRejected(err) {
+		err = fn(backend)
+		if err == nil || mb.IsRejected(err) {
 			return err
 		}
-		// Transport failure: drop the socket and, if the request is
-		// still live, try once more on a fresh one.
 		r.dropLocked()
 		if attempt >= 1 || ctx.Err() != nil {
 			return err
@@ -67,10 +65,10 @@ func (r *reader) withConn(ctx context.Context, fn func(*imapdrv.Conn) error) err
 	}
 }
 
-func (r *reader) ensureLocked(ctx context.Context) (*imapdrv.Conn, error) {
-	if r.conn != nil {
-		if err := r.conn.Ping(ctx); err == nil {
-			return r.conn, nil
+func (r *reader) ensureLocked(ctx context.Context) (mb.Backend, error) {
+	if r.backend != nil {
+		if err := r.backend.Ping(ctx); err == nil {
+			return r.backend, nil
 		} else {
 			r.log.Debug("sync: hydration session stale", "err", err)
 		}
@@ -79,12 +77,12 @@ func (r *reader) ensureLocked(ctx context.Context) (*imapdrv.Conn, error) {
 	if r.count != nil {
 		r.count("hydrate")
 	}
-	conn, err := imapdrv.Dial(ctx, r.cfg)
-	if err != nil {
+	backend := r.newBackend()
+	if err := backend.Connect(ctx); err != nil {
+		_ = backend.Close()
 		return nil, fmt.Errorf("sync: hydration connect: %w", err)
 	}
-	r.conn = conn
-	r.log.Info("sync: hydration session up",
-		"tier", conn.Tier().String(), "compressed", conn.Compressed())
-	return conn, nil
+	r.backend = backend
+	r.log.Info("sync: hydration session up", "backend", backend.Kind())
+	return backend, nil
 }

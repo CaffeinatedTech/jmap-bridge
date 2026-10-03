@@ -19,9 +19,15 @@ import (
 	"github.com/CaffeinatedTech/go-imap/imapclient"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/mailbackend"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 	bridgesync "github.com/CaffeinatedTech/jmap-bridge/internal/sync"
 )
+
+// liveBackend wires the IMAP adapter into the engine's provider seam.
+func liveBackend(cfg imapdrv.Config) func() mailbackend.Backend {
+	return func() mailbackend.Backend { return imapdrv.NewBackend(cfg) }
+}
 
 // testFolder is the only mailbox these tests touch (live rules of
 // engagement).
@@ -135,7 +141,7 @@ func TestLiveSyncAndForeignFlag(t *testing.T) {
 
 	engineCfg := bridgesync.Config{
 		Account:        "livetest",
-		IMAP:           cfg,
+		NewBackend:     liveBackend(cfg),
 		Interval:       time.Hour, // IDLE is the delivery path under test
 		BatchSize:      200,
 		PrefetchWindow: 48 * time.Hour,

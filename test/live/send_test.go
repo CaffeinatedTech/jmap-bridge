@@ -96,7 +96,7 @@ func TestLiveSendComposeFilesSent(t *testing.T) {
 
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	eng := bridgesync.New(bridgesync.Config{
-		Account: "livetest", IMAP: cfg,
+		Account: "livetest", NewBackend: liveBackend(cfg),
 		SMTP: &submit.Config{
 			Host: sink.Host(), Port: sink.Port(), TLS: "none",
 			Auth: "password", Username: "m3-gate", Password: "m3-gate-pass",

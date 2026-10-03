@@ -10,53 +10,57 @@ import (
 	"time"
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/convert"
-	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/keyword"
+	mb "github.com/CaffeinatedTech/jmap-bridge/internal/mailbackend"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
 )
 
 // This file is the write half of the engine (PLAN §7.1): the account's
-// dedicated IMAP session and the jmapapi.Backend implementation. Every
-// mutation runs server-first — IMAP command, then local commit — so the
-// cache never reports a change the server did not accept (golden rule
-// 1) and never loses one it did (D-14).
+// dedicated write session and the jmapapi.Backend implementation. Every
+// mutation runs server-first — provider command, then local commit — so
+// the cache never reports a change the server did not accept (golden
+// rule 1) and never loses one it did (D-14). The provider-specific
+// strategy (IMAP COPY/MOVE vs Gmail labels) lives behind
+// mailbackend.Backend (M8).
 
-// writer owns one account's write session: one connection behind one
-// mutex, never shared with the sync passes, so a triage action cannot
+// writer owns one account's write session: one backend session behind
+// one mutex, never shared with the sync passes, so a triage action cannot
 // queue behind a backfill (PLAN §10's per-account mutation queue).
 type writer struct {
-	mu    sync.Mutex
-	cfg   imapdrv.Config
-	log   *slog.Logger
-	conn  *imapdrv.Conn
-	delim rune
-	// gmailFlag records whether the session speaks X-GM-EXT-1: the write
-	// path turns membership changes into label writes for such servers
-	// (FR-S.10). It is set from this session's dials and, before the
-	// first write, from the work connection's discovery.
-	gmailFlag bool
+	mu         sync.Mutex
+	newBackend func() mb.Backend
+	log        *slog.Logger
+	backend    mb.Backend
+	delim      rune
+	// labelFlag records a write session that speaks the label model
+	// (Gmail), so the write path can fold membership accordingly
+	// (FR-S.10) even before the work session's capabilities are known.
+	labelFlag bool
+	// caps reports the work session's capability profile.
+	caps func() mb.Capabilities
 	// count reports each dial attempt (FR-D.6); nil disables counting.
 	count reconnectCounter
 }
 
-// gmail reports the session's Gmail profile under the writer lock.
+// gmail reports whether the account uses label-style membership.
 func (w *writer) gmail() bool {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.gmailFlag
+	flag := w.labelFlag
+	w.mu.Unlock()
+	return flag || w.caps().Labels
 }
 
-// noteGmail records the X-GM-EXT-1 observation of any of the account's
-// connections; they answer to the same server.
+// noteGmail records a label-capable session observed by the engine or a
+// test.
 func (w *writer) noteGmail(v bool) {
 	w.mu.Lock()
-	w.gmailFlag = w.gmailFlag || v
+	w.labelFlag = w.labelFlag || v
 	w.mu.Unlock()
 }
 
-func newWriter(cfg imapdrv.Config, log *slog.Logger, count reconnectCounter) *writer {
-	return &writer{cfg: cfg, log: log, count: count}
+func newWriter(newBackend func() mb.Backend, log *slog.Logger, count reconnectCounter, caps func() mb.Capabilities) *writer {
+	return &writer{newBackend: newBackend, log: log, count: count, caps: caps}
 }
 
 func (w *writer) close() {
@@ -66,26 +70,26 @@ func (w *writer) close() {
 }
 
 func (w *writer) dropLocked() {
-	if w.conn != nil {
-		_ = w.conn.Close()
-		w.conn = nil
+	if w.backend != nil {
+		_ = w.backend.Close()
+		w.backend = nil
 	}
 }
 
-// withConn runs fn on a healthy connection. An existing session is
-// probed with NOOP first — servers drop idle sessions, and a COPY must
+// withBackend runs fn on a healthy session. An existing session is
+// probed with Ping first — servers drop idle sessions, and a COPY must
 // not be issued into a socket that died hours ago. A command that fails
 // is never retried here: COPY and APPEND are not idempotent, so the
 // client decides whether to try again.
-func (w *writer) withConn(ctx context.Context, fn func(*imapdrv.Conn) error) error {
+func (w *writer) withBackend(ctx context.Context, fn func(mb.Backend) error) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	conn, err := w.ensureLocked(ctx)
+	backend, err := w.ensureLocked(ctx)
 	if err != nil {
 		return err
 	}
-	if err := fn(conn); err != nil {
-		if !imapdrv.ServerRejected(err) {
+	if err := fn(backend); err != nil {
+		if !mb.IsRejected(err) {
 			// Not a refusal: the transport is suspect. Drop it so the
 			// next write dials fresh instead of queueing behind a dead
 			// socket.
@@ -96,10 +100,10 @@ func (w *writer) withConn(ctx context.Context, fn func(*imapdrv.Conn) error) err
 	return nil
 }
 
-func (w *writer) ensureLocked(ctx context.Context) (*imapdrv.Conn, error) {
-	if w.conn != nil {
-		if err := w.conn.Ping(ctx); err == nil {
-			return w.conn, nil
+func (w *writer) ensureLocked(ctx context.Context) (mb.Backend, error) {
+	if w.backend != nil {
+		if err := w.backend.Ping(ctx); err == nil {
+			return w.backend, nil
 		} else {
 			w.log.Debug("sync: write session stale", "err", err)
 		}
@@ -108,15 +112,15 @@ func (w *writer) ensureLocked(ctx context.Context) (*imapdrv.Conn, error) {
 	if w.count != nil {
 		w.count("write")
 	}
-	conn, err := imapdrv.Dial(ctx, w.cfg)
-	if err != nil {
+	backend := w.newBackend()
+	if err := backend.Connect(ctx); err != nil {
+		_ = backend.Close()
 		return nil, fmt.Errorf("sync: write connect: %w", err)
 	}
-	w.gmailFlag = w.gmailFlag || conn.GmailExt()
-	w.conn = conn
-	w.log.Info("sync: write session up",
-		"tier", conn.Tier().String(), "compressed", conn.Compressed())
-	return conn, nil
+	w.labelFlag = w.labelFlag || backend.Capabilities().Labels
+	w.backend = backend
+	w.log.Info("sync: write session up", "backend", backend.Kind())
+	return backend, nil
 }
 
 // hierarchyDelim reads the separator once per session (Mailbox/set
@@ -127,11 +131,11 @@ func (w *writer) hierarchyDelim(ctx context.Context) (rune, error) {
 	if w.delim != 0 {
 		return w.delim, nil
 	}
-	conn, err := w.ensureLocked(ctx)
+	backend, err := w.ensureLocked(ctx)
 	if err != nil {
 		return 0, err
 	}
-	delim, err := conn.HierarchyDelim(ctx)
+	delim, err := backend.HierarchyDelim(ctx)
 	if err != nil {
 		w.dropLocked()
 		return 0, err
@@ -143,17 +147,17 @@ func (w *writer) hierarchyDelim(ctx context.Context) (rune, error) {
 // adminOp runs a mailbox administration command. Servers refuse
 // DELETE/RENAME of a mailbox some session holds selected, and the sync
 // pass may be holding one — so the first refusal releases the work
-// connection's selection and tries once more.
-func (e *Engine) adminOp(ctx context.Context, op func(*imapdrv.Conn) error) error {
-	err := e.wr.withConn(ctx, op)
-	if err == nil || !imapdrv.ServerRejected(err) {
+// session's selection and tries once more.
+func (e *Engine) adminOp(ctx context.Context, op func(mb.Backend) error) error {
+	err := e.wr.withBackend(ctx, op)
+	if err == nil || !mb.IsRejected(err) {
 		return err
 	}
 	e.releaseWorkSelection()
-	return e.wr.withConn(ctx, op)
+	return e.wr.withBackend(ctx, op)
 }
 
-// releaseWorkSelection waits for the work connection (a pass may be
+// releaseWorkSelection waits for the work session (a pass may be
 // running) and drops its mailbox selection.
 func (e *Engine) releaseWorkSelection() {
 	e.workMu.Lock()
@@ -161,7 +165,7 @@ func (e *Engine) releaseWorkSelection() {
 	if e.work == nil {
 		return
 	}
-	if err := e.work.Unselect(context.Background()); err != nil {
+	if err := e.work.Release(context.Background()); err != nil {
 		e.log.Debug("sync: release selection for admin op", "err", err)
 	}
 }
@@ -171,7 +175,7 @@ func (e *Engine) releaseWorkSelection() {
 var _ jmapapi.Backend = (*Engine)(nil)
 
 // ApplyEmailPatch runs one Email/set update: effective deltas only, one
-// IMAP command family per folder copy, then a single local commit.
+// provider command family per folder copy, then a single local commit.
 func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p jmapapi.EmailPatch) error {
 	if account != e.cfg.Account {
 		return fmt.Errorf("sync: patch for foreign account %q", account)
@@ -264,18 +268,15 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 		return nil // a patch whose effective delta is empty still succeeds
 	}
 
-	// Resolve destination paths up front: an unknown id must fail
+	// Resolve destination mailboxes up front: an unknown id must fail
 	// before any server command runs (all-or-nothing, FR-M.13).
-	addPaths := make(map[string]string, len(addSet))
-	for _, id := range addSet {
-		path, err := e.st.MailboxPath(ctx, account, id)
-		if errors.Is(err, store.ErrMailboxUnknown) {
-			return jmapapi.ErrUnknownMailbox
-		}
-		if err != nil {
-			return err
-		}
-		addPaths[id] = path
+	addMbs, err := e.mailboxesFor(ctx, addSet)
+	if err != nil {
+		return err
+	}
+	remMbs, err := e.mailboxesFor(ctx, remSet)
+	if err != nil {
+		return err
 	}
 
 	if len(kwAdd) > 0 || len(kwRemove) > 0 {
@@ -283,7 +284,7 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 			return err
 		}
 	}
-	adds, err := e.changeMembershipFor(ctx, emailID, copies, addSet, addPaths, remSet)
+	adds, err := e.changeMembershipFor(ctx, emailID, copies, addMbs, remMbs)
 	if err != nil {
 		return err
 	}
@@ -296,169 +297,108 @@ func (e *Engine) ApplyEmailPatch(ctx context.Context, account, emailID string, p
 	return err
 }
 
+// mailboxesFor resolves mailbox ids into the backend's neutral mailbox
+// descriptors. An unknown id is ErrUnknownMailbox.
+func (e *Engine) mailboxesFor(ctx context.Context, ids []string) ([]mb.Mailbox, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	mbs, _, notFound, err := e.st.MailboxesByID(ctx, e.cfg.Account, ids)
+	if err != nil {
+		return nil, err
+	}
+	if len(notFound) > 0 {
+		return nil, jmapapi.ErrUnknownMailbox
+	}
+	allID, err := e.st.ImplicitMailboxID(ctx, e.cfg.Account)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mb.Mailbox, 0, len(mbs))
+	for _, m := range mbs {
+		out = append(out, mb.Mailbox{ID: m.ID, Path: m.Path, Role: m.Role, Implicit: m.ID == allID})
+	}
+	return out, nil
+}
+
+// backendCopies converts store copies into neutral backend copies.
+func backendCopies(copies []store.Copy) []mb.Copy {
+	out := make([]mb.Copy, 0, len(copies))
+	for _, c := range copies {
+		out = append(out, mb.Copy{
+			MailboxID: c.MailboxID,
+			Ref:       mb.NewRef(c.Folder, c.UIDValidity, c.UID),
+		})
+	}
+	return out
+}
+
 // storeFlagsFor applies keyword deltas to every folder copy — IMAP
 // flags are per-copy, so a message in two folders must be STOREd twice
-// or the next sync pass would flip the keyword back (FR-M.8).
+// or the next sync pass would flip the keyword back (FR-M.8). A label
+// backend folds this to one command itself.
 func (e *Engine) storeFlagsFor(ctx context.Context, copies []store.Copy, kwAdd, kwRemove []string) error {
-	byFolder := map[string][]uint32{}
+	if len(copies) == 0 {
+		return jmapapi.ErrNoLocation
+	}
 	for _, c := range copies {
 		if c.UID == 0 {
 			// The uid mapping arrives with the next sync pass; acting
 			// without it would desynchronise this copy from the server.
 			return fmt.Errorf("%w: no uid for folder %q yet", jmapapi.ErrNoLocation, c.Folder)
 		}
-		byFolder[c.Folder] = append(byFolder[c.Folder], c.UID)
 	}
-	if len(byFolder) == 0 {
-		return jmapapi.ErrNoLocation
-	}
-	add := keyword.ToIMAP(truthy(kwAdd))
-	remove := keyword.ToIMAP(truthy(kwRemove))
 	custom := customKeywords(append(append([]string{}, kwAdd...), kwRemove...))
-	// Gmail flags are per message, not per copy (FR-S.10): one STORE
-	// covers the account, and the remaining copies need nothing.
-	gmail := e.wr.gmail()
-	return e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-		folders := byFolder
-		if gmail && len(byFolder) > 1 {
-			folders = map[string][]uint32{}
-			for folder, uids := range byFolder {
-				folders[folder] = uids
-				break
-			}
-		}
-		for folder, uids := range folders {
-			if err := conn.StoreFlags(ctx, folder, uids, add, remove); err != nil {
-				if imapdrv.ServerRejected(err) && len(custom) > 0 {
-					// FR-M.8: a keyword the server will not store fails
-					// the write, naming it — never dropped silently.
-					return &jmapapi.KeywordError{Keywords: custom}
-				}
-				return err
-			}
-		}
-		return nil
+	err := e.wr.withBackend(ctx, func(b mb.Backend) error {
+		return b.StoreKeywords(ctx, backendCopies(copies), kwAdd, kwRemove)
 	})
+	if err != nil && mb.IsRejected(err) && len(custom) > 0 {
+		// FR-M.8: a keyword the server will not store fails the write,
+		// naming it — never dropped silently.
+		return &jmapapi.KeywordError{Keywords: custom}
+	}
+	return err
 }
 
-// changeMembershipFor picks the membership strategy the server model
-// needs: label writes on Gmail (FR-S.10), COPY/MOVE/EXPUNGE everywhere
-// else.
-func (e *Engine) changeMembershipFor(ctx context.Context, emailID string, copies []store.Copy, addSet []string, addPaths map[string]string, remSet []string) ([]store.MembershipAdd, error) {
-	if e.wr.gmail() {
-		return e.changeMembershipGmail(ctx, emailID, copies, addSet, remSet)
+// messageFor builds the neutral write view of an email: its Message-ID
+// (for backends that address a copy by header search) and the implicit
+// archive container when one exists.
+func (e *Engine) messageFor(ctx context.Context, emailID string) mb.Message {
+	msg := mb.Message{ID: emailID}
+	if msgid, err := e.st.EmailMessageID(ctx, e.cfg.Account, emailID); err == nil {
+		msg.MessageID = msgid
 	}
-	return e.changeMembership(ctx, copies, addSet, addPaths, remSet)
+	if allID, err := e.st.ImplicitMailboxID(ctx, e.cfg.Account); err == nil && allID != "" {
+		if p, err := e.st.MailboxPath(ctx, e.cfg.Account, allID); err == nil {
+			msg.ImplicitContainer = p
+		}
+	}
+	return msg
 }
 
-// changeMembership performs the server side of a membership change and
-// returns what to commit. One removal plus one addition becomes a MOVE
-// (PLAN §7.1); anything else is copy-then-expunge, which is the only
-// sequence IMAP can express for "this message is in these folders".
-func (e *Engine) changeMembership(ctx context.Context, copies []store.Copy, addSet []string, addPaths map[string]string, remSet []string) ([]store.MembershipAdd, error) {
-	if len(addSet) == 0 {
-		return nil, e.expungeCopies(ctx, copies, remSet)
-	}
-
-	// A source copy we are allowed to move: it must be in a folder the
-	// patch is removing, and its uid must be known.
-	var moveSrc *store.Copy
-	for i := range copies {
-		if contains(remSet, copies[i].MailboxID) && copies[i].UID != 0 {
-			moveSrc = &copies[i]
-			break
-		}
-	}
-	if len(addSet) == 1 && moveSrc != nil {
-		dstID := addSet[0]
-		var res imapdrv.CopyResult
-		err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-			var err error
-			e.log.Debug("sync: move", "from", moveSrc.Folder, "to", addPaths[dstID], "uid", moveSrc.UID)
-			res, err = conn.MoveUIDs(ctx, moveSrc.Folder, addPaths[dstID], []uint32{moveSrc.UID})
-			return err
-		})
-		if err != nil {
-			return nil, err
-		}
-		e.log.Debug("sync: move done", "destUIDs", res.DestUIDs, "destUIDValidity", res.DestUIDValidity)
-		adds := []store.MembershipAdd{{
-			MailboxID: dstID, UID: res.DestUIDs[moveSrc.UID], UIDValidity: res.DestUIDValidity,
-		}}
-		rest := make([]string, 0, len(remSet))
-		for _, id := range remSet {
-			if id != moveSrc.MailboxID {
-				rest = append(rest, id)
-			}
-		}
-		if err := e.expungeCopies(ctx, copies, rest); err != nil {
-			return nil, err
-		}
-		return adds, nil
-	}
-
-	// Copy into every destination first (so a failure leaves the source
-	// intact), then expunge the removals.
-	var src *store.Copy
-	for i := range copies {
-		if copies[i].UID != 0 {
-			src = &copies[i]
-			break
-		}
-	}
-	if src == nil {
-		return nil, fmt.Errorf("%w: no folder holds a known uid for this message", jmapapi.ErrNoLocation)
-	}
-	adds := make([]store.MembershipAdd, 0, len(addSet))
-	for _, dstID := range addSet {
-		var res imapdrv.CopyResult
-		err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-			var err error
-			e.log.Debug("sync: copy", "from", src.Folder, "to", addPaths[dstID], "uid", src.UID)
-			res, err = conn.CopyUIDs(ctx, src.Folder, addPaths[dstID], []uint32{src.UID})
-			return err
-		})
-		if err != nil {
-			return nil, err
-		}
-		adds = append(adds, store.MembershipAdd{
-			MailboxID: dstID, UID: res.DestUIDs[src.UID], UIDValidity: res.DestUIDValidity,
-		})
-	}
-	if err := e.expungeCopies(ctx, copies, remSet); err != nil {
+// changeMembershipFor delegates a membership change to the backend and
+// records the copies it touched for the grace window (FR-S.12).
+func (e *Engine) changeMembershipFor(ctx context.Context, emailID string, copies []store.Copy, add, remove []mb.Mailbox) ([]store.MembershipAdd, error) {
+	msg := e.messageFor(ctx, emailID)
+	var added []mb.Copy
+	var touched []mb.Ref
+	err := e.wr.withBackend(ctx, func(b mb.Backend) error {
+		var e2 error
+		added, touched, e2 = b.SetMembership(ctx, msg, backendCopies(copies), add, remove)
+		return e2
+	})
+	if err != nil {
 		return nil, err
 	}
-	return adds, nil
-}
-
-// expungeCopies permanently removes the named mailboxes' copies of the
-// message (FR-M.10's per-folder half).
-func (e *Engine) expungeCopies(ctx context.Context, copies []store.Copy, remove []string) error {
-	if len(remove) == 0 {
-		return nil
+	e.recordOwnWrite(touched)
+	out := make([]store.MembershipAdd, 0, len(added))
+	for _, c := range added {
+		uid, _ := c.Ref.UID()
+		out = append(out, store.MembershipAdd{
+			MailboxID: c.MailboxID, UID: uid, UIDValidity: c.Ref.VersionNum(),
+		})
 	}
-	byFolder := map[string][]uint32{}
-	for _, c := range copies {
-		if !contains(remove, c.MailboxID) {
-			continue
-		}
-		if c.UID == 0 {
-			return fmt.Errorf("%w: no uid for folder %q yet", jmapapi.ErrNoLocation, c.Folder)
-		}
-		byFolder[c.Folder] = append(byFolder[c.Folder], c.UID)
-	}
-	if len(byFolder) == 0 {
-		return nil
-	}
-	return e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-		for folder, uids := range byFolder {
-			e.log.Debug("sync: expunge", "folder", folder, "uids", uids)
-			if err := conn.ExpungeUIDs(ctx, folder, uids); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	return out, nil
 }
 
 // DestroyEmails expunges every copy of one email and tombstones it
@@ -479,38 +419,33 @@ func (e *Engine) DestroyEmails(ctx context.Context, account, emailID string) err
 	if err != nil {
 		return err
 	}
-	byFolder := map[string][]uint32{}
+	refs := make([]mb.Ref, 0, len(copies))
 	for _, c := range copies {
 		if c.UID == 0 {
 			return fmt.Errorf("%w: no uid for folder %q yet", jmapapi.ErrNoLocation, c.Folder)
 		}
-		byFolder[c.Folder] = append(byFolder[c.Folder], c.UID)
+		refs = append(refs, mb.NewRef(c.Folder, c.UIDValidity, c.UID))
 	}
-	if len(byFolder) > 0 && e.wr.gmail() {
-		// Gmail destroy is permanent only from Trash (FR-M.18): copies
-		// are moved there first, then expunged where expunge means
-		// expunge. Without a trash mailbox the generic path below is the
-		// honest fallback.
-		if err := e.destroyEmailsGmail(ctx, copies); err != nil {
-			if !errors.Is(err, errNoTrashRole) {
-				return err
-			}
-			e.log.Warn("sync: gmail destroy without a trash mailbox, expunging in place", "err", err)
-		} else {
-			return e.st.CommitDestroy(ctx, account, []string{emailID})
-		}
-	}
-	if len(byFolder) > 0 {
-		if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-			for folder, uids := range byFolder {
-				if err := conn.ExpungeUIDs(ctx, folder, uids); err != nil {
-					return err
+	if len(refs) > 0 {
+		// On a label server destroy routes through trash (FR-M.18);
+		// the adapter falls back to expunge-in-place without one.
+		trash := ""
+		if e.wr.gmail() {
+			if id, err := e.st.MailboxIDByRole(ctx, account, "trash"); err == nil && id != "" {
+				if p, err := e.st.MailboxPath(ctx, account, id); err == nil {
+					trash = p
 				}
 			}
-			return nil
+		}
+		var touched []mb.Ref
+		if err := e.wr.withBackend(ctx, func(b mb.Backend) error {
+			var e2 error
+			touched, e2 = b.Destroy(ctx, refs, trash)
+			return e2
 		}); err != nil {
 			return err
 		}
+		e.recordOwnWrite(touched)
 	}
 	return e.st.CommitDestroy(ctx, account, []string{emailID})
 }
@@ -561,9 +496,9 @@ func (e *Engine) CreateDraft(ctx context.Context, account string, spec jmapapi.D
 		return nil, err
 	}
 
-	flags := keyword.ToIMAP(truthy(boolKeys(spec.Keywords)))
-	if isDrafts && !contains(flags, `\Draft`) {
-		flags = append(flags, `\Draft`) // PLAN §7.1: drafts carry \Draft
+	kws := boolKeys(spec.Keywords)
+	if isDrafts && !contains(kws, "$draft") {
+		kws = append(kws, "$draft") // PLAN §7.1: drafts carry \Draft
 	}
 
 	// Store the bytes before appending: a blob write failure must not
@@ -574,19 +509,20 @@ func (e *Engine) CreateDraft(ctx context.Context, account string, spec jmapapi.D
 		return nil, err
 	}
 
-	var uid, uidValidity uint32
-	if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-		var err error
-		uid, uidValidity, err = conn.AppendMessage(ctx, folder, draft.Raw, flags, &received)
-		return err
+	var ref mb.Ref
+	var flags []string
+	if err := e.wr.withBackend(ctx, func(b mb.Backend) error {
+		var e2 error
+		ref, flags, e2 = b.Append(ctx, folder, draft.Raw, kws, &received)
+		return e2
 	}); err != nil {
 		return nil, err
 	}
 
 	rec := draft.Rec
 	rec.Flags = flags
-	rec.UID = uid
-	rec.UIDValidity = uidValidity
+	rec.UID, _ = ref.UID()
+	rec.UIDValidity = ref.VersionNum()
 	created, err := e.st.CommitAppend(ctx, account, folder, rec)
 	if err != nil {
 		return nil, err
@@ -611,8 +547,7 @@ func (e *Engine) CreateDraft(ctx context.Context, account string, spec jmapapi.D
 // this account's blob store, into the named mailboxes (RFC 8621 §4.8).
 // The bytes ARE the message, so there is no build step: APPEND once to
 // the first mailbox, commit, then file any extra mailboxes through the
-// proven membership path (Gmail labels are not the APPEND mechanism,
-// FR-S.10).
+// proven membership path.
 func (e *Engine) ImportEmail(ctx context.Context, account string, spec jmapapi.ImportSpec) (*jmapapi.CreatedEmail, error) {
 	if account != e.cfg.Account {
 		return nil, fmt.Errorf("sync: import for foreign account %q", account)
@@ -630,7 +565,7 @@ func (e *Engine) ImportEmail(ctx context.Context, account string, spec jmapapi.I
 	}
 	folder := mbs[0].Path
 
-	flags := keyword.ToIMAP(truthy(boolKeys(spec.Keywords)))
+	kws := boolKeys(spec.Keywords)
 	received := spec.ReceivedAt
 	if received.IsZero() {
 		received = time.Now()
@@ -641,18 +576,19 @@ func (e *Engine) ImportEmail(ctx context.Context, account string, spec jmapapi.I
 	if err != nil {
 		return nil, err
 	}
-	rec.Flags = flags
 
-	var uid, uidValidity uint32
-	if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-		var err error
-		uid, uidValidity, err = conn.AppendMessage(ctx, folder, raw, flags, &received)
-		return err
+	var ref mb.Ref
+	var flags []string
+	if err := e.wr.withBackend(ctx, func(b mb.Backend) error {
+		var e2 error
+		ref, flags, e2 = b.Append(ctx, folder, raw, kws, &received)
+		return e2
 	}); err != nil {
 		return nil, err
 	}
-	rec.UID = uid
-	rec.UIDValidity = uidValidity
+	rec.Flags = flags
+	rec.UID, _ = ref.UID()
+	rec.UIDValidity = ref.VersionNum()
 
 	created, err := e.st.CommitAppend(ctx, account, folder, rec)
 	if err != nil {
@@ -729,8 +665,8 @@ func (e *Engine) CreateMailbox(ctx context.Context, account, name, parentID stri
 	} else if existing != "" {
 		return "", jmapapi.ErrMailboxExists
 	}
-	if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-		return conn.CreateMailbox(ctx, path)
+	if err := e.wr.withBackend(ctx, func(b mb.Backend) error {
+		return b.CreateMailbox(ctx, path)
 	}); err != nil {
 		return "", err
 	}
@@ -793,11 +729,11 @@ func (e *Engine) RenameMailbox(ctx context.Context, account, id, name, parentID 
 	// the subtree decides what the cache rewrites (RFC 3501 §6.3.5 says
 	// descendants follow; not every implementation does).
 	var serverNames []string
-	if err := e.adminOp(ctx, func(conn *imapdrv.Conn) error {
-		if err := conn.RenameMailbox(ctx, oldPath, newPath); err != nil {
+	if err := e.adminOp(ctx, func(b mb.Backend) error {
+		if err := b.RenameMailbox(ctx, oldPath, newPath); err != nil {
 			return err
 		}
-		list, err := conn.ListFolders(ctx)
+		list, err := b.Folders(ctx)
 		if err != nil {
 			return err
 		}
@@ -831,7 +767,7 @@ func (e *Engine) DestroyMailbox(ctx context.Context, account, id string, removeE
 	if len(notFound) > 0 || len(mbs) == 0 {
 		return jmapapi.ErrObjectNotFound
 	}
-	mb := mbs[0]
+	mbx := mbs[0]
 
 	all, _, err := e.st.Mailboxes(ctx, account)
 	if err != nil {
@@ -842,27 +778,32 @@ func (e *Engine) DestroyMailbox(ctx context.Context, account, id string, removeE
 			return jmapapi.ErrMailboxHasChild
 		}
 	}
-	if mb.TotalEmails > 0 {
+	if mbx.TotalEmails > 0 {
 		if !removeEmails {
 			return jmapapi.ErrMailboxHasEmail
 		}
-		uids, err := e.st.FolderUIDs(ctx, account, mb.Path)
+		uids, err := e.st.FolderUIDs(ctx, account, mbx.Path)
 		if err != nil {
 			return err
 		}
 		if len(uids) > 0 {
-			if err := e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-				return conn.ExpungeUIDs(ctx, mb.Path, uids)
+			refs := make([]mb.Ref, 0, len(uids))
+			for _, u := range uids {
+				refs = append(refs, mb.NewRef(mbx.Path, 0, u))
+			}
+			if err := e.wr.withBackend(ctx, func(b mb.Backend) error {
+				_, e2 := b.Destroy(ctx, refs, "")
+				return e2
 			}); err != nil {
 				return err
 			}
 		}
-		if err := e.st.EmptyFolder(ctx, account, mb.Path); err != nil {
+		if err := e.st.EmptyFolder(ctx, account, mbx.Path); err != nil {
 			return err
 		}
 	}
-	if err := e.adminOp(ctx, func(conn *imapdrv.Conn) error {
-		return conn.DeleteMailbox(ctx, mb.Path)
+	if err := e.adminOp(ctx, func(b mb.Backend) error {
+		return b.DeleteMailbox(ctx, mbx.Path)
 	}); err != nil {
 		return err
 	}
@@ -878,12 +819,12 @@ func (e *Engine) serverRenamedChildren(ctx context.Context, account, oldPath, ne
 	if err != nil {
 		return false
 	}
-	for _, mb := range all {
-		if !strings.HasPrefix(mb.Path, oldPath+string(delim)) {
+	for _, mbx := range all {
+		if !strings.HasPrefix(mbx.Path, oldPath+string(delim)) {
 			continue
 		}
-		suffix := strings.TrimPrefix(mb.Path, oldPath)
-		if contains(serverNames, newPath+suffix) && !contains(serverNames, mb.Path) {
+		suffix := strings.TrimPrefix(mbx.Path, oldPath)
+		if contains(serverNames, newPath+suffix) && !contains(serverNames, mbx.Path) {
 			return true
 		}
 	}
@@ -935,25 +876,17 @@ func (e *Engine) isDescendant(ctx context.Context, account, candidate, ancestor 
 	return false
 }
 
-// refreshFolders re-runs discovery on the write connection: LIST +
-// STATUS + SyncFolders, which is where SPECIAL-USE roles are
-// re-detected (FR-M.12) and where a deleted folder is reconciled away.
+// refreshFolders re-runs discovery on the write session: LIST + STATUS +
+// SyncFolders, which is where SPECIAL-USE roles are re-detected
+// (FR-M.12) and where a deleted folder is reconciled away.
 func (e *Engine) refreshFolders(ctx context.Context) error {
-	return e.wr.withConn(ctx, func(conn *imapdrv.Conn) error {
-		_, err := e.discoverWith(ctx, conn, false)
+	return e.wr.withBackend(ctx, func(b mb.Backend) error {
+		_, err := e.discoverWith(ctx, b, false)
 		return err
 	})
 }
 
 // --- helpers ---
-
-func truthy(keys []string) map[string]bool {
-	out := make(map[string]bool, len(keys))
-	for _, k := range keys {
-		out[k] = true
-	}
-	return out
-}
 
 func boolKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))

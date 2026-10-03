@@ -24,6 +24,7 @@ import (
 	"github.com/CaffeinatedTech/jmap-bridge/internal/httpapi"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/jmapapi"
+	"github.com/CaffeinatedTech/jmap-bridge/internal/mailbackend"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/metrics"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/oauth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/push"
@@ -231,24 +232,28 @@ func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager, reg *
 	if a.IMAP.TLS != nil {
 		tls = *a.IMAP.TLS
 	}
+	imapCfg := imapdrv.Config{
+		Host:     a.IMAP.Host,
+		Port:     a.IMAP.Port,
+		TLS:      tls,
+		Username: a.IMAP.Username,
+		Password: a.IMAP.Password,
+	}
+	if a.IMAP.Auth == "oauth2" && mgr != nil {
+		imapCfg.Token = mgr.AccessToken
+	}
 	out := sync.Config{
 		Account: a.ID,
-		IMAP: imapdrv.Config{
-			Host:     a.IMAP.Host,
-			Port:     a.IMAP.Port,
-			TLS:      tls,
-			Username: a.IMAP.Username,
-			Password: a.IMAP.Password,
-		},
+		// D-API-2: the engine sees only mailbackend.Backend. The IMAP
+		// factory is supplied here; a backend = "gmail_api" account will
+		// supply the Gmail API factory in its place (M10).
+		NewBackend:     func() mailbackend.Backend { return imapdrv.NewBackend(imapCfg) },
 		Interval:       cfg.Sync.Interval.Std(),
 		BatchSize:      cfg.Sync.BatchSize,
 		PrefetchWindow: cfg.Sync.PrefetchWindow.Std(),
 		Concurrency:    cfg.Search.Concurrency,
 		SearchBackfill: cfg.Search.Backfill,
 		Metrics:        reg,
-	}
-	if a.IMAP.Auth == "oauth2" && mgr != nil {
-		out.IMAP.Token = mgr.AccessToken
 	}
 	if a.CardDAV != nil && a.CardDAV.URL != "" {
 		davCfg := dav.Config{

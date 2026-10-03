@@ -109,10 +109,10 @@ func gmEngine(t *testing.T, st *store.Store, handle func(tag, line string) []str
 	fake := wireimap.Start(t, "CAPABILITY IMAP4rev1", handle)
 	cfg := Config{
 		Account: "acct",
-		IMAP: imapdrv.Config{
+		NewBackend: backendFactory(imapdrv.Config{
 			Host: fake.Host(), Port: fake.Port(), Username: "test", Password: "pw",
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
+		}),
 	}
 	e := New(cfg, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e.wr.noteGmail(true)
@@ -433,7 +433,7 @@ func TestGraceWindowSparesOwnWrites(t *testing.T) {
 	e, _ := gmEngine(t, st, func(tag, line string) []string {
 		return nil
 	})
-	e.recordOwnWrite("INBOX", []uint32{5})
+	e.recordOwnUIDs("INBOX", []uint32{5})
 	if got := e.graceFilter("INBOX", []uint32{5, 6}); len(got) != 1 || got[0] != 6 {
 		t.Fatalf("grace filter = %v, want only the foreign uid 6", got)
 	}
@@ -445,7 +445,7 @@ func TestGraceWindowSparesOwnWrites(t *testing.T) {
 	e.ownMu.Lock()
 	e.ownWrites["INBOX"][5] = time.Now().Add(-2 * graceWindow)
 	e.ownMu.Unlock()
-	e.recordOwnWrite("Sent", []uint32{9})
+	e.recordOwnUIDs("Sent", []uint32{9})
 	e.ownMu.Lock()
 	_, still := e.ownWrites["INBOX"][5]
 	e.ownMu.Unlock()
@@ -454,29 +454,6 @@ func TestGraceWindowSparesOwnWrites(t *testing.T) {
 	}
 	if got := e.graceFilter("INBOX", []uint32{5}); len(got) != 1 {
 		t.Fatal("expired grace still shields the uid")
-	}
-}
-
-// gmLabelFor's mapping table, including the two system folders
-// SPECIAL-USE does not cover. The implicit mailbox is decided by the
-// store's implicit flag before gmLabelFor is consulted, so the archive
-// role has no row here.
-func TestGmLabelFor(t *testing.T) {
-	cases := []struct{ role, path, want string }{
-		{"inbox", "INBOX", `\Inbox`},
-		{"sent", "[Gmail]/Sent Mail", `\Sent`},
-		{"drafts", "[Gmail]/Drafts", `\Draft`},
-		{"trash", "[Gmail]/Trash", `\Trash`},
-		{"junk", "[Gmail]/Spam", `\Spam`},
-		{"", "receipts", "receipts"},
-		{"", "work/2026", "work/2026"},
-		{"", "[Gmail]/Starred", `\Starred`},
-		{"", "[Gmail]/Important", `\Important`},
-	}
-	for _, tc := range cases {
-		if got := gmLabelFor(tc.role, tc.path); got != tc.want {
-			t.Errorf("gmLabelFor(%q,%q) = %q, want %q", tc.role, tc.path, got, tc.want)
-		}
 	}
 }
 
@@ -518,10 +495,10 @@ func TestGmailSendExpungesDraftBeforeSMTP(t *testing.T) {
 	})
 	cfg := Config{
 		Account: "acct",
-		IMAP: imapdrv.Config{
+		NewBackend: backendFactory(imapdrv.Config{
 			Host: fake.Host(), Port: fake.Port(), Username: "u", Password: "p",
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
+		}),
 		SMTP: &submit.Config{
 			Host: sink.Host(), Port: sink.Port(), TLS: "none",
 			Auth: "password", Username: "u", Password: "p",

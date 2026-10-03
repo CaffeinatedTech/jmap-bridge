@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/CaffeinatedTech/jmap-bridge/internal/dav"
-	"github.com/CaffeinatedTech/jmap-bridge/internal/imapdrv"
+	mb "github.com/CaffeinatedTech/jmap-bridge/internal/mailbackend"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/metrics"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/oauth"
 	"github.com/CaffeinatedTech/jmap-bridge/internal/store"
@@ -31,8 +31,11 @@ import (
 // Config is one engine's tunables, straight from the [sync] config
 // block (M0 decoded it; M1 uses it).
 type Config struct {
-	Account        string
-	IMAP           imapdrv.Config
+	Account string
+	// NewBackend builds a provider session (D-API-2). The engine never
+	// names a concrete provider; cmd/jmap-bridge supplies the IMAP
+	// factory today and a Gmail API factory later.
+	NewBackend     func() mb.Backend
 	SMTP           *submit.Config // nil: the account has no submission server (FR-J.5)
 	CardDAV        *dav.Config    // nil: contacts are off and the capability is never advertised (FR-P.3)
 	Interval       time.Duration  // poll fallback for non-idled folders
@@ -46,6 +49,12 @@ type Config struct {
 	Metrics *metrics.Registry
 }
 
+// tierReporter is the optional interface an IMAP backend implements so
+// the engine can publish the FR-D.6 tier metric without knowing IMAP.
+type tierReporter interface {
+	TierName() string
+}
+
 // Engine runs one account's sync.
 type Engine struct {
 	cfg Config
@@ -54,9 +63,15 @@ type Engine struct {
 
 	// workMu serialises every use of the work connection.
 	workMu    sync.Mutex
-	work      *imapdrv.Conn
+	work      mb.Backend
 	folders   []string // discovery order, refreshed each pass
 	connected bool
+
+	// capsMu guards caps, the capability profile of the work session,
+	// which the write path consults for the Gmail label model
+	// (FR-S.10).
+	capsMu sync.Mutex
+	caps   mb.Capabilities
 
 	// wake carries pass requests: a folder hint, or "" for a full pass.
 	wake chan string
@@ -127,9 +142,10 @@ type Engine struct {
 	// lastPass is the Unix-nano time of the last successful pass; 0
 	// means none yet (FR-D.6 sync lag).
 	lastPass atomic.Int64
-	// tierLabel is the current work connection's tier, or -1 before the
-	// first connect (FR-D.6 tier gauge).
-	tierLabel atomic.Int32
+	// tierName is the current work session's tier label, empty before
+	// the first connect (FR-D.6 tier gauge). Only IMAP backends report
+	// one.
+	tierName atomic.Value // string
 	// reconnects counts IMAP dials by role; nil when metrics are off
 	// (FR-D.6).
 	reconnects *metrics.CounterVec
@@ -164,9 +180,8 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 		idleFolder:   "INBOX",
 		contactsKick: make(chan struct{}, 1),
 	}
-	// -1 means "no tier learned yet": the zero value is TierQResync and
-	// would otherwise advertise the best tier before the first connect.
-	e.tierLabel.Store(-1)
+	// The zero value is an empty tier label: absent until a backend
+	// reports one, which beats advertising a tier before connecting.
 	if cfg.Metrics != nil {
 		e.reconnects = cfg.Metrics.Counter("jmap_bridge_imap_reconnects_total",
 			"IMAP dials attempted, by account and connection role.", "account", "role")
@@ -175,8 +190,8 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 	// The reader and writer count their own dials through the engine's
 	// role-aware helper; they are built after e so the callback can read
 	// e.reconnects.
-	e.wr = newWriter(cfg.IMAP, log, e.countReconnect)
-	e.rd = newReader(cfg.IMAP, log, e.countReconnect)
+	e.wr = newWriter(cfg.NewBackend, log, e.countReconnect, e.capsSnapshot)
+	e.rd = newReader(cfg.NewBackend, log, e.countReconnect)
 	// The store holds one process-wide Ensure/SearchBackfill hook, so a
 	// single-engine process can claim it here. A multi-account process
 	// must install Router after building every engine (cmd/jmap-bridge
@@ -210,14 +225,15 @@ func (e *Engine) registerMetrics(reg *metrics.Registry) {
 	reg.GaugeFunc("jmap_bridge_sync_tier",
 		"Current IMAP sync tier for the account (1 for the active tier).",
 		func() []metrics.Sample {
-			t := e.tierLabel.Load()
-			if t < 0 {
+			t := e.tierName.Load()
+			name, _ := t.(string)
+			if name == "" {
 				return nil // no connection yet: absent beats a lying zero
 			}
 			return []metrics.Sample{{
 				Labels: []metrics.Label{
 					{Name: "account", Value: account},
-					{Name: "tier", Value: imapdrv.Tier(t).String()},
+					{Name: "tier", Value: name},
 				},
 				Value: 1,
 			}}
@@ -350,7 +366,7 @@ func (e *Engine) Run(ctx context.Context) {
 			// A [THROTTLED] pass is the provider saying "back off": the
 			// standard failure ladder would knock again in seconds.
 			// Cooldown first (FR-S.12); a kick still wakes us early.
-			if imapdrv.IsThrottled(err) {
+			if errors.Is(err, mb.ErrThrottled) {
 				e.log.Warn("sync: provider throttled the account, cooling down",
 					"account", e.cfg.Account, "cooldown", throttleCooldown.String())
 				failures = 0
@@ -453,18 +469,41 @@ func (e *Engine) connect(ctx context.Context) error {
 		return nil
 	}
 	e.countReconnect("work")
-	conn, err := imapdrv.Dial(ctx, e.cfg.IMAP)
-	if err != nil {
+	conn := e.cfg.NewBackend()
+	if err := conn.Connect(ctx); err != nil {
+		_ = conn.Close()
 		return err
 	}
 	e.work = conn
 	e.connected = true
-	e.tierLabel.Store(int32(conn.Tier()))
-	e.wr.noteGmail(conn.GmailExt())
+	e.setCaps(conn.Capabilities())
+	if tr, ok := conn.(tierReporter); ok {
+		e.tierName.Store(tr.TierName())
+	}
+	compressed := false
+	if c, ok := conn.(interface{ Compressed() bool }); ok {
+		compressed = c.Compressed()
+	}
 	e.log.Info("sync: connected",
-		"account", e.cfg.Account, "tier", conn.Tier().String(),
-		"compressed", conn.Compressed())
+		"account", e.cfg.Account, "backend", conn.Kind(),
+		"labels", e.capsSnapshot().Labels, "compressed", compressed)
 	return nil
+}
+
+// setCaps records the work session's capability profile for the write
+// path to consult.
+func (e *Engine) setCaps(c mb.Capabilities) {
+	e.capsMu.Lock()
+	e.caps = c
+	e.capsMu.Unlock()
+}
+
+// capsSnapshot returns the last capability profile the work session
+// reported.
+func (e *Engine) capsSnapshot() mb.Capabilities {
+	e.capsMu.Lock()
+	defer e.capsMu.Unlock()
+	return e.caps
 }
 
 func (e *Engine) isWorkConnected() bool {
@@ -521,8 +560,8 @@ func (e *Engine) doPass(ctx context.Context, hint string) error {
 	}
 	// Release the last folder's selection so administrative commands
 	// (DELETE/RENAME from another session) are not refused for it.
-	if err := e.work.Unselect(ctx); err != nil {
-		e.log.Debug("sync: unselect after pass", "err", err)
+	if err := e.work.Release(ctx); err != nil {
+		e.log.Debug("sync: release after pass", "err", err)
 	}
 	e.log.Debug("sync: pass done",
 		"account", e.cfg.Account, "folders", synced, "took", time.Since(start).String())
@@ -551,7 +590,7 @@ func (e *Engine) AuthFailed() bool { return e.authFailed.Load() }
 // /readyz distinguish "server unreachable, wait" from "a human must
 // re-consent" (FR-D.4).
 func isAuthFailure(err error) bool {
-	return imapdrv.IsAuthError(err) ||
+	return errors.Is(err, mb.ErrAuth) ||
 		errors.Is(err, oauth.ErrReauthNeeded) ||
 		errors.Is(err, oauth.ErrNoCredentials)
 }

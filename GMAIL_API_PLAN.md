@@ -1,7 +1,9 @@
 # GMAIL API MODE PLAN — jmap-bridge
 
 **Status:** approved at plan review 2026-10-03, implementation starting as
-**v0.1** work (D-API-8). This file is the plan; nothing here is claimed built.
+**v0.1** work (D-API-8). This file is the plan; nothing here is claimed built
+except where a milestone records it — **M8 (the seam + `imapdrv` adapter)
+landed 2026-10-03**, see §3.1.
 The `REQUIREMENTS.md` / `PLAN.md` deltas the implementation must land **in the
 same commit as the code** are listed in §15 (golden rule 7).
 
@@ -176,6 +178,31 @@ API adapter has exactly one strategy (history + label lists) and reports
 change-stream model up front. If the cursor/ref interface proves leaky for a
 future Graph backend, promote it then. M8's job is to prove one non-IMAP
 implementation fits, not to guess at three.
+
+**What M8 actually landed (2026-10-03).** The shape above was refined into
+`internal/mailbackend`: provider-neutral `Folder`/`FolderStatus`/`Ref`/`Cursor`/
+`Header`/`Delta`/`Copy`/`Mailbox` types, the `Backend` interface, and neutral
+`ErrThrottled`/`ErrAuth`/`RejectedError`. `*imapdrv.Conn` gained an adapter
+(`imapdrv.Backend`) that now owns tier dispatch (QRESYNC/CONDSTORE/baseline),
+per-folder cursor walking, the Gmail label membership strategy (label source
+selection, implicit All Mail, trash destroy) and the shared-UID reconcile.
+`internal/sync` names no provider: it orchestrates passes and commits the
+reported `Delta`. Two pragmatic refinements to the sketch:
+
+- **Full provider abstraction at the driver-operation level, not a grand batch
+  API.** The adapter exposes per-container `Backfill`/`Incremental` plus
+  ref-addressed fetch/write operations; the engine still decides *when* to sync
+  and *what* to commit, which kept M8 behaviour-preserving and its large test
+  suite intact.
+- **`mailbackend.Hooks` function values** (`KnownUIDs`, `KnownSharedUIDs`,
+  `LinkSharedUIDs`) carry the few store reads the adapter's reconcile needs, so
+  the dependency arrow stays engine → backend and `imapdrv` never imports
+  `internal/store`.
+
+`Send` is *not* on the interface yet: submission is SMTP and stays in
+`internal/submit`; the Gmail API submission path (§8.1) will add a `Send`-style
+operation in M12. `Watch` is on the interface (IMAP IDLE today; Pub/Sub push in
+M13).
 
 ### 3.2 Process model
 
@@ -564,7 +591,7 @@ pure refactor; M9–M14 mirror the M1–M4 gating style.
 
 | # | Deliverable | Gate | FRs |
 |---|---|---|---|
-| **M8** | `internal/mailbackend` seam; `imapdrv` adapter; sync engine depends only on the interface; `ErrThrottled`/auth errors made backend-neutral | **no behaviour change**: every existing test green; jmap-tui live suite over loopback still green; go-imap types still confined to `imapdrv` | none new (refactor) |
+| **M8** | `internal/mailbackend` seam; `imapdrv` adapter; sync engine depends only on the interface; `ErrThrottled`/auth errors made backend-neutral — **landed 2026-10-03 (PLAN §12 gate ✅ done)** | **no behaviour change**: every existing test green; jmap-tui live suite over loopback still green; go-imap types still confined to `imapdrv` | none new (refactor) |
 | **M9** | Gmail REST client on the official `google.golang.org/api/gmail/v1` package + `x/oauth2` bridge, pinned; hand-rolled batch, quota pacer, error taxonomy; `test/fixturegmail` skeleton + golden pairs | fixture-backed client tests green incl. quota/backoff and batch correlation; cost table verified against Google's docs | (groundwork) |
 | **M10** | Config `backend`/`[accounts.gmail_api]` + validation; discovery, initial backfill, incremental history, hydration, `/changes` | jmap-tui browses a fixture Gmail account in API mode; **live read-only** gate against a throwaway Gmail account (folders/labels/counts/threads correct; a web-UI flag change appears) | FR-A.13, FR-S.13 (new), FR-M.1–.8 |
 | **M11** | Write path §8; drafts; `Mailbox/set` (incl. refusing `onDestroyRemoveEmails=true`, §16.4) | live write gate (dedicated account, abort on first `429`): label both ways, archive, star, move, `Mailbox/set`, draft create, destroy; every claim re-read from the Gmail web/API independently | FR-M.9–.13, FR-M.20 (new) |
