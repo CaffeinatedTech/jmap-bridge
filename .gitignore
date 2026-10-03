@@ -11,3 +11,6 @@
 blobs/
 dev/gate/m4gate-result.txt
 dev/gate/*.log
+# Local live-gate config carries a real account address + OAuth client id
+# (committed file is dev/config-gmail.toml.example). Never commit this.
+dev/config-gmail.toml

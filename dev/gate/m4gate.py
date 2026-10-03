@@ -48,20 +48,27 @@ if not os.path.exists(keyfile):
             os.write(fd, line.split("=", 1)[1].strip().encode())
             os.close(fd)
             break
-for line in open("/home/adam/projects/jmap-bridge/dev/config-gmail.toml"):
-    if "client_id" in line:
-        os.environ.setdefault("GMAIL_TOKEN_CLIENT_ID",
-                              line.split("=", 1)[1].strip().strip('"'))
-        break
+CFG = "/home/adam/projects/jmap-bridge/dev/config-gmail.toml"
+if not os.path.exists(CFG):
+    sys.exit("missing dev/config-gmail.toml (copy dev/config-gmail.toml.example and fill in your account)")
+for line in open(CFG):
+    s = line.strip()
+    if s.startswith("client_id"):
+        os.environ.setdefault("GMAIL_TOKEN_CLIENT_ID", s.split("=", 1)[1].strip().strip('"'))
+    elif s.startswith("address"):
+        os.environ.setdefault("GMAIL_ADDRESS", s.split("=", 1)[1].strip().strip('"'))
 
 BRIDGE = "http://127.0.0.1:8080/gmail"
 AUTH = base64.b64encode(b"any:dev-token-gmail-local-only").decode()
-USER = "you@gmail.com"
+USER = os.environ.get("GMAIL_ADDRESS", "")
+if not USER or "@" not in USER:
+    sys.exit("GMAIL_ADDRESS is not set (add address = ... to dev/config-gmail.toml)")
 # The send test goes to a plus-alias of the same account: Gmail dedupes a
 # self-send (From == To) against the draft that already carries the same
 # Message-ID and does not deliver a separate INBOX copy, but a distinct
 # recipient on the same mailbox does deliver one.
-RCPT = "you+bridge@gmail.com"
+_local, _domain = USER.split("@", 1)
+RCPT = os.environ.get("GMAIL_RCPT", f"{_local}+jmapbridgegate@{_domain}")
 NONCE = str(int(time.time()))
 LABEL = "jmapgate" + NONCE          # applied in Gmail, expected in the bridge
 SUBJECT = "jmap-bridge M4 gate " + NONCE

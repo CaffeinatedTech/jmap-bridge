@@ -1,0 +1,41 @@
+# Gmail live-gate config (M4/M10) — EXAMPLE ONLY, copy to
+# dev/config-gmail.toml (gitignored) and fill in your own values.
+#
+# The OAuth client secret is NEVER placed here: it comes from the
+# environment (JMAP_BRIDGE_GMAIL_OAUTH2_CLIENT_SECRET, e.g. in .env), as
+# does the token-encryption key JMAP_BRIDGE_SECRET_KEY.
+#
+# Registered redirect URI on the OAuth client:
+#   http://127.0.0.1:8080/oauth/gmail/callback
+
+listen = "127.0.0.1:8080"
+base_url = "http://127.0.0.1:8080"
+data_dir = "./data"
+log_level = "info"
+
+[sync]
+interval = "60s"
+
+[auth]
+mode = "token"
+
+[[accounts]]
+id = "gmail"
+name = "Gmail"
+address = "you@gmail.com"
+token = "dev-token-gmail-local-only-0123456789"
+
+  [accounts.imap]
+  host = "imap.gmail.com"
+  port = 993
+  auth = "oauth2"
+  username = "you@gmail.com"
+
+  [accounts.smtp]
+  host = "smtp.gmail.com"
+  port = 465
+  auth = "oauth2"
+
+  [accounts.oauth2]
+  provider = "google"
+  client_id = "YOUR_CLIENT_ID.apps.googleusercontent.com"

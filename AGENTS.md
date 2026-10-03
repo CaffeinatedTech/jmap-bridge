@@ -139,6 +139,8 @@ Gmail **API mode** (M10) has its own fixture rig with no Google account:
 bridge on `http://127.0.0.1:8081/gapi` backed by `dev/gate/gmailfixture`; point
 jmap-tui's `TestLiveSessionAndMailboxes` at it the same way. The live API gate
 is `python3 dev/gate/gmailapi-live-gate.py` (read-only; see `dev/gate/README.md`).
+`dev/config-gmail.toml` (a real address + OAuth client id) is **gitignored**:
+copy `dev/config-gmail.toml.example`, never commit the real one.
 
 ## Live provider rules of engagement
 

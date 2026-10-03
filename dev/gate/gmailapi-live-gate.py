@@ -45,12 +45,19 @@ def load_env():
         os.write(fd, key.encode())
         os.close(fd)
     client_id = None
-    for line in open(os.path.join(REPO, "dev/config-gmail.toml")):
-        if "client_id" in line:
-            client_id = line.split("=", 1)[1].strip().strip('"')
-            break
+    address = None
+    cfg = os.path.join(REPO, "dev/config-gmail.toml")
+    if os.path.exists(cfg):
+        for line in open(cfg):
+            s = line.strip()
+            if s.startswith("client_id"):
+                client_id = s.split("=", 1)[1].strip().strip('"')
+            elif s.startswith("address"):
+                address = s.split("=", 1)[1].strip().strip('"')
     if client_id:
         os.environ.setdefault("GMAIL_TOKEN_CLIENT_ID", client_id)
+    if address:
+        os.environ.setdefault("GMAIL_ADDRESS", address)
 
 
 def build():
@@ -113,6 +120,9 @@ def jmap(calls, token=TOKEN, base=BRIDGE):
 
 def write_bridge_config():
     os.makedirs(DATA, exist_ok=True)
+    address = os.environ.get("GMAIL_ADDRESS", "")
+    if not address:
+        sys.exit("GMAIL_ADDRESS is not set (add address = ... to dev/config-gmail.toml)")
     cfg = f'''listen = "127.0.0.1:8080"
 base_url = "http://127.0.0.1:8080"
 data_dir = "{DATA}"
@@ -127,7 +137,7 @@ mode = "token"
 [[accounts]]
 id = "gmail"
 name = "Gmail API"
-address = "you@gmail.com"
+address = "{address}"
 token = "{TOKEN}"
 backend = "gmail_api"
 
@@ -231,7 +241,8 @@ def main():
         print(f"PASS test label {LABEL}:{label_id}")
 
         # Insert one test message into the label (never touches existing mail).
-        raw = (f"From: you@gmail.com\r\nTo: you@gmail.com\r\n"
+        address = os.environ["GMAIL_ADDRESS"]
+        raw = (f"From: {address}\r\nTo: {address}\r\n"
                f"Subject: {SUBJECT}\r\nMessage-ID: <m10-gate-{int(time.time())}@jmap-bridge.test>\r\n"
                f"Date: Mon, 02 Jan 2026 15:04:05 -0700\r\nMIME-Version: 1.0\r\n"
                f"Content-Type: text/plain; charset=utf-8\r\n\r\nM10 API gate body\r\n").encode()

@@ -7,6 +7,9 @@ script (JMAP over the bridge + an independent `imaplib` XOAUTH2 client).
 Secrets live in `.env` (never committed): the OAuth2 client secret and
 `JMAP_BRIDGE_SECRET_KEY`, which unseals the stored refresh token in
 `data/bridge.db` — losing that key means re-consenting in a browser.
+`dev/config-gmail.toml` holds a real account address and OAuth client id and
+is **gitignored**: copy `dev/config-gmail.toml.example` and fill in your own
+values before running the Gmail gates.
 
 ## What the gate covers
 
