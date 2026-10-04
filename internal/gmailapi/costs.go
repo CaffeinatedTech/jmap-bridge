@@ -17,6 +17,7 @@ const (
 	CostHistoryList         = 2
 	CostMessagesList        = 5
 	CostMessagesGet         = 20
+	CostMessagesImport      = 25
 	CostMessagesModify      = 5
 	CostMessagesDelete      = 10
 	CostMessagesBatchDelete = 50

@@ -499,6 +499,19 @@ func TestIdentityGetServesTheConfiguredIdentity(t *testing.T) {
 	if obj["mayDelete"] != false {
 		t.Errorf("mayDelete = %v, want false (FR-M.14)", obj["mayDelete"])
 	}
+	// RFC 8621 §6.1 requires the signature and replyTo/bcc properties to
+	// be present, not absent; the conformance suite fails an identity
+	// missing them.
+	for _, prop := range []string{"textSignature", "htmlSignature"} {
+		if s, ok := obj[prop].(string); !ok || s != "" {
+			t.Errorf("%s = %v, want empty string (required property)", prop, obj[prop])
+		}
+	}
+	for _, prop := range []string{"replyTo", "bcc"} {
+		if v, ok := obj[prop]; !ok || v != nil {
+			t.Errorf("%s = %v, want present null", prop, v)
+		}
+	}
 	if id, _ := obj["id"].(string); id != jmapapi.IdentityID("acct") {
 		t.Errorf("id = %v, want the stable derivation", obj["id"])
 	}

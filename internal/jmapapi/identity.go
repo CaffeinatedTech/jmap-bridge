@@ -47,11 +47,20 @@ func identityState(id *Identity) string {
 }
 
 func (id *Identity) object() map[string]any {
+	// RFC 8621 §6.1 makes every property required: id, name, email,
+	// replyTo, bcc, textSignature, htmlSignature and mayDelete. The
+	// bridge has no signatures, so it answers empty strings; replyTo/bcc
+	// are null (the server picks them at submission). Omitting them is a
+	// conformance failure even when the value would be empty.
 	return map[string]any{
-		"id":        id.ID,
-		"name":      id.Name,
-		"email":     id.Email,
-		"mayDelete": false,
+		"id":            id.ID,
+		"name":          id.Name,
+		"email":         id.Email,
+		"replyTo":       nil,
+		"bcc":           nil,
+		"textSignature": "",
+		"htmlSignature": "",
+		"mayDelete":     false,
 	}
 }
 

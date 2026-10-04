@@ -563,6 +563,16 @@ func (e *Engine) CreateDraft(ctx context.Context, account string, spec jmapapi.D
 	if err := e.st.PutHydrated(ctx, account, created.ID, draft.Body); err != nil {
 		e.log.Warn("sync: draft body not cached", "email", created.ID, "err", err)
 	}
+	// The APPEND filed the message in the first named mailbox; the rest of
+	// the create's mailboxIds go through the proven membership path, so a
+	// create into several mailboxes lands in all of them (RFC 8621 §4.6).
+	if len(spec.MailboxIDs) > 1 {
+		if err := e.ApplyEmailPatch(ctx, account, created.ID, jmapapi.EmailPatch{
+			MailboxAdd: spec.MailboxIDs[1:],
+		}); err != nil {
+			return nil, err
+		}
+	}
 	return &jmapapi.CreatedEmail{
 		ID: created.ID, BlobID: blobID, ThreadID: created.ThreadID, Size: created.Size,
 	}, nil

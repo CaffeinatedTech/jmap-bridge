@@ -950,22 +950,56 @@ func (b *Backend) Destroy(ctx context.Context, copies []mb.Ref, _ string) ([]mb.
 	return copies, nil
 }
 
-// Append stores raw RFC 5322 bytes as a Gmail draft (GMAIL_API_PLAN §8). It
-// is the engine's draft-create path; v0.1 has no API equivalent for
-// importing into arbitrary mailboxes, so any other container is refused
-// rather than mis-filed.
+// Append stores raw RFC 5322 bytes in a container (FR-M.11). A drafts
+// mailbox becomes a Gmail draft — the engine's draft-create path. Any other
+// writable mailbox is imported with users.messages.import and the target
+// label applied, which is what RFC 8621 Email/import means. The synthetic
+// All Mail archive is implicit and cannot be written. Keywords map to Gmail
+// labels and an unsupported keyword refuses the whole write (D-API-5)
+// rather than dropping it.
 func (b *Backend) Append(ctx context.Context, container string, raw []byte, keywords []string, _ *time.Time) (mb.Ref, []string, error) {
 	if err := b.refreshLabels(ctx); err != nil {
 		return mb.Ref{}, nil, err
-	}
-	info, ok := b.labels[container]
-	if !ok || info.Role != "drafts" {
-		return mb.Ref{}, nil, &mb.RejectedError{Text: "gmail_api: APPEND is draft-only in v0.1; Email/import into arbitrary mailboxes is not supported"}
 	}
 	mutation := MapKeywords(keywords, nil)
 	if len(mutation.Unsupported) > 0 {
 		return mb.Ref{}, nil, &mb.UnsupportedKeywordsError{Keywords: dedupe(mutation.Unsupported)}
 	}
+	info, ok := b.labels[container]
+	if !ok {
+		return mb.Ref{}, nil, fmt.Errorf("gmailapi: unknown mailbox %q", container)
+	}
+	if info.Implicit {
+		return mb.Ref{}, nil, &mb.RejectedError{Text: "membership in " + container + " is managed by the server and cannot be set"}
+	}
+	if info.Role == "drafts" {
+		return b.appendDraft(ctx, container, raw, keywords, mutation)
+	}
+	if info.ID == "" {
+		return mb.Ref{}, nil, &mb.RejectedError{Text: "gmailapi: no label for mailbox " + container}
+	}
+	labelIDs := append([]string{info.ID}, mutation.Add...)
+	msg, err := b.cfg.Client.importMessage(ctx, raw, labelIDs)
+	if err != nil {
+		return mb.Ref{}, nil, err
+	}
+	if msg.Id == "" {
+		return mb.Ref{}, nil, fmt.Errorf("gmailapi: messages.import returned no message id")
+	}
+	flags, err := b.reconcileImportFlags(ctx, msg, keywords)
+	if err != nil {
+		return mb.Ref{}, nil, err
+	}
+	uidMap, err := b.cfg.Native.AllocNativeUIDs(ctx, []string{msg.Id})
+	if err != nil {
+		return mb.Ref{}, nil, err
+	}
+	return mb.NewRef(container, apiUIDValidity, uidMap[msg.Id]), flags, nil
+}
+
+// appendDraft is Append's drafts case: create a Gmail draft and remember its
+// handle so a later submission sends it with drafts.send.
+func (b *Backend) appendDraft(ctx context.Context, container string, raw []byte, keywords []string, mutation LabelMutation) (mb.Ref, []string, error) {
 	labelIDs := append([]string{}, mutation.Add...)
 	if !containsString(labelIDs, LabelDraft) {
 		labelIDs = append(labelIDs, LabelDraft)
@@ -986,6 +1020,33 @@ func (b *Backend) Append(ctx context.Context, container string, raw []byte, keyw
 		return mb.Ref{}, nil, err
 	}
 	return mb.NewRef(container, apiUIDValidity, uid), keyword.ToIMAP(truthSet(keywords)), nil
+}
+
+// reconcileImportFlags makes the stored message's read state match the
+// requested keywords and returns the flags Gmail actually holds, so the
+// cache records server truth (golden rule 1). import only adds labels, so an
+// unread import needs a modify to add UNREAD when the request omitted $seen,
+// and a $seen import removes UNREAD if Gmail's delivery scan set it. When
+// Gmail returns no label set the requested flags are reported unchanged.
+func (b *Backend) reconcileImportFlags(ctx context.Context, msg *gmail.Message, keywords []string) ([]string, error) {
+	if msg.LabelIds == nil {
+		return keyword.ToIMAP(truthSet(keywords)), nil
+	}
+	seen := containsString(keywords, KeywordSeen)
+	if KeywordsFromLabels(msg.LabelIds)[KeywordSeen] == seen {
+		return keyword.ToIMAP(KeywordsFromLabels(msg.LabelIds)), nil
+	}
+	var add, remove []string
+	if seen {
+		remove = []string{LabelUnread}
+	} else {
+		add = []string{LabelUnread}
+	}
+	updated, err := b.cfg.Client.modifyMessage(ctx, msg.Id, add, remove)
+	if err != nil {
+		return nil, err
+	}
+	return keyword.ToIMAP(KeywordsFromLabels(updated.LabelIds)), nil
 }
 
 // CreateMailbox creates a user label; "/" in the path nests it.

@@ -650,6 +650,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request, segs []s
 		s.listMessages(w, r)
 	case len(segs) == 1 && segs[0] == "send" && r.Method == http.MethodPost:
 		s.sendMessage(w, r)
+	case len(segs) == 1 && segs[0] == "import" && r.Method == http.MethodPost:
+		s.importMessage(w, r)
 	case len(segs) == 1 && segs[0] == "batchModify" && r.Method == http.MethodPost:
 		s.batchModify(w, r)
 	case len(segs) == 1 && segs[0] == "batchDelete" && r.Method == http.MethodPost:
@@ -858,6 +860,40 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Backend Error", "backendError")
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "threadId": m.threadID, "labelIds": m.labelIDs})
+}
+
+// importMessage models users.messages.import (RFC 8621 Email/import,
+// FR-M.11): it stores the raw bytes under the requested labels without
+// relaying. Unlike send it never appends to s.sent.
+func (s *Server) importMessage(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Raw      string   `json:"raw"`
+		LabelIds []string `json:"labelIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request", "invalidArgument")
+		return
+	}
+	raw, err := base64.URLEncoding.DecodeString(body.Raw)
+	if err != nil {
+		raw, err = base64.RawURLEncoding.DecodeString(body.Raw)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid raw message", "invalidArgument")
+		return
+	}
+	s.mu.Lock()
+	id := s.putMessageLocked(SeedMessage{
+		LabelIDs:     append([]string(nil), body.LabelIds...),
+		Raw:          raw,
+		InternalDate: time.Now().UnixMilli(),
+	})
+	rec := s.newHistoryLocked()
+	rec.added = append(rec.added, id)
+	s.appendHistoryLocked(rec)
+	m := s.messages[id]
+	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "threadId": m.threadID, "labelIds": m.labelIDs})
 }
 

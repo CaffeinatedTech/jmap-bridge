@@ -80,3 +80,25 @@ data:
     #   [accounts.oauth2]
     #   provider  = "google"
     #   client_id = "…apps.googleusercontent.com"
+    #
+    # Gmail API mode: serve the same account through the Gmail REST API.
+    # Requires backend = "gmail_api", no imap/smtp blocks, and an
+    # [accounts.gmail_api] block. For ≤ 2 s change notification set
+    # watch = "pubsub" with the Pub/Sub topic/audience/service account;
+    # without Pub/Sub use watch = "poll" (latency = [sync].interval).
+    # See README "Gmail API mode" and PLAN.md §17.
+    #
+    # [[accounts]]
+    # id      = "gmail"
+    # name    = "Gmail"
+    # address = "me@gmail.com"
+    # backend = "gmail_api"
+    #   [accounts.oauth2]
+    #   provider  = "google"
+    #   client_id = "…apps.googleusercontent.com"
+    #   [accounts.gmail_api]
+    #   watch                  = "pubsub"
+    #   pubsub_topic           = "projects/<project>/topics/jmap-bridge-push"
+    #   pubsub_audience        = "https://jmap.example.com"
+    #   pubsub_service_account = "jmap-push@<project>.iam.gserviceaccount.com"
+    #   # backfill_query = "newer_than:30d"   # bound a large cold start

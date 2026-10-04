@@ -58,6 +58,22 @@ func (c *Client) createDraft(ctx context.Context, raw []byte, labelIDs []string)
 	return invoke(ctx, c, CostDraftsCreate, c.svc.Users.Drafts.Create(userMe, draft).Context(ctx))
 }
 
+// importMessage inserts raw RFC 5322 bytes into the mailbox with the given
+// labels via users.messages.import (RFC 8621 Email/import, FR-M.11). Unlike
+// messages.send it never relays; Gmail scans and files the message as if it
+// had arrived, which is what importing a message into a mailbox means.
+// internalDateSource=dateHeader makes the message's received time follow its
+// Date header — the closest the API allows to IMAP APPEND's INTERNALDATE
+// (D-API-10), and the source the conformance fixtures use.
+func (c *Client) importMessage(ctx context.Context, raw []byte, labelIDs []string) (*gmail.Message, error) {
+	msg := &gmail.Message{
+		Raw:      base64.RawURLEncoding.EncodeToString(raw),
+		LabelIds: labelIDs,
+	}
+	call := c.svc.Users.Messages.Import(userMe, msg).Context(ctx).InternalDateSource("dateHeader")
+	return invoke(ctx, c, CostMessagesImport, call)
+}
+
 // createLabel creates a user label; Gmail interprets "/" in name as
 // hierarchy (M11 Mailbox/set create).
 func (c *Client) createLabel(ctx context.Context, name string) (*gmail.Label, error) {

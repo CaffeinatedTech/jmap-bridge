@@ -209,7 +209,7 @@ The Deployment is a single replica on a `ReadWriteOnce` volume by design: the
 cache is one SQLite writer (PLAN §10), so it must not be scaled horizontally.
 
 Health endpoints for probes: `GET /healthz` (process liveness) and `GET /readyz`
-(200 only once every account with an IMAP backend has completed a sync pass;
+(200 only once every account — IMAP or Gmail API — has completed a sync pass;
 503 again if an account hits an authentication failure, e.g. a dead Gmail
 refresh token).
 
@@ -378,6 +378,7 @@ name    = "Personal"
 address = "me@example.com"     # default identity / envelope sender
 token   = "…"                  # client password (Basic auth), ≥24 chars:
                                #   openssl rand -hex 24
+backend = "imap"               # "imap" (default) | "gmail_api" (see Gmail API mode)
 
   [accounts.imap]              # host, port, tls, auth = "password"|"oauth2",
                                # username, password
@@ -386,6 +387,9 @@ token   = "…"                  # client password (Basic auth), ≥24 chars:
   [accounts.carddav]           # optional: url (or leave empty for discovery)
   [accounts.oauth2]            # provider = "google"|"generic",
                                # client_id, client_secret, auth_url, token_url, scopes
+  [accounts.gmail_api]         # backend = "gmail_api" only: watch, pubsub_topic,
+                               # pubsub_audience, pubsub_service_account,
+                               # quota_units_per_second, backfill_query/limit
 ```
 
 Secrets may also be supplied as `JMAP_BRIDGE_<ACCOUNT>_<FIELD>` environment
@@ -466,22 +470,94 @@ backend = "gmail_api"
   client_id = "…apps.googleusercontent.com"
 
   [accounts.gmail_api]
-  # watch = "poll"                 # push (Pub/Sub) arrives with M13
+  watch          = "pubsub"          # or "poll"; see below
+  pubsub_topic   = "projects/acme-mail/topics/jmap-bridge-push"
+  pubsub_audience = "https://jmap.example.com"
+  pubsub_service_account = "jmap-push@acme-mail.iam.gserviceaccount.com"
   # backfill_query = "newer_than:30d"  # optional: bound a large cold start
   # backfill_limit = 5000
 ```
 
-The tree implements the read path (browse, threads, search, lazy hydration,
+The bridge implements the read path (browse, threads, search, lazy hydration,
 `/changes`, SSE), the write path (triage, label moves, archive, draft
 create, `Mailbox/set`) and submission over the API (`drafts.send` for a
 Gmail draft, otherwise `messages.send`; Gmail files its own Sent copy, so
 the bridge never APPENDs a second one, and an ambiguous send is reconciled
-by Message-ID before it is reported as failed). Pub/Sub push arrives with
-M13. Semantics are documented honestly: a synthetic `All Mail`
-archive with implicit membership, only `$seen`/`$flagged`/`$draft`/`$important`
-keywords (no `$answered`/`$deleted`/custom), `size` as Gmail's `sizeEstimate`
-until a body is hydrated, `onDestroyRemoveEmails=true` refused (a label never
-owns its messages), and `Email/import` not yet supported in API mode.
+by Message-ID before it is reported as failed). Semantics are documented
+honestly: a synthetic `All Mail` archive with implicit membership, only
+`$seen`/`$flagged`/`$draft`/`$important` keywords (no
+`$answered`/`$deleted`/custom), `size` as Gmail's `sizeEstimate` until a body
+is hydrated, and `onDestroyRemoveEmails=true` refused (a label never owns its
+messages). `Email/import` imports raw RFC 5322 into any mailbox via Gmail's
+`messages.import`; an imported message's received time follows its `Date`
+header (`internalDateSource=dateHeader`), the closest the API allows to IMAP
+`APPEND`'s `INTERNALDATE`.
+
+Live change notification is one of two modes:
+
+- **`watch = "pubsub"`** (the ≤ 2 s path, NFR-2): `users.watch` registers
+  `pubsub_topic`, Pub/Sub pushes to `POST /gmail/push/{account}`, and a
+  verified push runs a history pass. The bridge re-arms the watch before its
+  expiration and calls `users.stop` on shutdown. It is the default only when
+  `base_url` is `https` **and** `pubsub_topic` is set; otherwise the account
+  falls back to poll.
+- **`watch = "poll"`** (the documented degraded mode): no GCP setup, no public
+  ingress needed; foreign changes appear within `sync.interval`. Use it for
+  loopback/self-hosted bridges and when you do not want to run Pub/Sub.
+
+#### Pub/Sub setup (for `watch = "pubsub"`)
+
+Change notification needs a publicly reachable HTTPS bridge (`base_url` on its
+public origin, already required for the OAuth callback). In the same Google
+Cloud project as the OAuth client, with the Gmail API enabled:
+
+1. **Create the topic** and let Gmail publish to it:
+
+   ```sh
+   gcloud pubsub topics create jmap-bridge-push
+   gcloud pubsub topics add-iam-policy-binding jmap-bridge-push \
+     --member="serviceAccount:gmail-api-push@system.gserviceaccount.com" \
+     --role="roles/pubsub.publisher"
+   ```
+
+2. **Create a service account and an OIDC push subscription** targeting the
+   bridge. The bridge verifies the push's OIDC token against the audience and
+   the service account's email, so both must match the config below:
+
+   ```sh
+   gcloud iam service-accounts create jmap-push \
+     --display-name="jmap-bridge Pub/Sub push"
+   gcloud pubsub subscriptions create jmap-bridge-push-sub \
+     --topic=jmap-bridge-push \
+     --push-endpoint="https://jmap.example.com/gmail/push/gmail" \
+     --push-auth-service-account="jmap-push@<project>.iam.gserviceaccount.com" \
+     --push-auth-token-audience="https://jmap.example.com"
+   ```
+
+3. **Point the account at it** (`[accounts.gmail_api]` above), restart the
+   bridge, and watch for `gmailapi: watch renewed` in the logs. `pubsub_topic`,
+   `pubsub_audience` and `pubsub_service_account` are all required in `pubsub`
+   mode; `pubsub_audience` must equal the subscription's audience and
+   `pubsub_service_account` its push-auth service account. The endpoint fails
+   closed: a missing or mismatched token is rejected `401` and runs no sync.
+
+PLAN.md §17 is the full production runbook — it also covers the forged-push
+and poll-fallback negative checks and how to observe a foreign change end to
+end. `push_allow_plain = true` (loopback/fixture only) replaces OIDC with the
+account's client token as a shared secret and must never be used on a public
+origin.
+
+#### Migrating an existing IMAP account to API mode
+
+The change is configuration-only: set `backend = "gmail_api"`, remove the
+`[accounts.imap]` and `[accounts.smtp]` blocks, and add `[accounts.gmail_api]`.
+The `[accounts.oauth2]` block and the stored refresh token are reused, so no
+re-consent is needed. The bridge re-discovers the account's labels and
+re-syncs from the API; it does **not** migrate the cache left behind by IMAP
+(the two backends address messages differently). For a clean switch, stop the
+bridge and start from a fresh `data_dir` — note the OAuth token lives in that
+same SQLite database, so a fresh directory means consenting once more. Keep the
+old `data_dir` if you want to switch back, or copy it aside first.
 
 ## Development
 

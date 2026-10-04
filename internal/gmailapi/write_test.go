@@ -178,14 +178,71 @@ func TestAdapterAppendDraft(t *testing.T) {
 	}
 }
 
-func TestAdapterAppendRejectsNonDraft(t *testing.T) {
+func TestAdapterImportIntoLabel(t *testing.T) {
+	fx := fixturegmail.Start(t, fixturegmail.Options{})
+	seedWriteLabels(fx)
+	n := newFakeNative()
+	b := newAdapter(t, fx, n)
+	ctx := context.Background()
+
+	// A $seen import lands in INBOX with no UNREAD (the reconcile removes
+	// it if Gmail's delivery scan set it).
+	ref, flags, err := b.Append(ctx, "INBOX", raw("Imported", "<imp1@x>", "body"), []string{KeywordSeen}, nil)
+	if err != nil {
+		t.Fatalf("Append import: %v", err)
+	}
+	uid, ok := ref.UID()
+	if !ok || uid == 0 {
+		t.Fatalf("import ref = %+v", ref)
+	}
+	native, _, _ := n.NativeByUID(ctx, uid)
+	if native == "" {
+		t.Fatal("no native id mapped for the import")
+	}
+	labels, ok := fx.MessageLabels(native)
+	if !ok {
+		t.Fatal("imported message not on the server")
+	}
+	if !containsString(labels, fixturegmail.LabelInbox) || containsString(labels, fixturegmail.LabelUnread) {
+		t.Fatalf("imported labels = %v, want INBOX and no UNREAD", labels)
+	}
+	if !keyword.FromIMAP(flags)[KeywordSeen] {
+		t.Fatalf("flags = %v, want $seen", flags)
+	}
+
+	// An import without $seen is unread on the server and reported so.
+	_, flags, err = b.Append(ctx, "INBOX", raw("Unread", "<imp2@x>", "body"), nil, nil)
+	if err != nil {
+		t.Fatalf("Append unread import: %v", err)
+	}
+	if keyword.FromIMAP(flags)[KeywordSeen] {
+		t.Fatalf("flags = %v, want unread (no $seen)", flags)
+	}
+}
+
+func TestAdapterImportRefusesUnsupportedKeyword(t *testing.T) {
 	fx := fixturegmail.Start(t, fixturegmail.Options{})
 	seedWriteLabels(fx)
 	b := newAdapter(t, fx, newFakeNative())
 
-	_, _, err := b.Append(context.Background(), "INBOX", raw("x", "<x@x>", "y"), nil, nil)
-	if !mb.IsRejected(err) {
-		t.Fatalf("err = %v, want RejectedError", err)
+	_, _, err := b.Append(context.Background(), "INBOX", raw("x", "<x@x>", "y"), []string{"$answered"}, nil)
+	var kwErr *mb.UnsupportedKeywordsError
+	if !errors.As(err, &kwErr) {
+		t.Fatalf("err = %v, want UnsupportedKeywordsError", err)
+	}
+}
+
+func TestAdapterImportRejectsImplicitAndUnknown(t *testing.T) {
+	fx := fixturegmail.Start(t, fixturegmail.Options{})
+	seedWriteLabels(fx)
+	b := newAdapter(t, fx, newFakeNative())
+	ctx := context.Background()
+
+	if _, _, err := b.Append(ctx, allMailName, raw("x", "<x@x>", "y"), nil, nil); !mb.IsRejected(err) {
+		t.Fatalf("All Mail import err = %v, want RejectedError", err)
+	}
+	if _, _, err := b.Append(ctx, "No Such Label", raw("x", "<x@x>", "y"), nil, nil); err == nil {
+		t.Fatal("unknown mailbox import did not error")
 	}
 }
 

@@ -228,6 +228,94 @@ func TestGmailAPIEngineCreateDraft(t *testing.T) {
 	}
 }
 
+func TestGmailAPIEngineCreateDraftMultiMailbox(t *testing.T) {
+	fx := fixturegmail.Start(t, fixturegmail.Options{})
+	gapiSeedLabels(fx)
+	env := newGmailAPIEnv(t, fx)
+	ctx := context.Background()
+
+	inbox := env.mailboxID(t, "INBOX")
+	work := env.mailboxID(t, "Work")
+	created, err := env.eng.CreateDraft(ctx, "gapi", jmapapi.DraftSpec{
+		MailboxIDs: []string{inbox, work},
+		To:         []jmapapi.Address{{Email: "you@example.test"}},
+		Subject:    "multi mailbox",
+		Parts:      []jmapapi.DraftPart{{Type: "text/plain", Text: "body"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateDraft: %v", err)
+	}
+	copies, err := env.st.EmailCopies(ctx, "gapi", created.ID)
+	if err != nil {
+		t.Fatalf("EmailCopies: %v", err)
+	}
+	if len(copies) != 2 {
+		t.Fatalf("copies = %d, want 2 (INBOX + Work)", len(copies))
+	}
+	native, ok, err := env.st.NativeByUID(ctx, "gapi", copies[0].UID)
+	if err != nil || !ok {
+		t.Fatalf("native for uid %d: %q ok=%v err=%v", copies[0].UID, native, ok, err)
+	}
+	labels, ok := fx.MessageLabels(native)
+	if !ok {
+		t.Fatalf("created message %s missing on the server", native)
+	}
+	if !contains(labels, fixturegmail.LabelInbox) || !contains(labels, "Label_work") {
+		t.Fatalf("labels = %v, want INBOX + Work", labels)
+	}
+}
+
+func TestGmailAPIEngineImportEmail(t *testing.T) {
+	fx := fixturegmail.Start(t, fixturegmail.Options{})
+	gapiSeedLabels(fx)
+	env := newGmailAPIEnv(t, fx)
+	ctx := context.Background()
+
+	blobID, err := env.st.PutBlob(ctx, "gapi", "message/rfc822", raw("Imported API", "<api-imp@x>", "imported body"))
+	if err != nil {
+		t.Fatalf("PutBlob: %v", err)
+	}
+	inbox := env.mailboxID(t, "INBOX")
+	work := env.mailboxID(t, "Work")
+
+	created, err := env.eng.ImportEmail(ctx, "gapi", jmapapi.ImportSpec{
+		BlobID:     blobID,
+		MailboxIDs: []string{inbox, work},
+		Keywords:   map[string]bool{"$seen": true, "$flagged": true},
+	})
+	if err != nil {
+		t.Fatalf("ImportEmail: %v", err)
+	}
+	if created.ID == "" || created.BlobID != blobID {
+		t.Fatalf("created = %+v", created)
+	}
+
+	// The one Gmail message carries both labels, seen and flagged.
+	copies, err := env.st.EmailCopies(ctx, "gapi", created.ID)
+	if err != nil {
+		t.Fatalf("EmailCopies: %v", err)
+	}
+	if len(copies) != 2 {
+		t.Fatalf("copies = %d, want 2 (INBOX + Work)", len(copies))
+	}
+	for _, c := range copies {
+		native, ok, err := env.st.NativeByUID(ctx, "gapi", c.UID)
+		if err != nil || !ok || native == "" {
+			t.Fatalf("native for uid %d: %q ok=%v err=%v", c.UID, native, ok, err)
+		}
+		labels, ok := fx.MessageLabels(native)
+		if !ok {
+			t.Fatalf("imported message %s missing on the server", native)
+		}
+		if contains(labels, fixturegmail.LabelUnread) || !contains(labels, fixturegmail.LabelStarred) {
+			t.Fatalf("labels = %v, want $seen + $flagged", labels)
+		}
+		if !contains(labels, fixturegmail.LabelInbox) || !contains(labels, "Label_work") {
+			t.Fatalf("labels = %v, want INBOX + Work", labels)
+		}
+	}
+}
+
 func TestGmailAPIEngineMailboxSet(t *testing.T) {
 	fx := fixturegmail.Start(t, fixturegmail.Options{})
 	gapiSeedLabels(fx)

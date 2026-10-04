@@ -115,6 +115,16 @@ redirect URI on your Google OAuth client (FR-D.3, FR-D.11).
 Set the image in `deployment.yaml` (or bump it later with
 `kustomize edit set image`, see the commented block in `kustomization.yaml`).
 
+To serve a Gmail account through the **Gmail REST API** instead of IMAP, set
+`backend = "gmail_api"`, drop `[accounts.imap]`/`[accounts.smtp]`, and add an
+`[accounts.gmail_api]` block (the commented second Gmail example in
+`configmap.yaml`). For ≤ 2 s change notification also create the Pub/Sub topic,
+IAM binding and OIDC push subscription, and set `watch`/`pubsub_topic`/
+`pubsub_audience`/`pubsub_service_account` — the main README's
+[Gmail API mode](../README.md#gmail-api-mode) section and `PLAN.md` §17 have
+the full setup and the `watch = "poll"` fallback. The Ingress must expose
+`POST /gmail/push/<account>` on the same origin (it already proxies all paths).
+
 ### b. Create the Secret (never commit it)
 
 Every secret key is `JMAP_BRIDGE_<ACCOUNT>_<FIELD>` (FR-A.2), matching the
@@ -214,8 +224,8 @@ curl -sS https://jmap.example.com/healthz          # "ok"
 curl -sS https://jmap.example.com/readyz           # "ready" once every account has synced
 ```
 
-`/healthz` is process liveness; `/readyz` is false until every account with an
-IMAP backend has completed a sync pass, and false again if an account hits an
+`/healthz` is process liveness; `/readyz` is false until every account (IMAP or
+Gmail API) has completed a sync pass, and false again if an account hits an
 authentication failure (a dead Gmail refresh token, for example) — re-consent
 via `/oauth/{account}/start` (FR-D.4). Until then `get pods` shows `0/1`; that
 is expected, and the consent URL stays reachable (see e) because the Service
