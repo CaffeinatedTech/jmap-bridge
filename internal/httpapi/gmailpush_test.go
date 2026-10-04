@@ -67,7 +67,8 @@ func pushPost(body string) *http.Request {
 
 func TestGmailPushAcceptedNudgesEngine(t *testing.T) {
 	h, rec := newPushServer(t, map[string]PushVerifier{"personal": fakePushVerifier{accept: "secret"}})
-	r := pushPost(`{"emailAddress":"me@example.test","historyId":"123"}`)
+	// The real Gmail payload sends historyId as a JSON number.
+	r := pushPost(`{"emailAddress":"me@example.test","historyId":1234567890123}`)
 	r.Header.Set("X-Push-Token", "secret")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -81,8 +82,24 @@ func TestGmailPushAcceptedNudgesEngine(t *testing.T) {
 
 func TestGmailPushEnvelopeFormAccepted(t *testing.T) {
 	h, rec := newPushServer(t, map[string]PushVerifier{"personal": fakePushVerifier{accept: "secret"}})
-	data := base64.StdEncoding.EncodeToString([]byte(`{"emailAddress":"me@example.test","historyId":"123"}`))
+	data := base64.StdEncoding.EncodeToString([]byte(`{"emailAddress":"me@example.test","historyId":123}`))
 	r := pushPost(`{"message":{"data":"` + data + `"}}`)
+	r.Header.Set("X-Push-Token", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if rec.count() != 1 {
+		t.Fatalf("engine not nudged")
+	}
+}
+
+// TestGmailPushHistoryIDStringAccepted keeps the loopback/fixture string
+// form working: json.Number accepts both a number and a quoted string.
+func TestGmailPushHistoryIDStringAccepted(t *testing.T) {
+	h, rec := newPushServer(t, map[string]PushVerifier{"personal": fakePushVerifier{accept: "secret"}})
+	r := pushPost(`{"emailAddress":"me@example.test","historyId":"123"}`)
 	r.Header.Set("X-Push-Token", "secret")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)

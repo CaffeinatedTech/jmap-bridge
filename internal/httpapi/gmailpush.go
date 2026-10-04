@@ -12,10 +12,14 @@ import (
 const maxPushBody = 1 << 20
 
 // gmailNotification is the Gmail payload published to the Pub/Sub topic,
-// base64-wrapped in the Pub/Sub message's data field.
+// base64-wrapped in the Pub/Sub message's data field. Gmail sends
+// historyId as a JSON number; json.Number also accepts a quoted string, so
+// the loopback fixture's string form keeps working. The value is unused —
+// the engine syncs from its own cursor — so its type only needs to not
+// reject the real payload.
 type gmailNotification struct {
-	EmailAddress string `json:"emailAddress"`
-	HistoryID    string `json:"historyId"`
+	EmailAddress string      `json:"emailAddress"`
+	HistoryID    json.Number `json:"historyId"`
 }
 
 // pubsubPush is the Cloud Pub/Sub push envelope delivered to the endpoint.
