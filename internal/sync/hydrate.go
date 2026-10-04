@@ -31,28 +31,38 @@ type flight struct {
 }
 
 // Ensure is the store's hook (FR-M.4/FR-S.8): fill previews for
-// previewIDs and bodies for bodyIDs before the read answers. It blocks
-// until the bodies it was asked for are cached (or failed), and a
-// caller that goes away mid-wait simply stops waiting — the fetch
-// itself runs on the engine's context so another waiter still wins.
+// previewIDs and bodies for bodyIDs before the read answers. Interactive
+// bodies are queued on a bounded, drop-oldest lane so a client that
+// scrolls faster than the provider can serve cannot queue unbounded work;
+// an evicted body (or one in its post-failure cooldown) answers from
+// cache. A caller that goes away stops waiting, and a queued ticket whose
+// caller already left is dropped rather than fetched — the next read
+// re-requests it.
 func (e *Engine) Ensure(ctx context.Context, account string, previewIDs, bodyIDs []string) error {
 	if account != e.cfg.Account {
 		return fmt.Errorf("sync: ensure for foreign account %q", account)
 	}
+	// An account that needs re-consent serves the cache until a pass
+	// clears the flag: retrying the provider on every read would only
+	// hammer it (FR-D.4, FR-A.7).
+	if e.authFailed.Load() {
+		return nil
+	}
 	var firstErr error
 	if len(previewIDs) > 0 {
 		if err := e.fetchPreviews(ctx, previewIDs); err != nil {
+			if isAuthFailure(err) {
+				e.authFailed.Store(true)
+			}
 			firstErr = err
 		}
 	}
 	if len(bodyIDs) > 0 {
-		// Signal a live read: the sync pass yields its backfill while this
-		// is non-zero so body fetches are not starved behind it (API mode
-		// shares one quota pacer between the work and hydration sessions).
-		e.hydratePending.Add(1)
-		err := e.hydrateBatch(ctx, bodyIDs)
-		e.hydratePending.Add(-1)
+		err := e.enqueueInteractive(ctx, bodyIDs)
 		if err != nil && !errors.Is(err, context.Canceled) {
+			if isAuthFailure(err) {
+				e.authFailed.Store(true)
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -61,72 +71,20 @@ func (e *Engine) Ensure(ctx context.Context, account string, previewIDs, bodyIDs
 	return firstErr
 }
 
-// hydrateBatch fills a set of bodies with one IMAP round trip per
-// folder chunk instead of one per message (NFR-1's ≥ 15 msg/s floor
-// assumes it: a per-message select/fetch/unselect makes folder-size
-// server bookkeeping the bottleneck). Single-flight per id is kept:
-// ids another caller already owns are left to that owner, and ids the
-// store already shows hydrated are answered locally.
-func (e *Engine) hydrateBatch(ctx context.Context, ids []string) error {
-	type owned struct {
-		id string
-		f  *flight
-	}
-	var mine []owned
-	var waiters []*flight
-	for _, id := range ids {
-		f, owner := e.claim(id)
-		if owner {
-			mine = append(mine, owned{id, f})
-		} else {
-			// Another caller owns this fetch: wait for it, exactly as
-			// the single-id path does, so this read never answers
-			// before the body it asked for is cached (FR-S.8).
-			waiters = append(waiters, f)
-		}
-	}
-	if len(mine) == 0 {
-		return e.waitFlights(ctx, waiters)
-	}
-	fails := make(map[string]error, len(mine))
-	defer func() {
-		for _, o := range mine {
-			e.release(o.id, o.f, fails[o.id])
-		}
-	}()
-	var want []string
-	for _, o := range mine {
-		done, err := e.st.IsHydrated(context.Background(), e.cfg.Account, o.id)
-		if err == nil && done {
-			continue // done: released with a nil error below
-		}
-		want = append(want, o.id)
-	}
-	locs, err := e.st.Locations(context.Background(), e.cfg.Account, want)
-	if err != nil {
-		for _, o := range mine {
-			if !wanted(want, o.id) {
-				continue // already hydrated: stays a nil error
-			}
-			fails[o.id] = err
-		}
-		return err
-	}
-	byFolder := map[string]map[uint32]string{} // folder → uid → email id
-	for _, id := range want {
-		loc, ok := locs[id]
-		if !ok {
-			fails[id] = fmt.Errorf("%w: %s has no backend location", errNotHydrated, id)
-			continue
-		}
-		if byFolder[loc.Folder] == nil {
-			byFolder[loc.Folder] = map[uint32]string{}
-		}
-		byFolder[loc.Folder][loc.UID] = id
-	}
+// fetchBodyFolders fills bodies for a set of ids grouped by folder with
+// one round trip per folder chunk instead of one per message (NFR-1's
+// ≥ 15 msg/s floor assumes it: a per-message select/fetch/unselect makes
+// folder-size server bookkeeping the bottleneck). It records per-id
+// failures in fails. ctx is consulted between folders only — the fetch
+// itself runs on its own bounded context so a caller that walks away does
+// not waste a completed download.
+func (e *Engine) fetchBodyFolders(ctx context.Context, byFolder map[string]map[uint32]string, fails map[string]error) {
 	for folder, uids := range byFolder {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			for _, id := range uids {
+				fails[id] = ctx.Err()
+			}
+			return
 		}
 		// Hydrate on the dedicated session (FR-X.6): a sync pass holds
 		// the work session for a whole backfill, so reading through it
@@ -168,7 +126,6 @@ func (e *Engine) hydrateBatch(ctx context.Context, ids []string) error {
 			}
 		}
 	}
-	return firstErrOf(fails)
 }
 
 // hydrationYieldCap bounds how long a background backfill defers to a
@@ -210,24 +167,6 @@ func (e *Engine) waitFlights(ctx context.Context, flights []*flight) error {
 		}
 	}
 	return first
-}
-
-func wanted(want []string, id string) bool {
-	for _, w := range want {
-		if w == id {
-			return true
-		}
-	}
-	return false
-}
-
-func firstErrOf(fails map[string]error) error {
-	for _, err := range fails {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // storeBody parses one fetched message and commits it — the tail both

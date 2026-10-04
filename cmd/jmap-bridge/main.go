@@ -355,6 +355,13 @@ func buildGmailClient(ctx context.Context, a *config.Account, mgr *oauth.Manager
 		opts.HTTPClient = oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: ga.Token}))
 	case mgr != nil:
 		opts.TokenSource = gmailapi.TokenSourceFromManager(mgr)
+		// FR-A.7: a rejected access token gets exactly one forced refresh
+		// and one retry, so a token Google invalidated before its nominal
+		// expiry self-heals instead of wedging every call until restart.
+		opts.Reauthorize = func(ctx context.Context) error {
+			_, err := mgr.AccessToken(ctx, true)
+			return err
+		}
 	default:
 		return nil, fmt.Errorf("account %s: gmail_api needs [accounts.oauth2] or a loopback endpoint + token", a.ID)
 	}

@@ -43,9 +43,11 @@ func (r *reader) dropLocked() {
 
 // withBackend runs fn on a healthy hydration session. Reads are
 // idempotent, so a transport failure drops the socket and retries once
-// on a fresh one; a server refusal is returned as is. The caller's
-// context bounds each attempt, so a request that goes away stops waiting
-// rather than holding the session.
+// on a fresh one; a server refusal or an authentication failure is
+// returned as is — redialing cannot mint new credentials, and retrying a
+// 401 on every read is what turns a dead token into a request storm
+// (FR-A.7). The caller's context bounds each attempt, so a request that
+// goes away stops waiting rather than holding the session.
 func (r *reader) withBackend(ctx context.Context, fn func(mb.Backend) error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -55,7 +57,7 @@ func (r *reader) withBackend(ctx context.Context, fn func(mb.Backend) error) err
 			return err
 		}
 		err = fn(backend)
-		if err == nil || mb.IsRejected(err) {
+		if err == nil || mb.IsRejected(err) || isAuthFailure(err) {
 			return err
 		}
 		r.dropLocked()

@@ -96,6 +96,17 @@ type Engine struct {
 	flightMu sync.Mutex
 	flights  map[string]*flight
 
+	// hydrateQ is the bounded, drop-oldest interactive hydration queue
+	// (FR-S.8): a fast-scrolling client cannot queue unbounded work.
+	hydrateQ *hydrationQueue
+	// hydrateStarted is set by Run once the queue's worker is running;
+	// before that, enqueueInteractive processes inline.
+	hydrateStarted atomic.Bool
+	// hydrateFailMu guards hydrateFail, the post-failure cooldown map
+	// that keeps a read from re-fetching a body the provider just refused.
+	hydrateFailMu sync.Mutex
+	hydrateFail   map[string]time.Time
+
 	// prefetch bounding (FR-S.9)
 	prefetchSem chan struct{}
 
@@ -183,6 +194,8 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 		wake:         make(chan string, 8),
 		kick:         make(chan struct{}, 1),
 		flights:      map[string]*flight{},
+		hydrateQ:     newHydrationQueue(defaultHydrationQueueCap),
+		hydrateFail:  map[string]time.Time{},
 		prefetchSem:  make(chan struct{}, cfg.Concurrency),
 		backfill:     make(chan string, 1024),
 		idleFolder:   "INBOX",
@@ -247,13 +260,14 @@ func (e *Engine) registerMetrics(reg *metrics.Registry) {
 			}}
 		})
 	reg.GaugeFunc("jmap_bridge_hydration_queue",
-		"Hydration work by state: pending lane, in-flight fetches and prefetch slots.",
+		"Hydration work by state: search-backfill lane, interactive queue, in-flight fetches and prefetch slots.",
 		func() []metrics.Sample {
 			e.flightMu.Lock()
 			inflight := len(e.flights)
 			e.flightMu.Unlock()
 			return []metrics.Sample{
 				{Labels: []metrics.Label{{Name: "account", Value: account}, {Name: "state", Value: "pending"}}, Value: float64(len(e.backfill))},
+				{Labels: []metrics.Label{{Name: "account", Value: account}, {Name: "state", Value: "queued"}}, Value: float64(e.hydrateQ.len())},
 				{Labels: []metrics.Label{{Name: "account", Value: account}, {Name: "state", Value: "inflight"}}, Value: float64(inflight)},
 				{Labels: []metrics.Label{{Name: "account", Value: account}, {Name: "state", Value: "prefetch"}}, Value: float64(len(e.prefetchSem))},
 			}
@@ -321,6 +335,7 @@ func (e *Engine) Kick() {
 // exponential backoff on failure (FR-S.4) and the idle loop alongside.
 func (e *Engine) Run(ctx context.Context) {
 	go e.idleLoop(ctx)
+	e.hydrationWorkers(ctx)
 	if e.cfg.SearchBackfill {
 		e.backfillWorkers(ctx)
 	}

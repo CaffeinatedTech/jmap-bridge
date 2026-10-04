@@ -23,6 +23,8 @@ import (
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
+
+	"github.com/CaffeinatedTech/jmap-bridge/internal/mailbackend"
 )
 
 // userMe is Gmail's alias for the authenticated user; API mode is one account,
@@ -35,6 +37,12 @@ type Options struct {
 	// TokenSource authenticates every request. It is wrapped in an
 	// oauth2-authenticated http.Client.
 	TokenSource oauth2.TokenSource
+	// Reauthorize forces a fresh access token after a 401. When set, the
+	// client retries the refused call exactly once with the new token
+	// (FR-A.7); when nil (static/fixture bearers), a 401 is final. This is
+	// what lets a merely-stale cached token self-heal instead of looking
+	// like a dead refresh token until the process restarts.
+	Reauthorize func(ctx context.Context) error
 	// HTTPClient is a pre-authenticated client, used by tests that inject a
 	// static bearer token. It wins when both are set.
 	HTTPClient *http.Client
@@ -56,12 +64,13 @@ type Options struct {
 // Client is one account's Gmail API client. It is safe for concurrent use by
 // net/http's transport, but the engine serialises calls per account (PLAN §10).
 type Client struct {
-	svc        *gmail.Service
-	httpClient *http.Client
-	base       string
-	pacer      *Pacer
-	maxRetries int
-	clock      Clock
+	svc         *gmail.Service
+	httpClient  *http.Client
+	base        string
+	pacer       *Pacer
+	maxRetries  int
+	reauthorize func(context.Context) error
+	clock       Clock
 }
 
 // New builds a client. It fails closed on missing credentials or a bad endpoint
@@ -95,12 +104,13 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 		clock = realClock{}
 	}
 	return &Client{
-		svc:        svc,
-		httpClient: hc,
-		base:       svc.BasePath,
-		pacer:      NewPacer(rate, clock),
-		maxRetries: retries,
-		clock:      clock,
+		svc:         svc,
+		httpClient:  hc,
+		base:        svc.BasePath,
+		pacer:       NewPacer(rate, clock),
+		maxRetries:  retries,
+		reauthorize: opts.Reauthorize,
+		clock:       clock,
 	}, nil
 }
 
@@ -129,8 +139,11 @@ type apiCall[T any] interface {
 
 // invoke runs one generated call under the pacer, retrying throttles and
 // transient failures with backoff and returning the classified error otherwise.
+// A 401 gets exactly one extra attempt after a forced token refresh (FR-A.7):
+// the cached access token may have been invalidated before its nominal expiry.
 func invoke[T any, C apiCall[T]](ctx context.Context, c *Client, cost int, call C) (T, error) {
 	var zero T
+	reauthorized := false
 	for attempt := 0; ; attempt++ {
 		if err := c.pacer.Wait(ctx, cost); err != nil {
 			return zero, err
@@ -140,6 +153,13 @@ func invoke[T any, C apiCall[T]](ctx context.Context, c *Client, cost int, call 
 			return v, nil
 		}
 		classified := classify(err)
+		if errors.Is(classified, mailbackend.ErrAuth) && !reauthorized && c.reauthorize != nil {
+			reauthorized = true
+			if rerr := c.reauthorize(ctx); rerr != nil {
+				return zero, rerr
+			}
+			continue
+		}
 		if attempt >= c.maxRetries || !retryable(classified) {
 			return zero, classified
 		}
@@ -152,17 +172,33 @@ func invoke[T any, C apiCall[T]](ctx context.Context, c *Client, cost int, call 
 // invokeOnce paces and classifies one call without retrying. Send uses it:
 // a retried send can duplicate a message whose response was lost, so an
 // ambiguous outcome is reconciled by Message-ID instead (GMAIL_API_PLAN
-// §8.1).
+// §8.1). A 401 is exempt: the provider never processed an unauthenticated
+// request, so one retry after a forced refresh is safe and keeps a stale
+// cached token from failing sends.
 func invokeOnce[T any, C apiCall[T]](ctx context.Context, c *Client, cost int, call C) (T, error) {
 	var zero T
 	if err := c.pacer.Wait(ctx, cost); err != nil {
 		return zero, err
 	}
 	v, err := call.Do()
-	if err != nil {
-		return zero, classify(err)
+	if err == nil {
+		return v, nil
 	}
-	return v, nil
+	classified := classify(err)
+	if errors.Is(classified, mailbackend.ErrAuth) && c.reauthorize != nil {
+		if rerr := c.reauthorize(ctx); rerr != nil {
+			return zero, rerr
+		}
+		if err := c.pacer.Wait(ctx, cost); err != nil {
+			return zero, err
+		}
+		v, err = call.Do()
+		if err == nil {
+			return v, nil
+		}
+		classified = classify(err)
+	}
+	return zero, classified
 }
 
 // --- thin typed operations (unexported: generated types stay in this package) ---
