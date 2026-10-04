@@ -10,8 +10,16 @@ import (
 	"google.golang.org/api/gmail/v1"
 )
 
-// maxBatchGet bounds one batch.get call to the API's 100-item limit.
-const maxBatchGet = 100
+// maxBatchGet bounds how many messages.get sub-requests one /batch call
+// fans out. Google accepts up to 100 per batch, but a large fan-out trips
+// the per-user "Too many concurrent requests for user" limit (Gmail's own
+// error guide names "batches with a large number of requests" as a
+// cause) — observed live with a 100-item batch against a real mailbox.
+// Batching affects round trips, not quota (the pacer is charged the sum),
+// so a small cap costs nothing in throughput and stays well clear of the
+// concurrency limit. The Gmail per-user quota, not the batch count,
+// governs how fast a cold backfill drains.
+const maxBatchGet = 10
 
 // batchGetMessages fetches several messages in one /batch round trip,
 // returning them keyed by id. A sub-response that is 404 (the message was

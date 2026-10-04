@@ -170,6 +170,16 @@ type Server struct {
 	watchTopic      string
 	watchExpiration time.Duration
 	stopped         bool
+	maxBatch        int // most sub-requests one /batch call carried
+}
+
+// MaxBatchItems reports the largest number of sub-requests any single
+// /batch call carried, so tests can assert the client caps its fan-out to
+// stay under Gmail's per-user concurrency limit.
+func (s *Server) MaxBatchItems() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxBatch
 }
 
 // Start brings a fixture server up on loopback and stops it on test cleanup.
@@ -1103,6 +1113,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	mr := multipart.NewReader(r.Body, params["boundary"])
 	var buf strings.Builder
 	mw := multipart.NewWriter(&buf)
+	items := 0
 	for {
 		part, perr := mr.NextPart()
 		if perr == io.EOF {
@@ -1119,6 +1130,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		contentID := part.Header.Get("Content-ID")
+		items++
 		_ = part.Close()
 
 		rec := httptest.NewRecorder()
@@ -1136,6 +1148,11 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		writeInnerResponse(wpart, rec)
 	}
 	_ = mw.Close()
+	s.mu.Lock()
+	if items > s.maxBatch {
+		s.maxBatch = items
+	}
+	s.mu.Unlock()
 	w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, buf.String())

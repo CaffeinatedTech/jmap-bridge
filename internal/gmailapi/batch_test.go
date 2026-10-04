@@ -119,3 +119,27 @@ func TestBatchRejectsOversize(t *testing.T) {
 		t.Fatal("oversize batch accepted")
 	}
 }
+
+// TestBatchGetCapsFanOut pins the fix for Gmail's "Too many concurrent
+// requests for user": one /batch must never carry more than maxBatchGet
+// messages.get sub-requests, and every id must still be fetched.
+func TestBatchGetCapsFanOut(t *testing.T) {
+	fx := fixturegmail.Start(t, fixturegmail.Options{})
+	ids := make([]string, 0, maxBatchGet*2+3)
+	for i := 0; i < maxBatchGet*2+3; i++ {
+		id := fmt.Sprintf("m%d", i)
+		fx.SeedMessage(fixturegmail.SeedMessage{ID: id, LabelIDs: []string{fixturegmail.LabelInbox}})
+		ids = append(ids, id)
+	}
+	c := newTestClient(t, fx)
+	msgs, err := c.batchGetMessages(context.Background(), ids, formatMetadata, nil)
+	if err != nil {
+		t.Fatalf("batchGetMessages: %v", err)
+	}
+	if len(msgs) != len(ids) {
+		t.Fatalf("got %d messages, want %d", len(msgs), len(ids))
+	}
+	if got := fx.MaxBatchItems(); got > maxBatchGet {
+		t.Fatalf("batch fan-out = %d, want <= %d", got, maxBatchGet)
+	}
+}
