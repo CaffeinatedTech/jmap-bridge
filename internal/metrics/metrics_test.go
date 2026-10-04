@@ -53,6 +53,38 @@ func TestExpositionContainsHelpTypeAndSeries(t *testing.T) {
 	}
 }
 
+// TestGaugeFamilyAccumulatesSources pins the multi-account fix: every sync
+// engine registers the same per-account gauge names on one registry, so a
+// repeated GaugeFunc must add a source rather than panic (the v0.1.6
+// startup crash with two accounts).
+func TestGaugeFamilyAccumulatesSources(t *testing.T) {
+	r := New()
+	help := "Seconds since the last pass."
+	r.GaugeFunc("jmap_bridge_sync_lag_seconds", help, func() []Sample {
+		return []Sample{{Labels: []Label{{Name: "account", Value: "personal"}}, Value: 1}}
+	})
+	r.GaugeFunc("jmap_bridge_sync_lag_seconds", help, func() []Sample {
+		return []Sample{{Labels: []Label{{Name: "account", Value: "work"}}, Value: 2}}
+	})
+
+	var b strings.Builder
+	if _, err := r.WriteTo(&b); err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+	got := b.String()
+	if strings.Count(got, "# TYPE jmap_bridge_sync_lag_seconds") != 1 {
+		t.Errorf("family emitted more than one TYPE line:\n%s", got)
+	}
+	for _, want := range []string{
+		`jmap_bridge_sync_lag_seconds{account="personal"} 1`,
+		`jmap_bridge_sync_lag_seconds{account="work"} 2`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("exposition missing %q\n%s", want, got)
+		}
+	}
+}
+
 func TestLabelEscaping(t *testing.T) {
 	r := New()
 	v := r.Counter("c", "help", "account")

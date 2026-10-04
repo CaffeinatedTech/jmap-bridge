@@ -111,11 +111,14 @@ func encodeValues(values []string) string {
 }
 
 // gaugeFunc is a pull-based gauge family: its samples are produced at
-// scrape time, so the metric always reflects live state.
+// scrape time, so the metric always reflects live state. A family is
+// registered once per source (one sync engine per account), so it holds
+// every source's callback and concatenates their samples on scrape —
+// the same shared-family model CounterVec uses for per-account series.
 type gaugeFunc struct {
-	name string
-	help string
-	f    func() []Sample
+	name  string
+	help  string
+	funcs []func() []Sample
 }
 
 // Registry holds metric families and is safe for concurrent use.
@@ -162,16 +165,23 @@ func (r *Registry) Counter(name, help string, labelNames ...string) *CounterVec 
 // scrape; returning nil (or an empty slice) emits the family's HELP and
 // TYPE with no series, which is how a metric with no state yet stays
 // absent rather than lying with a zero.
+//
+// The same family name may be registered more than once — one engine per
+// account does exactly that for the per-account gauges. Each callback
+// contributes its own labelled series, exactly as repeated With calls on
+// a CounterVec do, so a multi-account process exposes every account.
+// Registering the name as a counter is still a programmer error.
 func (r *Registry) GaugeFunc(name, help string, f func() []Sample) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.gauges[name]; ok {
-		panic(fmt.Sprintf("metrics: %s already registered as a gauge", name))
-	}
 	if _, ok := r.counters[name]; ok {
 		panic(fmt.Sprintf("metrics: %s already registered as a counter", name))
 	}
-	r.gauges[name] = &gaugeFunc{name: name, help: help, f: f}
+	if g, ok := r.gauges[name]; ok {
+		g.funcs = append(g.funcs, f)
+		return
+	}
+	r.gauges[name] = &gaugeFunc{name: name, help: help, funcs: []func() []Sample{f}}
 }
 
 // renderSeries is the common shape a counter or gauge series renders
@@ -210,8 +220,10 @@ func (r *Registry) WriteTo(w io.Writer) (int64, error) {
 
 	for _, g := range gauges {
 		fam := renderFamily{name: g.name, help: g.help, typ: "gauge"}
-		for _, s := range g.f() {
-			fam.series = append(fam.series, renderSeries{labels: s.Labels, value: s.Value})
+		for _, f := range g.funcs {
+			for _, s := range f() {
+				fam.series = append(fam.series, renderSeries{labels: s.Labels, value: s.Value})
+			}
 		}
 		families = append(families, fam)
 	}
