@@ -43,6 +43,9 @@ type Config struct {
 	PrefetchWindow time.Duration  // 0 disables prefetch (FR-S.9)
 	Concurrency    int            // hydration workers (FR-S.9 rate limit)
 	SearchBackfill bool           // hydrate text-search candidates in the background (FR-X.5)
+	// LogHydration logs one line per body hydration at info level (support
+	// switch; off by default).
+	LogHydration bool
 	// Metrics, when non-nil, registers the engine's FR-D.6 gauges and
 	// counters. nil keeps the engine metrics-free for tests and
 	// cache-only deployments.

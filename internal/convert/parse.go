@@ -39,6 +39,15 @@ func ParseBody(raw []byte) (store.BodyResult, error) {
 		soft = walker.err
 	}
 	res.Preview = flatPreview(walker.firstText)
+	// The structure is built from the same bytes with the same partId
+	// numbering as the values, so bodyStructure and bodyValues can never
+	// disagree (FR-M.4). It is the only structure an API-mode message gets:
+	// its header pass has no IMAP BODYSTRUCTURE.
+	if structure, serr := structureOfRaw(raw); serr == nil {
+		res.Structure = structure
+	} else if soft == nil {
+		soft = serr
+	}
 	return res, soft
 }
 

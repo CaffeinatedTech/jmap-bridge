@@ -356,6 +356,8 @@ backfill_scan = 2000            # max unhydrated candidates one text search enqu
 interval     = "5m"            # fallback poll when IDLE is unavailable
 batch_size   = 500             # UIDs per FETCH during backfill
 prefetch_window = "30d"        # bodies auto-hydrate for mail newer than this (0 = never)
+log_hydration = false          # log one line per body hydration: account, folder,
+                               # bytes/parts, or the fetch failure (support switch)
 
 [rate]                         # in-process abuse protection (NFR-5); see SECURITY-PLAN.md
 enabled          = true

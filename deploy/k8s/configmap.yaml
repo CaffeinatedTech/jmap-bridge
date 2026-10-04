@@ -25,6 +25,7 @@ data:
 
     [sync]
     interval = "5m"
+    # log_hydration = true   # support: one line per body hydration (account, folder, parts, or failure)
 
     # [rate]                       # in-process abuse protection (NFR-5, SECURITY-PLAN.md).
     #                              # Defaults are already active: enabled = true.

@@ -253,6 +253,7 @@ func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager, gclie
 		PrefetchWindow: cfg.Sync.PrefetchWindow.Std(),
 		Concurrency:    cfg.Search.Concurrency,
 		SearchBackfill: cfg.Search.Backfill,
+		LogHydration:   cfg.Sync.LogHydration,
 		Metrics:        reg,
 	}
 	// D-API-2: the engine sees only mailbackend.Backend. The factory is

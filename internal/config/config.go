@@ -93,6 +93,10 @@ type Sync struct {
 	Interval       Duration `toml:"interval"`
 	BatchSize      int      `toml:"batch_size"`
 	PrefetchWindow Duration `toml:"prefetch_window"`
+	// LogHydration logs one line per body hydration (start, result, and
+	// failure) at info level. Off by default: it is a support/observability
+	// switch, not part of normal operation (NFR-6).
+	LogHydration bool `toml:"log_hydration"`
 }
 
 // Account is one configured upstream mailbox served at /{id}/… (D-13).

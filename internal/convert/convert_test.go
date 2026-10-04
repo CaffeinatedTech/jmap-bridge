@@ -236,3 +236,49 @@ func TestPreviewFlattening(t *testing.T) {
 		t.Error("empty body must give empty preview")
 	}
 }
+
+// TestParseBodyStructureMatchesValues pins that hydration's structure and
+// values agree. It is the fix for API-mode messages, whose header pass has
+// no IMAP BODYSTRUCTURE, so hydration is the only source of both: without
+// it bodyStructure stayed "{}" and textBody/htmlBody were empty.
+func TestParseBodyStructureMatchesValues(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "mixed.eml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, _ := ParseBody(raw)
+	if res.Structure == "" || res.Structure == "{}" {
+		t.Fatalf("ParseBody structure = %q, want a non-empty tree", res.Structure)
+	}
+	var tree map[string]any
+	if err := json.Unmarshal([]byte(res.Structure), &tree); err != nil {
+		t.Fatalf("structure is not JSON: %v", err)
+	}
+	ids := map[string]bool{}
+	var walk func(any)
+	walk = func(n any) {
+		obj, ok := n.(map[string]any)
+		if !ok {
+			return
+		}
+		if pid, ok := obj["partId"].(string); ok {
+			ids[pid] = true
+		}
+		if subs, ok := obj["subParts"].([]any); ok {
+			for _, sub := range subs {
+				walk(sub)
+			}
+		}
+	}
+	walk(tree)
+	for pid := range res.Values {
+		if !ids[pid] {
+			t.Errorf("value partId %q missing from structure %s", pid, res.Structure)
+		}
+	}
+	for _, a := range res.Attachments {
+		if !ids[a.PartID] {
+			t.Errorf("attachment partId %q missing from structure %s", a.PartID, res.Structure)
+		}
+	}
+}

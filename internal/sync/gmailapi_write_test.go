@@ -346,3 +346,42 @@ func TestGmailAPIEngineMailboxSet(t *testing.T) {
 		t.Fatal("label still on the server after destroy")
 	}
 }
+
+// TestGmailAPIEngineHydrationBuildsStructure pins the API-mode hydration
+// fix: the header pass carries no MIME structure, so hydration must build
+// bodyStructure from the raw bytes or textBody/htmlBody come back empty.
+func TestGmailAPIEngineHydrationBuildsStructure(t *testing.T) {
+	fx := fixturegmail.Start(t, fixturegmail.Options{})
+	gapiSeedLabels(fx)
+	fx.SeedMessage(fixturegmail.SeedMessage{
+		ID: "m1", ThreadID: "thr1", LabelIDs: []string{fixturegmail.LabelInbox},
+		InternalDate: time.Now().UnixMilli(),
+		Headers: []fixturegmail.Header{
+			{Name: "From", Value: "Alice <alice@example.test>"},
+			{Name: "To", Value: "me@example.test"},
+			{Name: "Subject", Value: "Body test"},
+			{Name: "Date", Value: "Mon, 02 Jan 2026 15:04:05 -0700"},
+			{Name: "Message-ID", Value: "<body1@x>"},
+		},
+		Raw: raw("Body test", "<body1@x>", "the body text"),
+	})
+	env := newGmailAPIEnv(t, fx)
+	ctx := context.Background()
+	waitUntil(t, 5*time.Second, "email ingested", func() bool { return len(env.emails(t)) == 1 })
+	id := env.emails(t)[0].ID
+
+	list, _, notFound, err := env.st.EmailsByID(ctx, "gapi", []string{id}, true)
+	if err != nil || len(notFound) > 0 || len(list) != 1 {
+		t.Fatalf("EmailsByID: list=%d notFound=%v err=%v", len(list), notFound, err)
+	}
+	e := list[0]
+	if len(e.Structure) == 0 || string(e.Structure) == "{}" {
+		t.Fatalf("bodyStructure = %s, want a tree (API-mode hydration must build it)", e.Structure)
+	}
+	if len(e.BodyValues) == 0 {
+		t.Fatal("bodyValues empty after hydration")
+	}
+	if len(e.TextParts) == 0 {
+		t.Fatal("textBody empty after hydration")
+	}
+}

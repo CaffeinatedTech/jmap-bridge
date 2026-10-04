@@ -31,6 +31,12 @@ type BodyResult struct {
 	// Preview is the plain-text preview derived from the body; empty
 	// means "leave the stored preview alone".
 	Preview string
+	// Structure is the JSON EmailBodyPart tree built from the raw bytes,
+	// with partIds matching Values. A backend whose header pass carries no
+	// MIME structure (the Gmail API's metadata format) has none until
+	// hydration, so PutHydrated stores this when the row's structure is
+	// still empty. Empty means "leave the stored structure alone".
+	Structure string
 }
 
 // PutHydrated stores one message's hydration result: attachment files +
@@ -64,6 +70,14 @@ func (s *Store) PutHydrated(ctx context.Context, account, emailID string, res Bo
 		seq, err = nextSeq(ctx, tx)
 		if err != nil {
 			return err
+		}
+		// A header pass with no MIME structure (the Gmail API's metadata
+		// format) leaves body_structure empty; adopt the structure the
+		// hydration parse just built so textBody/htmlBody and attachments
+		// are addressable. A backend that already reported one (IMAP
+		// BODYSTRUCTURE) keeps it.
+		if (structure == "" || structure == "{}") && res.Structure != "" {
+			structure = res.Structure
 		}
 		if len(res.Attachments) > 0 {
 			structure, err = injectBlobIDs(ctx, tx, s.blobs, account, structure, res.Attachments)

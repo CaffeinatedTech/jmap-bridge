@@ -258,6 +258,19 @@ CREATE TABLE gmail_drafts (
   PRIMARY KEY (account, uid)
 );
 `,
+	// v9 (M14 follow-up): re-hydrate bodies left structureless by the
+	// API-mode bug fixed in v0.1.11. A Gmail API header pass has no MIME
+	// structure, and before that fix hydration stored body_values but
+	// never built body_structure, so textBody/htmlBody came back empty.
+	// Clearing hydrated_at makes those messages fetch their bytes once
+	// more with the fixed parser; a genuinely empty body (no values) is
+	// left alone so it cannot become a permanent re-fetch loop.
+	`
+UPDATE email_content SET hydrated_at = NULL
+WHERE hydrated_at IS NOT NULL
+  AND (body_structure = '' OR body_structure = '{}')
+  AND body_values != '' AND body_values != '{}';
+`,
 }
 
 // migrate applies every not-yet-applied migration and refuses a database

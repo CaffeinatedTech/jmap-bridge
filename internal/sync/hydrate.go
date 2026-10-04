@@ -135,6 +135,9 @@ func (e *Engine) hydrateBatch(ctx context.Context, ids []string) error {
 		for uid := range uids {
 			refs = append(refs, mb.NewRef(folder, 0, uid))
 		}
+		if e.cfg.LogHydration {
+			e.log.Info("sync: hydrating", "account", e.cfg.Account, "folder", folder, "messages", len(uids))
+		}
 		opCtx, cancel := context.WithTimeout(context.Background(), hydrationFetchTimeout)
 		var bodies map[mb.Ref][]byte
 		err := e.rd.withBackend(opCtx, func(b mb.Backend) error {
@@ -144,6 +147,10 @@ func (e *Engine) hydrateBatch(ctx context.Context, ids []string) error {
 		})
 		cancel()
 		if err != nil {
+			if e.cfg.LogHydration {
+				e.log.Info("sync: hydration fetch failed",
+					"account", e.cfg.Account, "folder", folder, "messages", len(uids), "err", err)
+			}
 			for _, id := range uids {
 				fails[id] = err
 			}
@@ -244,6 +251,10 @@ func (e *Engine) storeBody(id string, raw []byte) error {
 	}
 	if err := e.st.PutHydrated(context.Background(), e.cfg.Account, id, res); err != nil {
 		return err
+	}
+	if e.cfg.LogHydration {
+		e.log.Info("sync: hydrated", "account", e.cfg.Account, "email", id,
+			"bytes", len(raw), "values", len(res.Values), "attachments", len(res.Attachments))
 	}
 	e.log.Debug("sync: hydrated", "email", id)
 	return nil
