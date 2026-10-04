@@ -128,6 +128,9 @@ func (e *Engine) backfillLocked(ctx context.Context, folder string, status mb.Fo
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if !e.yieldToHydration(ctx) {
+			return ctx.Err()
+		}
 		headers, next, err := e.work.Backfill(ctx, folder, c, e.cfg.BatchSize, mb.Hooks{})
 		if err != nil {
 			return err

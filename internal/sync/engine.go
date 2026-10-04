@@ -107,6 +107,11 @@ type Engine struct {
 	// hydrateFetches counts actual IMAP body fetches; single-flight
 	// (FR-S.8) means concurrent readers must not raise it (tests).
 	hydrateFetches atomic.Int64
+	// hydratePending counts interactive body fetches a client is waiting
+	// on. A background backfill yields while it is non-zero so a cold
+	// sync cannot starve the reads it is competing with (API mode shares
+	// one quota pacer between the work and hydration sessions).
+	hydratePending atomic.Int64
 
 	// ownWrites remembers the (folder → uid → when) pairs of our own
 	// mutations, so the reconcile paths can spare them from tombstoning

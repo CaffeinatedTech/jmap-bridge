@@ -464,3 +464,42 @@ func drain(ch chan struct{}) {
 		}
 	}
 }
+
+// TestYieldToHydrationWaitsForPending pins the hydration-priority fix: a
+// background backfill defers while an interactive body fetch is pending and
+// resumes once it clears.
+func TestYieldToHydrationWaitsForPending(t *testing.T) {
+	e := &Engine{}
+	e.hydratePending.Store(1)
+	done := make(chan bool, 1)
+	go func() { done <- e.yieldToHydration(context.Background()) }()
+	select {
+	case <-done:
+		t.Fatal("yieldToHydration returned while a hydration was pending")
+	case <-time.After(200 * time.Millisecond):
+	}
+	e.hydratePending.Store(0)
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("yieldToHydration = false, want true after hydration cleared")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("yieldToHydration did not resume")
+	}
+}
+
+// TestYieldToHydrationStopsOnCancel pins that a cancelled sync pass is not
+// held up by the yield loop.
+func TestYieldToHydrationStopsOnCancel(t *testing.T) {
+	e := &Engine{}
+	e.hydratePending.Store(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	if e.yieldToHydration(ctx) {
+		t.Fatal("yieldToHydration = true after ctx cancel, want false")
+	}
+}

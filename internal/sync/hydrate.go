@@ -15,6 +15,14 @@ import (
 // data; the read path serves what the cache has.
 var errNotHydrated = errors.New("sync: body unavailable")
 
+// hydrationFetchTimeout bounds one hydration download. It is deliberately
+// not the caller's request context: an interactive read that gives up must
+// not cancel a fetch a later re-read (or another waiter) can still use.
+// Under a cold API backfill a body fetch can wait behind the shared quota
+// pacer; without this the client's timeout would abort the download and
+// nothing would ever cache, so every open would fetch again and fail.
+const hydrationFetchTimeout = 2 * time.Minute
+
 // flight is one in-progress hydration of one email (FR-S.8: concurrent
 // requests for the same body wait on a single IMAP fetch).
 type flight struct {
@@ -38,7 +46,13 @@ func (e *Engine) Ensure(ctx context.Context, account string, previewIDs, bodyIDs
 		}
 	}
 	if len(bodyIDs) > 0 {
-		if err := e.hydrateBatch(ctx, bodyIDs); err != nil && !errors.Is(err, context.Canceled) {
+		// Signal a live read: the sync pass yields its backfill while this
+		// is non-zero so body fetches are not starved behind it (API mode
+		// shares one quota pacer between the work and hydration sessions).
+		e.hydratePending.Add(1)
+		err := e.hydrateBatch(ctx, bodyIDs)
+		e.hydratePending.Add(-1)
+		if err != nil && !errors.Is(err, context.Canceled) {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -121,12 +135,14 @@ func (e *Engine) hydrateBatch(ctx context.Context, ids []string) error {
 		for uid := range uids {
 			refs = append(refs, mb.NewRef(folder, 0, uid))
 		}
+		opCtx, cancel := context.WithTimeout(context.Background(), hydrationFetchTimeout)
 		var bodies map[mb.Ref][]byte
-		err := e.rd.withBackend(ctx, func(b mb.Backend) error {
+		err := e.rd.withBackend(opCtx, func(b mb.Backend) error {
 			var ferr error
-			bodies, ferr = b.FetchRawBatch(ctx, folder, refs)
+			bodies, ferr = b.FetchRawBatch(opCtx, folder, refs)
 			return ferr
 		})
+		cancel()
 		if err != nil {
 			for _, id := range uids {
 				fails[id] = err
@@ -146,6 +162,30 @@ func (e *Engine) hydrateBatch(ctx context.Context, ids []string) error {
 		}
 	}
 	return firstErrOf(fails)
+}
+
+// hydrationYieldCap bounds how long a background backfill defers to a
+// pending interactive fetch, so a stuck hydration cannot stall sync.
+const hydrationYieldCap = 15 * time.Second
+
+// yieldToHydration pauses a background backfill batch while an interactive
+// body fetch is pending (FR-S.8's read responsiveness). API mode shares one
+// quota pacer between the work and hydration sessions, so without this a
+// cold backfill can keep the pacer busy and starve the body a client is
+// waiting on. It returns false only when ctx has ended.
+func (e *Engine) yieldToHydration(ctx context.Context) bool {
+	if e.hydratePending.Load() == 0 {
+		return ctx.Err() == nil
+	}
+	deadline := time.Now().Add(hydrationYieldCap)
+	for e.hydratePending.Load() > 0 && time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return ctx.Err() == nil
 }
 
 // waitFlights blocks until each flight settles (or the caller's context
@@ -280,7 +320,7 @@ func (e *Engine) fetchRawBody(id string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %s has no backend location", errNotHydrated, id)
 	}
 	e.hydrateFetches.Add(1)
-	opCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	opCtx, cancel := context.WithTimeout(context.Background(), hydrationFetchTimeout)
 	defer cancel()
 	var raw []byte
 	err = e.rd.withBackend(opCtx, func(b mb.Backend) error {
