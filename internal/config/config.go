@@ -128,6 +128,10 @@ type GmailAPI struct {
 	PubSubTopic string `toml:"pubsub_topic"`
 	// PubSubAudience is the OIDC audience verified on push (M13).
 	PubSubAudience string `toml:"pubsub_audience"`
+	// PubSubServiceAccount is the `email` claim the verified push OIDC
+	// token must carry — the service account the Pub/Sub push
+	// subscription authenticates with (M13, FR-S.14).
+	PubSubServiceAccount string `toml:"pubsub_service_account"`
 	// PushAllowPlain accepts a shared-secret push for loopback rigs
 	// instead of OIDC verification (M13).
 	PushAllowPlain bool `toml:"push_allow_plain"`

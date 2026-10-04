@@ -168,7 +168,8 @@ func run(args []string) error {
 	go purgeLoop(ctx, st, log)
 
 	api := httpapi.New(cfg, tokens, st, backends, hub, log, managers,
-		kick(engines, log), contactsReady(engines), httpapi.WithMetrics(reg))
+		kick(engines, log), contactsReady(engines),
+		httpapi.WithMetrics(reg), httpapi.WithGmailPush(pushVerifiers(cfg)))
 	// The SSE gauge needs the server, so it is registered after the
 	// handler exists: the total is one series, each account another
 	// (FR-D.6).
@@ -263,6 +264,7 @@ func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager, gclie
 			return gmailapi.NewBackend(gmailapi.Config{
 				Account: a.ID, Client: gclient, Native: ni, Logger: log,
 				BackfillQuery: ga.BackfillQuery, BackfillLimit: ga.BackfillLimit,
+				WatchMode: ga.Watch, PubSubTopic: ga.PubSubTopic,
 			})
 		}
 	} else {
@@ -310,6 +312,29 @@ func syncConfig(cfg *config.Config, a *config.Account, mgr *oauth.Manager, gclie
 		if a.SMTP.Auth == "oauth2" && mgr != nil {
 			out.SMTP.Token = mgr.AccessToken
 		}
+	}
+	return out
+}
+
+// pushVerifiers builds the FR-S.14 push authenticators for every gmail_api
+// account in pubsub mode: OIDC (audience + service account) normally, or the
+// account's client token as a shared secret when push_allow_plain is set for a
+// loopback/fixture rig. Accounts absent from the map have no push endpoint.
+func pushVerifiers(cfg *config.Config) map[string]httpapi.PushVerifier {
+	out := map[string]httpapi.PushVerifier{}
+	for i := range cfg.Accounts {
+		a := &cfg.Accounts[i]
+		if a.Backend != "gmail_api" || a.GmailAPI == nil || a.GmailAPI.Watch != "pubsub" {
+			continue
+		}
+		pc := gmailapi.PushConfig{
+			Audience:       a.GmailAPI.PubSubAudience,
+			ServiceAccount: a.GmailAPI.PubSubServiceAccount,
+		}
+		if a.GmailAPI.PushAllowPlain {
+			pc.PlainSecret = a.Token
+		}
+		out[a.ID] = gmailapi.NewPushVerifier(pc)
 	}
 	return out
 }

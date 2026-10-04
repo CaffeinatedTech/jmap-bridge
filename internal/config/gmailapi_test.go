@@ -121,3 +121,36 @@ func TestGmailAPIPubSubRequiresTopic(t *testing.T) {
 `
 	wantErrKey(t, toml, "accounts[0].gmail_api.pubsub_topic")
 }
+
+func TestGmailAPIPubSubRequiresAudienceAndServiceAccount(t *testing.T) {
+	base := gapiBase + `  watch = "pubsub"
+  pubsub_topic = "projects/p/topics/t"
+`
+	wantErrKey(t, base, "accounts[0].gmail_api.pubsub_audience")
+	wantErrKey(t, base+`  pubsub_audience = "https://bridge.example"
+`, "accounts[0].gmail_api.pubsub_service_account")
+}
+
+func TestGmailAPIPubSubValidWithOIDC(t *testing.T) {
+	toml := gapiBase + `  watch = "pubsub"
+  pubsub_topic = "projects/p/topics/t"
+  pubsub_audience = "https://bridge.example"
+  pubsub_service_account = "push@project.iam.gserviceaccount.com"
+`
+	cfg := mustLoad(t, toml)
+	g := cfg.Accounts[0].GmailAPI
+	if g.Watch != "pubsub" || g.PubSubTopic == "" || g.PubSubServiceAccount == "" {
+		t.Fatalf("pubsub config not retained: %+v", g)
+	}
+}
+
+func TestGmailAPIPubSubPlainSkipsOIDC(t *testing.T) {
+	toml := gapiBase + `  watch = "pubsub"
+  pubsub_topic = "projects/p/topics/t"
+  push_allow_plain = true
+`
+	cfg := mustLoad(t, toml)
+	if !cfg.Accounts[0].GmailAPI.PushAllowPlain {
+		t.Fatal("push_allow_plain not retained")
+	}
+}

@@ -332,7 +332,11 @@ only, never bodies. `BODYSTRUCTURE` gives `hasAttachment` and the preview target
 
 **Live**: `IDLE` on INBOX + watched folders; on notification run the tier's
 incremental pass for that folder. Fallback: `sync.interval` poll. IDLE
-disconnections back off exponentially.
+disconnections back off exponentially. The Gmail API backend has no IDLE:
+with `watch = "pubsub"` it arms `users.watch`, renews before the advertised
+expiration and calls `users.stop` on shutdown, and the `/gmail/push/{account}`
+handler wakes a history pass on a verified Pub/Sub push (FR-S.14); with
+`watch = "poll"` the `sync.interval` ticker is the path.
 
 **Preview**: if `PREVIEW` (RFC 8970) is advertised use it; otherwise a partial
 `BODY[]<0.4096>` per message on first summary request, cached in `emails.preview`.
@@ -591,7 +595,7 @@ milestones but deliberately carries no completion state). Rules:
 | **M10** | `backend`/`[accounts.gmail_api]` config + validation; API discovery, metadata backfill, history incremental, hydration, `/changes` | jmap-tui browses a fixture Gmail account in API mode; live read-only Gmail gate | FR-A.13, FR-S.13, FR-M.1–.8 (new; with code) | ✅ done 2026-10-03 (config `backend = "imap"\|"gmail_api"` with per-mode mutual-exclusion validation, Google-only OAuth2, and a loopback `endpoint`+`token` fixture escape; `internal/gmailapi.Backend` implements the read half of `mailbackend` — labels→mailboxes incl. synthetic implicit All Mail, per-container batched `messages.get(format=metadata)` backfill, per-account `history.list` incremental with `404` full-resync, `messages.get(format=raw)` hydration, snippet previews, `g:` thread keys — reusing the unmodified store/engine via a synthetic-UID `native_ids` mapping (schema v7); `cmd/jmap-bridge` picks the backend per account. **Fixture gate:** `dev/gate/gmailapi-fixture-start.sh` (standalone `test/fixturegmail` + API-mode bridge) — jmap-tui `TestLiveSessionAndMailboxes` green (1 account, 7 mailboxes, 6 roles). **Live read-only gate:** `dev/gate/gmailapi-live-gate.py` against the user's Gmail (consent re-run 2026-10-03 after the M4 token was revoked) — session over API mode, inbox/sent/archive roles, a created test label+message returned by `Email/query`+`Email/get`, an out-of-band Gmail-API `STARRED` change observed through history incremental, test message+label deleted after. Fixture coverage: `internal/gmailapi/adapter_test.go` and `internal/sync/gmailapi_test.go` (`TestGmailAPIEngineBackfillAndForeignFlag`); all local gates green) |
 | **M11** | API writes: `Email/set`, `destroy`, drafts, `Mailbox/set` (refusing `onDestroyRemoveEmails=true`) | live write gate on the user's Gmail account, aborting on first `429` | FR-M.9–.13, FR-M.20 (new; with code) | ✅ done 2026-10-03 (the write half of `internal/gmailapi.Backend` implemented: `StoreKeywords` folds to one `messages.modify` and refuses Gmail's non-writable keywords with `mailbackend.UnsupportedKeywordsError` (surfaced as `invalidArguments` naming each, D-API-5/FR-M.8); `SetMembership` maps mailbox adds/removes to label modify, treats synthetic All Mail adds as implicit no-ops and refuses its removal; `Destroy` is permanent `messages.delete` with `404` as a no-op success; `Append` creates a Gmail draft via `drafts.create` (drafts-only in v0.1 — arbitrary `Email/import` has no API equivalent yet) and persists the draft handle; `Mailbox/set` maps to `labels.create`/`patch`/`delete`. `onDestroyRemoveEmails=true` is refused on a label backend via `jmapapi.ErrOnDestroyRemoveEmails` → `invalidProperties` naming it (§16.4). Schema v8 re-keys `gmail_drafts` by the stable synthetic uid (the handle the adapter and engine both hold at Append/commit) and `CommitAppend` fills `native_ids.jmap_id`. Fixed a real M9 mapping bug caught by the write tests: `MapKeywords` mapped `$seen` in the wrong direction (it now inverts against Gmail's `UNREAD`, per §8). Fixture: `test/fixturegmail` gained write helpers and a fix for a label-delete that left a stale id in `labelOrder` (panicked the next `labels.list`). Tests: `internal/gmailapi/write_test.go` (keyword/membership/destroy/draft/mailbox ops incl. refusals) and `internal/sync/gmailapi_write_test.go` (engine write path, unsupported-keyword refusal, draft create, `Mailbox/set` + `onDestroyRemoveEmails` refusal). All local gates green: `go build`, `go vet`, `gofumpt`, `golangci-lint` 0 issues, `go test ./... -race`, version smoke. **Live write gate demonstrated 2026-10-03** (`dev/gate/gmailapi-write-gate.py`, run against the user's Gmail account exactly as the M10 read gate was; it aborts on the first `429`): star, read, archive, move, `Mailbox/set` create/rename/delete, `onDestroyRemoveEmails=true` refused (`invalidProperties`), draft create, and permanent destroy — every claim re-read independently through the Gmail API; cleanup removed exactly the gate's `jmap-bridge-test*` objects and its own draft. Also caught and fixed two gate-harness bugs during the run (a stale-cache subject collision and an over-broad draft cleanup). `✅ done`.) |
 | **M12** | API submission §8.1 via Gmail API (`drafts.send`/`messages.send`, no second Sent APPEND, ambiguous-send reconciliation) | compose → send → exactly one Sent copy + sink delivery; ambiguous-send reconciliation proven | FR-M.14–.17 | ✅ done 2026-10-04 (live self-send gate green — `dev/gate/gmailapi-send-gate.py` against the user's Gmail account: session served with `urn:ietf:params:jmap:submission`, `Identity/get`, a batched `Email/set` draft create + `EmailSubmission/set` (caller's `onSuccessUpdateEmail` moving Drafts→Sent) → `undoStatus: final`, implicit `Email/set` updated the draft; re-read **independently** through the Gmail API: **exactly one `SENT` copy**, an `INBOX` delivery copy (self-send sink), and **no `DRAFT`** (drafts.send consumed it); the bridge cache held one Sent copy with `$draft` cleared (read-your-writes); only the gate's messages cleaned up. The gate caught and fixed a real bug: `ApplyEmailPatch` issued keyword deltas the message did not carry and Gmail rejects removing an absent label (`"Invalid label: DRAFT"` after `drafts.send`), so the engine now computes **effective** keyword deltas before any provider call (regression `TestGmailAPIRedundantKeywordDeltaIsNotSent`). Fixture coverage: `internal/sync/gmailapi_submit_test.go` (patch and patch-less filing, `TierAmbiguousSend` reconciliation), `internal/gmailapi/send_test.go` (`drafts.send`/`messages.send`, `\Seen` mapping, ambiguity classification), `internal/httpapi` (submission+identity for a `gmail_api` account with no SMTP block). All local gates green: `go build`, `go vet`, `gofumpt`, `golangci-lint` 0 issues, `go test ./... -race`, version smoke) |
-| **M13** | Pub/Sub push: `users.watch` + renewal + stop, `/gmail/push/{account}`, `idtoken` verification, `watch="poll"` fallback | live foreign change ≤ 2 s through push; watch-renewal expiry simulation; forged push rejected; poll fallback works | FR-S.14, NFR-2 (new; with code) | pending |
+| **M13** | Pub/Sub push: `users.watch` + renewal + stop, `/gmail/push/{account}`, `idtoken` verification, `watch="poll"` fallback | **fixture** foreign change ≤ 2 s through push; watch-renewal expiry simulation; forged push rejected; poll fallback works | FR-S.14, NFR-2 (new; with code) | ✅ done 2026-10-04 (fixture end-to-end gate `dev/gate/gmailapi-push-gate.sh` → `test/pushgate`, which wires the real sync engine + `POST /gmail/push/{account}` to `test/fixturegmail`: a verified push made a foreign change visible in **~23 ms** (≤ 2 s budget), the watch **re-armed before a shortened expiration**, a **forged push was rejected `401`** without nudging the engine, an account with no verifier `404`d, and `watch="poll"` never armed a watch yet still converged. The live Pub/Sub path is operator-run per PLAN §17 and deliberately outside the sign-off gate. Config gained `pubsub_service_account`; push auth supports OIDC (`idtoken.Validate` + email claim) or the `push_allow_plain` shared secret = client token. All local gates green: `go build`, `go vet`, `gofumpt`, `golangci-lint` 0 issues, `go test ./... -race`, version smoke) |
 | **M14** | API mode docs + re-run M7 packaging/conformance with API mode included | README install works end to end; `JMAP-TestSuite` subset green incl. API mode; all gates green | FR-D.14, NFR-3–.7 (new; with code) | pending |
 
 **M8–M14 are the v0.1 Gmail API track** (D-API-8, `GMAIL_API_PLAN.md`). At the
@@ -656,6 +660,7 @@ absent until it does, because bodies stay lazy.
 | SQLite hot rows (large mailbox counts) | slow list queries | narrow `emails` table + `email_mailbox` covering index (schema §4); count fields maintained incrementally. M5 soak (100k corpus, dev Dovecot) measured warm `Email/query` p95 well inside NFR-1's 150 ms |
 | Search-driven backfill can become a re-fetch storm: every text query re-enqueues the unhydrated candidates it found, and a just-finished body can be re-enqueued before the next scan sees it | wasted provider fetches | the backfill lane drops ids on overflow (the next query re-enqueues survivors) and `doHydrate` short-circuits ids the store already shows hydrated — hydration progress lives in SQLite, which also makes backfill resumable across restarts (FR-X.6) |
 | Cross-folder Message-ID dedupe vs differing IMAP flags: two copies of one self-sent message (`\Seen` in Sent, unflagged in INBOX) cannot share one JMAP object — keywords would flap by whichever folder syncs last, and unread counts with them | unread counts unstable; clients see a delivered self-sent copy born read | dedupe is lossless only: cross-folder, only while the copies have no live membership in the target folder, and only when their flag sets agree (ignoring `\Recent`) — otherwise the copy is its own message (FR-S.3, decided 2026-09-29 after the M2 push gate surfaced the race) |
+| Gmail Pub/Sub push verification is security-critical: `POST /gmail/push/{account}` is on the public origin and cannot carry the client token | a forged or oversized push could trigger needless sync or a DoS | the endpoint **fails closed**: it verifies the Pub/Sub OIDC token with `idtoken.Validate(pubsub_audience)` and the `pubsub_service_account` email claim, or (only with `push_allow_plain` set for loopback/fixture rigs) the account's client token as a shared secret; the body is capped at 1 MiB. Even a verified push is only a hint — the engine reads `history.list` from its own saved cursor, so a duplicate, replayed or forged-but-verified hint cannot inject state (golden rule 1). Push exists only when `watch = "pubsub"`. **Landed with M13** (`internal/gmailapi.PushVerifier` seam, `internal/httpapi` handler, unit + fixture tests) |
 | SMTP submission is inline: a send that is accepted can no longer be rolled back, and a failure *after* acceptance (filing the Sent copy, applying a patch) cannot be reported without inviting a duplicate send | a sent message with a stale local view | id minted before the send; post-acceptance failures are logged only, and the `onSuccess*` effects run after acceptance in the implicit `Email/set` (§7.2) where a patch failure is visible as `notUpdated` |
 | Scope creep toward calendars/sharing | v0.1 slips | REQUIREMENTS out-of-scope list; roadmap (§15) is where those requests land |
 | Client-token brute force: the token is the only client credential and, before hardening, a wrong token cost one cheap 401 at full request rate | mailbox compromise | tokens require ≥24 characters of entropy (startup error) and failed authentication is throttled then locked out per source+account (`[rate]`, FR-A.3/NFR-5). Landed 2026-10-02: `internal/ratelimit` + `authorize` lockout, unit-tested; the app-side lockout is the real mitigation (the edge cannot tell a wrong token from a valid one), with the edge OAuth `RateLimit` verified live |
@@ -736,3 +741,100 @@ NFR-8 numbers binding rather than "pin at M5".
 
 No open questions remain for v0.1. M5 measures NFR-1/NFR-8 against the binding
 numbers; any revision is a REQUIREMENTS edit at sign-off.
+
+---
+
+## 17. Testing Gmail API push in production
+
+The M13 sign-off gate is fixture-only (`dev/gate/gmailapi-push-gate.sh` →
+`test/pushgate`), because a real Pub/Sub push needs Google Cloud setup and a
+publicly reachable HTTPS bridge. This section is the operator runbook for
+exercising the real path against a production bridge; it is a manual
+acceptance check, not part of the automated gate.
+
+### Prerequisites
+
+- A production bridge running M13+ behind TLS, with `base_url` on its public
+  origin (e.g. `https://jmap.example.com`) and a `gmail_api` account already
+  consented (`GET /oauth/{account}/start`).
+- The Gmail API enabled on the OAuth client's Cloud project.
+- `gcloud` (or Console access) in that project.
+
+### 1. Create the Pub/Sub topic and grant Gmail publish
+
+```sh
+gcloud pubsub topics create jmap-bridge-push
+gcloud pubsub topics add-iam-policy-binding jmap-bridge-push \
+  --member="serviceAccount:gmail-api-push@system.gserviceaccount.com" \
+  --role="roles/pubsub.publisher"
+```
+
+### 2. Create the OIDC push subscription
+
+Use a dedicated service account as the push identity; the bridge checks its
+email against `pubsub_service_account`.
+
+```sh
+gcloud iam service-accounts create jmap-push \
+  --display-name="jmap-bridge Pub/Sub push"
+gcloud pubsub subscriptions create jmap-bridge-push-sub \
+  --topic=jmap-bridge-push \
+  --push-endpoint="https://jmap.example.com/gmail/push/<account>" \
+  --push-auth-service-account="jmap-push@<project>.iam.gserviceaccount.com" \
+  --push-auth-token-audience="https://jmap.example.com"
+```
+
+### 3. Configure the bridge
+
+```toml
+[[accounts]]
+id = "gmail"
+backend = "gmail_api"
+# …
+
+  [accounts.gmail_api]
+  watch                   = "pubsub"
+  pubsub_topic            = "projects/<project>/topics/jmap-bridge-push"
+  pubsub_audience         = "https://jmap.example.com"   # must equal the subscription audience
+  pubsub_service_account  = "jmap-push@<project>.iam.gserviceaccount.com"
+```
+
+`pubsub_audience` and `pubsub_service_account` are both required in `pubsub`
+mode unless `push_allow_plain = true` (loopback/fixture only, where the shared
+secret is the account's client token). Restart the bridge; the startup logs
+should show the engine arming the watch (`gmailapi: watch renewed` on the daily
+renewal). If `watch` defaults to `poll` because the topic was missing, no watch
+is armed and latency is `sync.interval`.
+
+### 4. Observe a foreign change end to end
+
+1. Record the account's `Email` state: `Email/get` → `state` (or subscribe to
+   `GET /{account}/eventsource/`).
+2. From the Gmail web UI or another client, star/unstar a message (or send a
+   message into INBOX).
+3. Within ~2 s (`Email/changes` since the recorded state, or an SSE
+   `StateChange`) the change must appear. The bridge logs the push at debug
+   level and the resulting history pass.
+
+If it does not, check in order: the subscription's push endpoint URL and
+audience match the config; the bridge is reachable from Pub/Sub (Pub/Sub push
+requires public HTTPS); `GET /readyz` is `ready`; the account is not in
+auth-failure. A `401` in the subscription's dead-letter/ack metrics means the
+OIDC email or audience does not match `pubsub_service_account` /
+`pubsub_audience`.
+
+### 5. Negative and fallback checks
+
+- **Forged push:** `curl -X POST https://jmap.example.com/gmail/push/gmail -d '{}'`
+  with no/invalid bearer must answer `401`, and no sync pass may run.
+  `gcloud pubsub subscriptions describe` shows undelivered/retry counts if a
+  real credential is broken.
+- **Renewal:** the watch is re-armed before its 7-day expiration (at most
+  daily). It is observable in the debug logs; `users.watch` also returns a
+  fresh `expiration` on each renewal.
+- **Poll fallback:** set `watch = "poll"` (no Pub/Sub needed) and confirm a
+  foreign change appears within `sync.interval`; this is the documented
+  degraded mode and needs no GCP setup.
+- **Shutdown:** on SIGTERM the bridge calls `users.stop`; a subsequent
+  `gcloud pubsub topics list`/subscription check shows no new deliveries until
+  the next start re-arms the watch.

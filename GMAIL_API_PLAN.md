@@ -77,8 +77,9 @@ backend = "gmail_api"         # NEW; "imap" (default) | "gmail_api"
   #                                          else "poll"
   # pubsub_topic     = "projects/P/topics/T"
   # pubsub_audience  = "https://bridge.example.com"   # OIDC audience to verify
+  # pubsub_service_account = "push@P.iam.gserviceaccount.com"  # OIDC email to verify
   # quota_units_per_second = 100       # pacer; verified 2026-10-03 (6000/min per user)
-  # push_allow_plain = false            # refuse non-OIDC push unless true
+  # push_allow_plain = false            # loopback shared secret = client token
 
   # [accounts.carddav] optional and unchanged; consumes the same OAuth2 token
 ```
@@ -101,8 +102,9 @@ as it is for IMAP accounts.
     rejected: the Gmail API client is Google-shaped.
   - `[accounts.smtp]` forbidden (D-API-6) — submission is via the API.
   - `address` required (Identity/get and the send `From`).
-  - `watch = "pubsub"` requires `pubsub_topic` and (unless
-    `push_allow_plain = true`) `pubsub_audience`, and an `https` `base_url`
+  - `watch = "pubsub"` requires `pubsub_topic`, and — unless
+    `push_allow_plain = true` — `pubsub_audience` and
+    `pubsub_service_account`, plus an `https` `base_url`
     (FR-D.3 already refuses cleartext non-loopback for OAuth2 accounts).
   - `quota_units_per_second` must be `> 0` when set; `0` selects the default.
 - Secrets in the block (client secret, and any future push secret) resolve
@@ -415,14 +417,14 @@ Rules:
   cannot carry the client token. Verify the Pub/Sub OIDC token in the
   `Authorization: Bearer` header with `idtoken.Validate(ctx, bearer,
   pubsub_audience)` from `google.golang.org/api/idtoken` (D-API-7), then check
-  the `email` claim equals the configured push service account. The verifier is
+  the `email` claim equals `pubsub_service_account`. The verifier is
   hidden behind a small `PushVerifier` seam so tests substitute a fake and one
   real-token integration test is skipped unless env creds are set. A
-  `push_allow_plain = true` escape hatch accepts a high-entropy path secret for
-  self-hosted rigs and the fixture tests; it fails closed otherwise. The OAuth
-  consent/`/`, `/privacy` pages and the `rate` middleware keep working; the push
-  route is added to the dispatch in `ServeHTTP` alongside the `/oauth/…`
-  special-case, and is *not* behind client auth.
+  `push_allow_plain = true` escape hatch accepts the account's client token as
+  a shared secret (header `X-Push-Token` or `?token=`) for self-hosted rigs and
+  the fixture tests; it fails closed otherwise. The OAuth consent/`/`, `/privacy`
+  pages and the `rate` middleware keep working; the push route is registered on
+  the mux and is *not* behind client auth.
 - `watch = "poll"`: no Pub/Sub; the engine polls `history.list` on
   `sync.interval` (or a configured shorter interval). FR-S.7's ≤2 s guarantee is
   explicitly a push-mode guarantee; poll mode is `sync.interval` as IMAP's
@@ -612,6 +614,18 @@ origin.
   Gmail as a label removal the message did not carry (`Invalid label: DRAFT`
   after `drafts.send`), fixed by computing effective deltas in
   `ApplyEmailPatch`.
+- **Push tests (M13)**: `internal/gmailapi/push_test.go` drives the
+  `PushVerifier` seam for every OIDC failure (missing/forged/wrong-audience/
+  wrong-email/unverified) and the plain shared-secret path;
+  `internal/gmailapi/watch_test.go` proves `users.watch` arming, renewal before
+  a shortened expiration, `users.stop` on shutdown, poll mode never arming, and
+  `renewDelay`; `internal/httpapi/gmailpush_test.go` covers accept/reject,
+  envelope + bare bodies, unknown account and bad body. The end-to-end fixture
+  gate is `test/pushgate` (`dev/gate/gmailapi-push-gate.sh`): real engine + HTTP
+  handler + `test/fixturegmail`, asserting ≤2 s visibility, forged rejection,
+  renewal and poll fallback. **Gate green 2026-10-04** (push → visible ~23 ms).
+  A real-token live Pub/Sub check is operator-run per PLAN §17, not part of the
+  sign-off gate.
 
 ---
 
@@ -630,7 +644,7 @@ pure refactor; M9–M14 mirror the M1–M4 gating style.
 | **M10** | Config `backend`/`[accounts.gmail_api]` + validation; discovery, initial backfill, incremental history, hydration, `/changes` — **landed 2026-10-03 (PLAN §12 gate ✅ done)** | jmap-tui browses a fixture Gmail account in API mode (`dev/gate/gmailapi-fixture-start.sh`); **live read-only** gate (`dev/gate/gmailapi-live-gate.py`, user's real account, backfill scoped to a test label) — folders/labels/counts/threads correct; an out-of-band Gmail-API flag change appears through `history.list` | FR-A.13, FR-S.13 (new), FR-M.1–.8 |
 | **M11** | Write path §8; drafts; `Mailbox/set` (incl. refusing `onDestroyRemoveEmails=true`, §16.4) — **✅ done 2026-10-03 (PLAN §12)** | fixture-backed adapter + engine write tests green (`internal/gmailapi/write_test.go`, `internal/sync/gmailapi_write_test.go`); **live write gate green 2026-10-03** (`dev/gate/gmailapi-write-gate.py`, user's Gmail account, abort on first `429`): star, read, archive, move, `Mailbox/set` create/rename/delete, `onDestroyRemoveEmails=true` refused, draft create, destroy; every claim re-read from the Gmail API independently | FR-M.9–.13, FR-M.20 |
 | **M12** | Submission §8.1 — **✅ done 2026-10-04 (PLAN §12)** | compose → send → exactly one Sent copy + delivery to a test sink; ambiguous-send reconciliation proven (simulated timeout) — **live self-send gate green 2026-10-04** (`dev/gate/gmailapi-send-gate.py`, user's Gmail account: one SENT copy + INBOX delivery independently re-read through the Gmail API, no draft, bridge read-your-writes; caught and fixed the effective-keyword-delta bug). Fixture gate: `internal/sync/gmailapi_submit_test.go`, `internal/gmailapi/send_test.go` (compose+send, patch and patch-less filing, `TierAmbiguousSend` reconciliation) | FR-M.14–.17 |
-| **M13** | Pub/Sub push: `users.watch` + renewal + stop, `/gmail/push/{account}`, `idtoken` verification, `watch="poll"` fallback | live foreign change visible ≤2 s through push; watch renewal survives an expiry-simulation; forged push rejected; poll fallback works with no Pub/Sub | FR-S.14 (new), NFR-2 |
+| **M13** | Pub/Sub push: `users.watch` + renewal + stop, `/gmail/push/{account}`, `idtoken` verification, `watch="poll"` fallback — **✅ done 2026-10-04 (PLAN §12)** | **fixture** foreign change ≤2 s through push (measured ~23 ms); watch renewal survives an expiry-simulation; forged push rejected; poll fallback works with no Pub/Sub. The live Pub/Sub path is operator-run per PLAN §17 | FR-S.14 (new), NFR-2 |
 | **M14** | Docs (README API mode + Pub/Sub setup), config-migration note, and a **re-run of M7's packaging/conformance with API mode included** | documented install works end to end from README on a clean host; `JMAP-TestSuite` subset green incl. API mode; all gates green | FR-D.14 (new), NFR-3–.7 |
 
 **Deferred (roadmap):** Microsoft Graph backend; draft body editing; Gmail

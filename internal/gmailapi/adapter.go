@@ -63,6 +63,13 @@ type Config struct {
 	// start for large mailboxes (GMAIL_API_PLAN §14).
 	BackfillQuery string
 	BackfillLimit int
+	// WatchMode is "pubsub" (users.watch + Pub/Sub push, FR-S.14) or
+	// "poll" (the engine's ticker, the default). It drives
+	// Capabilities.Push and whether Watch registers a watch.
+	WatchMode string
+	// PubSubTopic is the Cloud Pub/Sub topic users.watch registers;
+	// required when WatchMode is "pubsub".
+	PubSubTopic string
 }
 
 // labelInfo is one Gmail label mapped into the mailbox vocabulary.
@@ -118,7 +125,8 @@ func NewBackend(cfg Config) *Backend {
 func (b *Backend) Kind() mb.Kind { return mb.KindGmailAPI }
 
 // Capabilities reports the honest API-mode profile (D-API-5): snippets,
-// labels, an implicit archive, no push yet (M13) and no custom keywords.
+// labels, an implicit archive, custom keywords refused, and Push only when a
+// Pub/Sub watch is configured (M13, FR-S.14).
 func (b *Backend) Capabilities() mb.Capabilities {
 	return mb.Capabilities{
 		Preview:         true,
@@ -126,7 +134,7 @@ func (b *Backend) Capabilities() mb.Capabilities {
 		Move:            false,
 		UIDPlus:         false,
 		CustomKeywords:  false,
-		Push:            false,
+		Push:            b.cfg.WatchMode == "pubsub",
 		ImplicitArchive: true,
 	}
 }
@@ -661,8 +669,89 @@ func (b *Backend) FetchHeaders(ctx context.Context, container string, refs []mb.
 	return out, nil
 }
 
-// Watch reports no push: M10 uses the engine's poll ticker (push is M13).
-func (b *Backend) Watch(context.Context, string) (<-chan struct{}, error) { return nil, nil }
+// Watch arms the Pub/Sub watch and returns a channel that closes when the
+// watch session ends (M13, FR-S.14). Notifications arrive through the HTTP
+// push endpoint, not this channel: the channel is only a lifetime handle, so
+// the engine's idle loop parks on it while the push handler wakes passes. In
+// poll mode it returns nil (nil, nil), and the engine's ticker is the path.
+func (b *Backend) Watch(ctx context.Context, _ string) (<-chan struct{}, error) {
+	if b.cfg.WatchMode != "pubsub" {
+		return nil, nil
+	}
+	resp, err := b.cfg.Client.watch(ctx, b.cfg.PubSubTopic)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	notes := make(chan struct{})
+	go b.renewWatch(ctx, notes, watchExpiration(resp))
+	return notes, nil
+}
+
+// watchRenewFallback caps the renewal delay at a day: Google's watch window is
+// ~7 days, so renewing at 90% of it would be ~6 days, and a daily re-arm gives
+// a multi-day buffer against transient failures (GMAIL_API_PLAN §6.4).
+const watchRenewFallback = 24 * time.Hour
+
+// renewWatch re-arms the watch before each expiration until ctx ends, then
+// stops it. A renewal failure retries on a coarse timer rather than dropping
+// the watch, since the previous window may still be live.
+func (b *Backend) renewWatch(ctx context.Context, notes chan<- struct{}, expiration time.Time) {
+	defer close(notes)
+	timer := time.NewTimer(renewDelay(expiration, b.cfg.Client.now()))
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := b.cfg.Client.stop(stopCtx); err != nil {
+				b.log.Warn("gmailapi: users.stop failed", "err", err)
+			}
+			return
+		case <-timer.C:
+			resp, err := b.cfg.Client.watch(ctx, b.cfg.PubSubTopic)
+			if err != nil {
+				if ctx.Err() != nil {
+					continue
+				}
+				b.log.Warn("gmailapi: watch renewal failed", "err", err)
+				timer.Reset(time.Hour)
+				continue
+			}
+			exp := watchExpiration(resp)
+			b.log.Debug("gmailapi: watch renewed", "expiration", exp)
+			timer.Reset(renewDelay(exp, b.cfg.Client.now()))
+		}
+	}
+}
+
+// watchExpiration converts a watch response's epoch-millis expiration, zero
+// when the response carried none.
+func watchExpiration(resp *gmail.WatchResponse) time.Time {
+	if resp == nil || resp.Expiration == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(resp.Expiration)
+}
+
+// renewDelay is how long to wait before re-arming: 90% of the advertised
+// window, capped at a day. An absent expiration falls back to daily; an
+// already-expired one retries soon. A short fixture window makes the renewal
+// observable in the M13 gate.
+func renewDelay(expiration, now time.Time) time.Duration {
+	if expiration.IsZero() {
+		return watchRenewFallback
+	}
+	window := expiration.Sub(now)
+	if window <= 0 {
+		return time.Minute
+	}
+	d := window * 9 / 10
+	if d > watchRenewFallback || d <= 0 {
+		d = watchRenewFallback
+	}
+	return d
+}
 
 // FetchPreviews returns snippet text per ref.
 func (b *Backend) FetchPreviews(ctx context.Context, refs []mb.Ref) (map[mb.Ref]string, error) {

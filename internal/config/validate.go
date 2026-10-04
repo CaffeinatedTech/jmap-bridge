@@ -402,9 +402,15 @@ func validateGmailAPI(i int, a *Account) error {
 		if a.GmailAPI.PubSubTopic == "" {
 			return errKey(acct+".gmail_api.pubsub_topic", `required when watch = "pubsub"`)
 		}
-		if !a.GmailAPI.PushAllowPlain && a.GmailAPI.PubSubAudience == "" {
-			return errKey(acct+".gmail_api.pubsub_audience",
-				`required when watch = "pubsub" unless push_allow_plain = true`)
+		if !a.GmailAPI.PushAllowPlain {
+			if a.GmailAPI.PubSubAudience == "" {
+				return errKey(acct+".gmail_api.pubsub_audience",
+					`required when watch = "pubsub" unless push_allow_plain = true`)
+			}
+			if a.GmailAPI.PubSubServiceAccount == "" {
+				return errKey(acct+".gmail_api.pubsub_service_account",
+					`required when watch = "pubsub" unless push_allow_plain = true (the Pub/Sub push subscription's OIDC service account)`)
+			}
 		}
 	default:
 		return errKey(acct+".gmail_api.watch", `must be "pubsub" or "poll"`)

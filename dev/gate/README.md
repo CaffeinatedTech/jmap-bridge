@@ -135,3 +135,32 @@ bug: the implicit patch tried to remove Gmail's `DRAFT` label after
 `drafts.send` had consumed the draft (`Invalid label: DRAFT`); the engine now
 computes effective keyword deltas before any provider call.
 
+
+# Gmail API push (M13)
+
+Change notification over Cloud Pub/Sub (`users.watch` → topic → push endpoint)
+with OIDC verification, watch renewal/`users.stop`, and a poll fallback.
+
+## Fixture gate (no Google account) — the M13 sign-off gate
+
+    bash dev/gate/gmailapi-push-gate.sh
+
+Runs `test/pushgate`: the real sync engine and the real
+`POST /gmail/push/{account}` handler wired to the in-process Gmail API
+fixture, with the account's client token as the `push_allow_plain` shared
+secret. It asserts a verified push surfaces a foreign change well inside the
+2 s budget (measured ~20 ms), a forged push is rejected (`401`) without
+nudging the engine, an account with no verifier is `404`, the watch renews
+before its (shortened) expiration, and `watch = "poll"` never arms a watch
+yet still converges.
+
+**Gate green 2026-10-04** (fixture, `-race` clean): push → visible in ~23 ms,
+watch renewal observed, forged push rejected, poll fallback converged.
+
+## Production Pub/Sub (operator-run)
+
+PLAN §17 has the full production checklist: GCP topic + IAM, OIDC push
+subscription, the `pubsub_topic`/`pubsub_audience`/`pubsub_service_account`
+config, and how to observe a foreign change end to end. This needs a publicly
+reachable HTTPS bridge and is deliberately **not** part of the M13 sign-off
+gate.

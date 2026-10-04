@@ -17,6 +17,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/gmail/v1"
@@ -238,3 +239,26 @@ func (c *Client) listHistory(ctx context.Context, startHistoryID uint64, pageTok
 	}
 	return invoke(ctx, c, CostHistoryList, call)
 }
+
+// watch registers a Cloud Pub/Sub push for the account (M13, FR-S.14). The
+// topic must already exist and grant gmail-api-push@system.gserviceaccount.com
+// publish; the response carries the watch's expiration, which the adapter
+// renews against.
+func (c *Client) watch(ctx context.Context, topic string) (*gmail.WatchResponse, error) {
+	req := &gmail.WatchRequest{TopicName: topic}
+	return invoke(ctx, c, CostWatch, c.svc.Users.Watch(userMe, req).Context(ctx))
+}
+
+// stop cancels the account's push watch (users.stop). It is called on
+// graceful shutdown; Google also expires the watch on its own. It is a
+// best-effort shutdown call, so it paces and classifies but does not retry.
+func (c *Client) stop(ctx context.Context) error {
+	if err := c.pacer.Wait(ctx, CostStop); err != nil {
+		return err
+	}
+	return classify(c.svc.Users.Stop(userMe).Context(ctx).Do())
+}
+
+// now returns the client's current time (the injected clock in tests), so
+// renewal scheduling is deterministic where the clock is faked.
+func (c *Client) now() time.Time { return c.clock.Now() }

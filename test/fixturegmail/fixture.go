@@ -68,6 +68,9 @@ type Options struct {
 	ThrottleFirst int
 	// RetryAfter is the Retry-After header value on a throttle; default 1s.
 	RetryAfter time.Duration
+	// WatchExpiration is the users.watch expiration window; default 7 days.
+	// A short value lets the M13 gate observe renewal re-arming.
+	WatchExpiration time.Duration
 }
 
 // Well-known label ids the fixture seeds and asserts on. Kept local so the
@@ -162,6 +165,11 @@ type Server struct {
 	labelSeq       int
 	draftSeq       int
 	drafts         map[string]string // draft id -> message id
+
+	watchCalls      int
+	watchTopic      string
+	watchExpiration time.Duration
+	stopped         bool
 }
 
 // Start brings a fixture server up on loopback and stops it on test cleanup.
@@ -188,18 +196,22 @@ func StartServer(opts Options) *Server {
 	if opts.RetryAfter == 0 {
 		opts.RetryAfter = time.Second
 	}
+	if opts.WatchExpiration == 0 {
+		opts.WatchExpiration = 7 * 24 * time.Hour
+	}
 	s := &Server{
-		user:          opts.User,
-		token:         opts.Token,
-		tier:          opts.Tier,
-		throttleFirst: opts.ThrottleFirst,
-		retryAfter:    opts.RetryAfter,
-		historyID:     1000,
-		labels:        map[string]*label{},
-		messages:      map[string]*message{},
-		attachments:   map[string][]byte{},
-		drafts:        map[string]string{},
-		throttled:     0,
+		user:            opts.User,
+		token:           opts.Token,
+		tier:            opts.Tier,
+		throttleFirst:   opts.ThrottleFirst,
+		retryAfter:      opts.RetryAfter,
+		watchExpiration: opts.WatchExpiration,
+		historyID:       1000,
+		labels:          map[string]*label{},
+		messages:        map[string]*message{},
+		attachments:     map[string][]byte{},
+		drafts:          map[string]string{},
+		throttled:       0,
 	}
 	s.srv = httptest.NewServer(s)
 	return s
@@ -542,7 +554,7 @@ func (s *Server) routeUser(w http.ResponseWriter, r *http.Request, segs []string
 	case "watch":
 		s.handleWatch(w, r)
 	case "stop":
-		w.WriteHeader(http.StatusNoContent)
+		s.handleStop(w)
 	default:
 		writeError(w, http.StatusNotFound, "Not Found", "notFound")
 	}
@@ -993,14 +1005,51 @@ func (s *Server) handleDrafts(w http.ResponseWriter, r *http.Request, segs []str
 	}
 }
 
-func (s *Server) handleWatch(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TopicName string `json:"topicName"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
 	s.mu.Lock()
+	s.watchCalls++
+	s.watchTopic = body.TopicName
+	s.stopped = false
 	hist := s.historyID
+	exp := s.watchExpiration
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"historyId":  strconv.FormatUint(hist, 10),
-		"expiration": strconv.FormatInt(time.Now().Add(7*24*time.Hour).UnixMilli(), 10),
+		"expiration": strconv.FormatInt(time.Now().Add(exp).UnixMilli(), 10),
 	})
+}
+
+func (s *Server) handleStop(w http.ResponseWriter) {
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// WatchCalls reports how many times users.watch was called (the M13 gate
+// asserts the renewal re-arms the watch).
+func (s *Server) WatchCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.watchCalls
+}
+
+// WatchTopic reports the topic name most recently registered, "" if never.
+func (s *Server) WatchTopic() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.watchTopic
+}
+
+// Stopped reports whether users.stop was called since the last watch.
+func (s *Server) Stopped() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopped
 }
 
 // --- batch endpoint ---

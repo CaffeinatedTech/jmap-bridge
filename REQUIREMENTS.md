@@ -111,9 +111,10 @@ requirements are `NFR-<n>`.
   `[accounts.gmail_api]`; `gmail_api` forbids `[accounts.imap]` and
   `[accounts.smtp]`, requires `address`, requires `[accounts.oauth2]` with
   `provider = "google"` (unless a loopback `endpoint` + static `token` are used
-  for the fixture gate), and requires `pubsub_topic` (+ audience unless
-  `push_allow_plain`) when `watch = "pubsub"`, defaulting `watch` to `pubsub`
-  when a topic and an https `base_url` are present and `poll` otherwise.
+  for the fixture gate), and requires `pubsub_topic`, `pubsub_audience` and
+  `pubsub_service_account` unless `push_allow_plain` when `watch = "pubsub"`,
+  defaulting `watch` to `pubsub` when a topic and an https `base_url` are
+  present and `poll` otherwise.
   `quota_units_per_second`/`backfill_query`/`backfill_limit` are optional and
   bounded. Switching a Google account between backends is a config change; the
   stored OAuth token is reused and no re-consent is needed when the existing
@@ -148,8 +149,8 @@ requirements are `NFR-<n>`.
 - **FR-S.6** `UIDVALIDITY` change on a folder: remap survivors to fresh JMAP ids,
   drop stale mappings, surface the event as destroy/create in `/changes`. No
   client may ever observe an id that has been silently recycled.
-- **FR-S.7** Foreign-change visibility: ≤ 2 s with IDLE healthy; ≤ `sync.interval`
-  otherwise (FR-NFR-2).
+- **FR-S.7** Foreign-change visibility: ≤ 2 s with IDLE healthy (IMAP) or push
+  healthy (Gmail API, FR-S.14); ≤ `sync.interval` otherwise (FR-NFR-2).
 - **FR-S.8** Body hydration is on demand, single-flight per message (concurrent
   requests for the same body wait on one IMAP fetch), cached permanently in the
   blob store, and re-parseable after a cache clear without data loss (bodies can
@@ -185,6 +186,19 @@ requirements are `NFR-<n>`.
   Gmail's `sizeEstimate` until hydration (exact thereafter, D-API-10). Reads are
   paced by a per-account quota token bucket honouring `Retry-After`
   (FR-S.12).
+- **FR-S.14** Gmail API push (D-API-3): with `watch = "pubsub"` the backend
+  registers `users.watch` against the configured `pubsub_topic`, renews the
+  watch before its advertised expiration, and calls `users.stop` on graceful
+  shutdown. Gmail publishes to the topic and the Pub/Sub push subscription
+  POSTs to `POST {base_url}/gmail/push/{account}`; the endpoint authenticates
+  the request (Pub/Sub OIDC verified with `pubsub_audience` and the
+  `pubsub_service_account` email claim, or, when `push_allow_plain` is set, a
+  loopback shared secret equal to the account's client token) and **fails
+  closed** on any other request. A verified push is only a hint: it wakes the
+  engine, which reads `history.list` from its own saved cursor, so a duplicate,
+  out-of-order or forged-but-verified hint cannot inject state. With
+  `watch = "poll"` no topic is registered and the engine polls `history.list`
+  on `sync.interval`; FR-S.7's ≤ 2 s budget is a push-mode guarantee.
 
 ## 4. FR-M — Mail
 
@@ -465,6 +479,15 @@ requirements are `NFR-<n>`.
   shared, per Google's API Services User Data Policy). Neither page carries
   account information, and an unauthenticated request to an unknown path still
   returns 404.
+- **FR-D.14** Gmail API mode deployment additions are documented end to end:
+  enabling the Gmail API on the OAuth client's Cloud project, creating a
+  Pub/Sub topic with `roles/pubsub.publisher` for
+  `gmail-api-push@system.gserviceaccount.com`, creating a push subscription to
+  `https://<base_url>/gmail/push/<account>` with OIDC (service account +
+  audience), the `pubsub_service_account`/`pubsub_audience` config, and the
+  `watch = "poll"` alternative for self-hosted deployments without a public
+  HTTPS origin. PLAN §17 records how to exercise push against a production
+  bridge.
 
 ## 9. Non-functional requirements
 
@@ -474,7 +497,8 @@ requirements are `NFR-<n>`.
   ≥ 15 messages/s per account under normal RTT. Metadata footprint ≤ ~5 KB per
   message.
 - **NFR-2 Live latency:** foreign changes visible to a connected client within
-  2 s (IDLE healthy) and within `sync.interval` otherwise.
+  2 s (IDLE healthy on IMAP, or push healthy on Gmail API per FR-S.14) and
+  within `sync.interval` otherwise.
 - **NFR-3 Storage policy:** the metadata cache is bounded and documented; body
   cache grows only with messages actually read (or within `prefetch_window`) and
   the growth policy is documented in README; no message content in logs/DB rows
@@ -524,6 +548,9 @@ requirements are `NFR-<n>`.
 | FR-M.19, FR-J.9–.10, FR-D.2–.12, NFR-3–.7, NFR-9–.10 | M7 | documented install works; JMAP-TestSuite subset for the implemented surface green (deliberate gaps enumerated in PLAN §12) |
 | FR-A.13, FR-S.13, FR-M.1–.8 | M10 | Gmail API read path: jmap-tui browses a fixture Gmail account in API mode; live read-only Gmail gate (roles/labels/counts/threads correct; a web-UI flag change appears) |
 | FR-M.9–.13, FR-M.20 | M11 | Gmail API write path: fixture-backed `Email/set`/destroy/draft/`Mailbox/set` tests; live write gate on a throwaway account (label both ways, archive, star, move, draft, destroy; `onDestroyRemoveEmails=true` refused) |
+| FR-M.14–.17 | M12 | Gmail API submission: fixture-backed compose/send/patch tests; live self-send gate (exactly one Sent copy + delivery, no draft, ambiguous-send reconciliation) |
+| FR-S.14, NFR-2 | M13 | Gmail API push (Pub/Sub): fixture end-to-end foreign change ≤ 2 s, watch renewal across an expiry, forged push rejected, poll fallback |
+| FR-D.14, NFR-3–.7 | M14 | API-mode deployment docs; packaging/conformance re-run with API mode included |
 
 *(If PLAN.md's traceability column ever disagrees with this table, this table
 wins. This table maps requirements to milestones only — completion state is

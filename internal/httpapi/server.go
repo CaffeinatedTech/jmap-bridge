@@ -6,6 +6,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -70,6 +71,18 @@ type Server struct {
 
 	// metrics, when non-nil, is handed to the JMAP dispatcher (FR-D.6).
 	metrics *metrics.Registry
+
+	// gmailPush maps an account id to its Pub/Sub push authenticator
+	// (FR-S.14); accounts absent from the map have no push endpoint
+	// (404). nil disables the endpoint entirely.
+	gmailPush map[string]PushVerifier
+}
+
+// PushVerifier authenticates one Gmail Pub/Sub push request (FR-S.14). It is
+// the seam between the HTTP layer and the Gmail-specific OIDC/shared-secret
+// verification; tests substitute a fake.
+type PushVerifier interface {
+	Verify(ctx context.Context, r *http.Request) error
 }
 
 // Option configures optional Server collaborators.
@@ -82,6 +95,18 @@ func WithMetrics(reg *metrics.Registry) Option {
 	return func(s *Server) {
 		if reg != nil {
 			s.metrics = reg
+		}
+	}
+}
+
+// WithGmailPush mounts the Gmail Pub/Sub push endpoint (FR-S.14): the map
+// names, per gmail_api account, how a push is authenticated. Accounts absent
+// from the map have no push endpoint, and an empty map leaves it unregistered
+// behind a 404.
+func WithGmailPush(verifiers map[string]PushVerifier) Option {
+	return func(s *Server) {
+		if len(verifiers) > 0 {
+			s.gmailPush = verifiers
 		}
 	}
 }
@@ -135,6 +160,10 @@ func New(cfg *config.Config, tokens *auth.Tokens, store jmapapi.Store,
 	// policy. Both are on this origin and neither carries account data.
 	s.mux.HandleFunc("GET /{$}", s.handleHome)
 	s.mux.HandleFunc("GET /privacy", s.handlePrivacy)
+	// FR-S.14: the Gmail Pub/Sub push endpoint. It is deliberately not
+	// behind the client token (Pub/Sub cannot carry it) — its own verifier
+	// authenticates the request; the handler 404s for accounts without one.
+	s.mux.HandleFunc("POST /gmail/push/{account}", s.handleGmailPush)
 	return s
 }
 
