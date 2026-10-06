@@ -16,21 +16,23 @@ import (
 // behind mailbackend.Backend (M8); the engine orchestrates passes and
 // commits what the backend reported.
 
+// defaultBackfillBudget caps how long one pass spends on incomplete
+// initial backfills (PLAN §15 backfill steering). It is generous enough
+// for a couple of provider batches yet short enough that a cold mailbox
+// keeps syncing new mail and reaches readiness promptly.
+const defaultBackfillBudget = 30 * time.Second
+
 // discoverLocked is the work pass's discovery (FR-S.1).
 func (e *Engine) discoverLocked(ctx context.Context) (map[string]mb.FolderStatus, error) {
-	return e.discoverWith(ctx, e.work, true)
+	return e.discoverWith(ctx, e.work)
 }
 
 // discoverWith lists folders with STATUS on backend and reconciles them
 // into the store. It returns each folder's fresh status and is also
 // where UIDVALIDITY resets surface (FR-S.6): SyncFolders names the
-// folders it reset and their cursors start over.
-//
-// record marks whether this call may update the engine's folder list —
-// the write path refreshes roles after Mailbox/set from its own
-// connection (FR-M.12) without touching state the work pass owns under
-// workMu.
-func (e *Engine) discoverWith(ctx context.Context, backend mb.Backend, record bool) (map[string]mb.FolderStatus, error) {
+// folders it reset and their cursors start over. The write path calls it
+// from its own connection after Mailbox/set to re-detect roles (FR-M.12).
+func (e *Engine) discoverWith(ctx context.Context, backend mb.Backend) (map[string]mb.FolderStatus, error) {
 	list, err := backend.Folders(ctx)
 	if err != nil {
 		return nil, err
@@ -75,15 +77,6 @@ func (e *Engine) discoverWith(ctx context.Context, backend mb.Backend, record bo
 		}
 		e.log.Info("sync: uidvalidity changed, folder reset", "folder", name)
 	}
-	if record {
-		// The pass order covers selectable folders only; a NoSelect
-		// container has no status entry, so a pass can never target it.
-		names := make([]string, 0, len(statuses))
-		for name := range statuses {
-			names = append(names, name)
-		}
-		e.folders = names
-	}
 	if idleCandidate != "" {
 		e.setCurrentIdleFolder(idleCandidate)
 	}
@@ -91,8 +84,9 @@ func (e *Engine) discoverWith(ctx context.Context, backend mb.Backend, record bo
 }
 
 // syncFolderLocked runs one folder's pass: backfill while the cursor
-// says so, incremental afterwards.
-func (e *Engine) syncFolderLocked(ctx context.Context, folder string, status mb.FolderStatus) error {
+// says so, incremental afterwards. deadline bounds how long a backfilled
+// folder may keep walking before yielding to the next pass.
+func (e *Engine) syncFolderLocked(ctx context.Context, folder string, status mb.FolderStatus, deadline time.Time) error {
 	fs, err := e.st.FolderSync(ctx, e.cfg.Account, folder)
 	if err != nil {
 		return err
@@ -109,7 +103,7 @@ func (e *Engine) syncFolderLocked(ctx context.Context, folder string, status mb.
 		}
 	}
 	if !fs.BackfillDone {
-		return e.backfillLocked(ctx, folder, status, fs)
+		return e.backfillLocked(ctx, folder, status, fs, deadline)
 	}
 	return e.incrementalLocked(ctx, folder, status, fs)
 }
@@ -117,8 +111,11 @@ func (e *Engine) syncFolderLocked(ctx context.Context, folder string, status mb.
 // backfillLocked ingests the folder's headers in resumable batches
 // (FR-S.3): the backend walks (by uid, or by sequence on sparse-uid
 // servers), the engine commits each batch and saves the cursor so a
-// restart resumes where the store says it stopped.
-func (e *Engine) backfillLocked(ctx context.Context, folder string, status mb.FolderStatus, fs store.FolderSync) error {
+// restart resumes where the store says it stopped. It stops early once
+// deadline has passed and at least one batch has run, so a huge cold
+// container cannot hold the whole pass (and every later folder) hostage;
+// the cursor is already saved, so the next pass resumes.
+func (e *Engine) backfillLocked(ctx context.Context, folder string, status mb.FolderStatus, fs store.FolderSync, deadline time.Time) error {
 	c := mb.Cursor{
 		Version: status.Version, Next: status.Next, ModSeq: fs.HighestModSeq,
 		Messages: status.Messages, BackfillMark: fs.BackfillUID,
@@ -152,6 +149,13 @@ func (e *Engine) backfillLocked(ctx context.Context, folder string, status mb.Fo
 		e.log.Debug("sync: backfill batch", "folder", folder, "mark", c.BackfillMark)
 		if c.BackfillDone {
 			break
+		}
+		if time.Now().After(deadline) {
+			// Yield mid-walk; the cursor above is already committed, so
+			// the next pass resumes here (PLAN §15 backfill steering).
+			e.log.Debug("sync: backfill yielded for pass",
+				"folder", folder, "mark", c.BackfillMark, "backend", e.work.Kind())
+			return nil
 		}
 		if labelPace {
 			// FR-S.12: 500-header round trips at full speed are how a

@@ -923,7 +923,7 @@ func (e *Engine) isDescendant(ctx context.Context, account, candidate, ancestor 
 // (FR-M.12) and where a deleted folder is reconciled away.
 func (e *Engine) refreshFolders(ctx context.Context) error {
 	return e.wr.withBackend(ctx, func(b mb.Backend) error {
-		_, err := e.discoverWith(ctx, b, false)
+		_, err := e.discoverWith(ctx, b)
 		return err
 	})
 }

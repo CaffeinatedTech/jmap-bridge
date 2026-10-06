@@ -16,6 +16,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +44,12 @@ type Config struct {
 	PrefetchWindow time.Duration  // 0 disables prefetch (FR-S.9)
 	Concurrency    int            // hydration workers (FR-S.9 rate limit)
 	SearchBackfill bool           // hydrate text-search candidates in the background (FR-X.5)
+	// BackfillBudget caps how long one pass spends walking containers
+	// whose initial backfill is incomplete, so a cold mailbox cannot
+	// starve incremental sync (0 selects defaultBackfillBudget). The
+	// cursor is saved after every batch, so a pass that yields mid-walk
+	// simply resumes on the next one.
+	BackfillBudget time.Duration
 	// LogHydration logs one line per body hydration at info level (support
 	// switch; off by default).
 	LogHydration bool
@@ -67,7 +74,6 @@ type Engine struct {
 	// workMu serialises every use of the work connection.
 	workMu    sync.Mutex
 	work      mb.Backend
-	folders   []string // discovery order, refreshed each pass
 	connected bool
 
 	// capsMu guards caps, the capability profile of the work session,
@@ -186,6 +192,9 @@ func New(cfg Config, st *store.Store, log *slog.Logger) *Engine {
 	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = 5 * time.Minute
+	}
+	if cfg.BackfillBudget <= 0 {
+		cfg.BackfillBudget = defaultBackfillBudget
 	}
 	e := &Engine{
 		cfg:          cfg,
@@ -560,11 +569,16 @@ func (e *Engine) doPass(ctx context.Context, hint string) error {
 	if err != nil {
 		return err
 	}
-	order := e.folders
-	if hint != "" && contains(order, hint) {
-		order = append([]string{hint}, filter(order, hint)...)
-	}
+	// Order the pass by user intent rather than Go's map order (PLAN §15
+	// backfill steering): the notified folder, then INBOX, then every
+	// container whose backfill is already done (incremental), and only
+	// then the still-backfilling containers. A cold label backfill can no
+	// longer starve the incremental sync of new mail.
+	order, backfilling := e.passOrder(ctx, hint, statuses)
+	deadline := start.Add(e.cfg.BackfillBudget)
+	inbox := e.currentIdleFolder()
 	synced := 0
+	didBackfill := false
 	for _, name := range order {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -573,9 +587,23 @@ func (e *Engine) doPass(ctx context.Context, hint string) error {
 		if !ok {
 			continue
 		}
+		// The budget bounds the pass's backfill work, but never at the
+		// expense of INBOX: new mail must reach the cache every pass even
+		// when the inbox's own backfill is still incomplete.
+		if backfilling[name] && name != inbox {
+			// Once the budget is spent and at least one batch has run,
+			// leave the rest of the cold walk to the next pass (the
+			// cursor is saved).
+			if didBackfill && time.Now().After(deadline) {
+				e.log.Debug("sync: backfill budget spent for pass",
+					"account", e.cfg.Account)
+				break
+			}
+			didBackfill = true
+		}
 		// A folder-level failure is logged and retried next pass; only
 		// discovery failures (connection trouble) unwind to the run loop.
-		if err := e.syncFolderLocked(ctx, name, st); err != nil {
+		if err := e.syncFolderLocked(ctx, name, st, deadline); err != nil {
 			e.log.Warn("sync: folder pass failed", "folder", name, "err", err)
 			continue
 		}
@@ -590,6 +618,51 @@ func (e *Engine) doPass(ctx context.Context, hint string) error {
 		"account", e.cfg.Account, "folders", synced, "took", time.Since(start).String())
 	e.prefetch(ctx)
 	return nil
+}
+
+// passOrder returns the folders to visit for one pass and the subset
+// whose initial backfill is still incomplete. The order is the notified
+// folder (hint), then the inbox, then every already-backfilled
+// (incremental) container, then the still-backfilling containers —
+// deterministic within each group. This is the PLAN §15 "backfill
+// steering" item: a cold label can no longer sit ahead of new-mail sync,
+// and INBOX incremental runs first every pass.
+func (e *Engine) passOrder(ctx context.Context, hint string, statuses map[string]mb.FolderStatus) ([]string, map[string]bool) {
+	var ahead, back []string
+	backfilling := make(map[string]bool, len(statuses))
+	for name := range statuses {
+		fs, err := e.st.FolderSync(ctx, e.cfg.Account, name)
+		if err == nil && fs.BackfillDone {
+			ahead = append(ahead, name)
+			continue
+		}
+		back = append(back, name)
+		backfilling[name] = true
+	}
+	sort.Strings(ahead)
+	sort.Strings(back)
+
+	seen := make(map[string]bool, len(statuses))
+	order := make([]string, 0, len(statuses))
+	add := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		if _, ok := statuses[name]; !ok {
+			return
+		}
+		seen[name] = true
+		order = append(order, name)
+	}
+	add(hint)
+	add(e.currentIdleFolder())
+	for _, name := range ahead {
+		add(name)
+	}
+	for _, name := range back {
+		add(name)
+	}
+	return order, backfilling
 }
 
 // IdleWatching reports whether the idle connection is currently inside
@@ -641,14 +714,4 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
-}
-
-func filter(list []string, skip string) []string {
-	out := make([]string, 0, len(list))
-	for _, v := range list {
-		if v != skip {
-			out = append(out, v)
-		}
-	}
-	return out
 }

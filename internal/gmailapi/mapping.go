@@ -21,6 +21,11 @@ const (
 	LabelStarred   = "STARRED"
 	LabelUnread    = "UNREAD"
 	LabelChat      = "CHAT"
+	// labelCategoryPrefix marks Gmail's tab labels (CATEGORY_PERSONAL,
+	// _SOCIAL, _PROMOTIONS, _UPDATES, _FORUMS). Like IMPORTANT/STARRED/
+	// UNREAD they are hidden state, not places a client manages, so they
+	// are not surfaced as JMAP mailboxes (GMAIL_API_PLAN §6.1).
+	labelCategoryPrefix = "CATEGORY_"
 )
 
 // JMAP keywords API mode can surface and write (D-API-5). Everything else is

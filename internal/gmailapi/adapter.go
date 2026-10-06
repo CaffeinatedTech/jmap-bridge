@@ -21,6 +21,15 @@ import (
 // handled by a full resync inside the adapter instead.
 const apiUIDValidity uint32 = 1
 
+// apiBackfillBatch caps how many messages one Backfill batch lists and
+// fetches. A messages.get costs 20 quota units, so a 500-message batch is
+// ~10 000 units — minutes at the account's pace. Bounding it keeps a
+// single backfill batch short enough that the engine's per-pass backfill
+// budget (PLAN §15 backfill steering) yields promptly and incremental
+// syncing is never starved. GMAIL_API_PLAN §6.2 leaves the exact batch to
+// the adapter.
+const apiBackfillBatch = 50
+
 // allMailName is the synthetic archive mailbox (D-API-11): the API does
 // not expose All Mail as a label, but every message belongs to it.
 const allMailName = "All Mail"
@@ -225,6 +234,12 @@ func mapLabel(l *gmail.Label) (name, role string, ok bool) {
 	case LabelImportant, LabelStarred, LabelUnread, LabelChat:
 		return "", "", false
 	}
+	if strings.HasPrefix(l.Id, labelCategoryPrefix) {
+		// Gmail's tab labels are hidden state, not mailboxes: exposing
+		// them multiplies the cold backfill by every category a message
+		// belongs to for no client-visible benefit.
+		return "", "", false
+	}
 	if l.Name == "" {
 		return l.Id, "", true
 	}
@@ -258,6 +273,9 @@ func (b *Backend) FolderStatus(ctx context.Context, container string) (mb.Folder
 func (b *Backend) Backfill(ctx context.Context, container string, c mb.Cursor, batch int, _ mb.Hooks) ([]mb.Header, mb.Cursor, error) {
 	if batch <= 0 {
 		batch = 500
+	}
+	if batch > apiBackfillBatch {
+		batch = apiBackfillBatch
 	}
 	st := b.bf[container]
 	if st == nil {

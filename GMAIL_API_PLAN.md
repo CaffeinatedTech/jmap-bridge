@@ -344,7 +344,7 @@ CREATE TABLE gmail_drafts (
 | `IMPORTANT` | keyword only (`$important`) | — | hidden state, not a place |
 | `STARRED` | keyword only (`$flagged`) | — | hidden state |
 | `UNREAD` | keyword only (`$seen` inverse) | — | hidden state |
-| `CATEGORY_*` | yes | — | inbox tabs are real label membership |
+| `CATEGORY_*` | no | — | tab labels are hidden state, not mailboxes (amended 2026-10-06: exposing them multiplied the cold backfill by every category a message carries and starved new-mail sync) |
 | user labels | yes | — | nested names → `parentId` hierarchy |
 | `CHAT` | no | — | not mail |
 | *(synthetic)* `ALL` | yes | `archive` | implicit membership, `may_remove_items=false` (D-20/D-API-11) |
@@ -369,6 +369,13 @@ headers, `snippet` and `sizeEstimate` **without a body** — exactly the
   skips ids already in `native_ids`. Listing is 5 units/page and fetches no
   bodies, so a re-walk is cheap; exact cursor durability is not worth a guess
   about token lifetime.
+- Bounding (2026-10-06): one `Backfill` batch lists/fetches at most
+  `apiBackfillBatch = 50` messages (a `messages.get` is 20 units, so 500 was
+  minutes per call), and the engine caps one pass's total backfill work
+  (`sync.Config.BackfillBudget`, default 30 s): the pass yields mid-walk after
+  its first batch with the cursor saved. Together with the intent-ordered pass
+  (`doPass`: INBOX → incremental → backfilling), a cold label can no longer
+  block new-mail sync or `/readyz`. The cursor is advanced only after commit.
 - Dedupe: Gmail has one message object with N labels, so there is no
   cross-folder duplicate problem — the M4 lossless-dedupe machinery is not
   needed and the API adapter never emits duplicate copies for one message.
