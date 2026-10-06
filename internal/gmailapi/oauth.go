@@ -18,9 +18,11 @@ import (
 // with context.Background(). That is safe because Manager.AccessToken serves its
 // in-memory cache without a round trip while the token is fresh; a refresh
 // happens on the manager's own schedule, and the engine's caller context still
-// bounds the HTTP request that triggered it. The returned token is deliberately
-// marked unexpired-but-not-valid (no Expiry) so oauth2 consults the manager on
-// every request rather than caching a token the manager might rotate.
+// bounds the HTTP request that triggered it. The returned token carries no
+// Expiry, so it is only safe when the client is built on a bare
+// oauth2.Transport (see Client.New): wrapping it in oauth2.NewClient's
+// ReuseTokenSource would treat it as valid forever and cache it, hiding the
+// manager's refreshes from the wire.
 func TokenSourceFromManager(m *oauth.Manager) oauth2.TokenSource {
 	return managerSource{m: m}
 }

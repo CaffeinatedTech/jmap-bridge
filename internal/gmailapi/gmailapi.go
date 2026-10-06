@@ -81,7 +81,15 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 		if opts.TokenSource == nil {
 			return nil, errors.New("gmailapi: Options needs TokenSource or HTTPClient")
 		}
-		hc = oauth2.NewClient(ctx, opts.TokenSource)
+		// Deliberately not oauth2.NewClient: that wraps the source in a
+		// ReuseTokenSource which caches the first bearer. Our source returns a
+		// token with no Expiry, which oauth2.Token.Valid treats as valid
+		// forever, so the cache pinned a stale token past the point Google
+		// rejected it and a forced refresh (Reauthorize) never reached the
+		// wire — the account stayed wedged on 401s until restart. A bare
+		// oauth2.Transport consults the manager on every request, so refresh
+		// is governed by internal/oauth and the 401 retry sees the new token.
+		hc = &http.Client{Transport: &oauth2.Transport{Source: opts.TokenSource}}
 	}
 	clientOpts := []option.ClientOption{option.WithHTTPClient(hc)}
 	if opts.Endpoint != "" {
